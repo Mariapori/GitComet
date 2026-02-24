@@ -23,7 +23,7 @@ impl GitGpuiView {
                         let details_width: f32 = this.details_width.round().into();
 
                         let (history_show_author, history_show_date, history_show_sha) =
-                            this.main_pane.read(cx).history_visible_column_preferences();
+                            this.main_pane.read(cx).history_visible_column_preferences(cx);
 
                         let settings = session::UiSettings {
                             window_width,

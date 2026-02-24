@@ -20,56 +20,12 @@ impl ActionBarView {
         if let Some(repo_id) = state.active_repo
             && let Some(repo) = state.repos.iter().find(|r| r.id == repo_id)
         {
-            repo.spec.workdir.hash(&mut hasher);
-            match &repo.open {
-                Loadable::NotLoaded => 0u8.hash(&mut hasher),
-                Loadable::Loading => 1u8.hash(&mut hasher),
-                Loadable::Ready(()) => 2u8.hash(&mut hasher),
-                Loadable::Error(err) => {
-                    3u8.hash(&mut hasher);
-                    err.hash(&mut hasher);
-                }
-            }
+            repo.open_rev.hash(&mut hasher);
             repo.head_branch_rev.hash(&mut hasher);
-            match &repo.head_branch {
-                Loadable::NotLoaded => 0u8.hash(&mut hasher),
-                Loadable::Loading => 1u8.hash(&mut hasher),
-                Loadable::Error(err) => {
-                    2u8.hash(&mut hasher);
-                    err.hash(&mut hasher);
-                }
-                Loadable::Ready(name) => {
-                    3u8.hash(&mut hasher);
-                    name.hash(&mut hasher);
-                }
-            }
-
-            match &repo.upstream_divergence {
-                Loadable::NotLoaded => 0u8.hash(&mut hasher),
-                Loadable::Loading => 1u8.hash(&mut hasher),
-                Loadable::Error(err) => {
-                    2u8.hash(&mut hasher);
-                    err.hash(&mut hasher);
-                }
-                Loadable::Ready(None) => 3u8.hash(&mut hasher),
-                Loadable::Ready(Some(div)) => {
-                    4u8.hash(&mut hasher);
-                    div.behind.hash(&mut hasher);
-                    div.ahead.hash(&mut hasher);
-                }
-            }
-
-            repo.pull_in_flight.hash(&mut hasher);
-            repo.push_in_flight.hash(&mut hasher);
+            repo.upstream_divergence_rev.hash(&mut hasher);
+            repo.ops_rev.hash(&mut hasher);
+            repo.status_rev.hash(&mut hasher);
             repo.loads_in_flight.any_in_flight().hash(&mut hasher);
-            repo.local_actions_in_flight.hash(&mut hasher);
-            repo.commit_in_flight.hash(&mut hasher);
-
-            let can_stash = match &repo.status {
-                Loadable::Ready(status) => !status.staged.is_empty() || !status.unstaged.is_empty(),
-                _ => false,
-            };
-            can_stash.hash(&mut hasher);
         }
 
         hasher.finish()
@@ -205,29 +161,9 @@ impl Render for ActionBarView {
         let active_bg = with_alpha(theme.colors.text, if theme.is_dark { 0.10 } else { 0.07 });
         let icon_primary = theme.colors.accent;
         let icon_muted = with_alpha(theme.colors.accent, if theme.is_dark { 0.72 } else { 0.82 });
-        let icon = |path: &'static str, color: gpui::Rgba| {
-            gpui::svg()
-                .path(path)
-                .w(px(14.0))
-                .h(px(14.0))
-                .text_color(color)
-        };
-        let spinner = |id: (&'static str, u64), color: gpui::Rgba| {
-            gpui::svg()
-                .path("icons/spinner.svg")
-                .w(px(14.0))
-                .h(px(14.0))
-                .text_color(color)
-                .with_animation(
-                    id,
-                    Animation::new(std::time::Duration::from_millis(850)).repeat(),
-                    |svg, delta| {
-                        svg.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            delta * std::f32::consts::TAU,
-                        )))
-                    },
-                )
-        };
+        let icon = |path: &'static str, color: gpui::Rgba| svg_icon(path, color, px(14.0));
+        let spinner =
+            |id: (&'static str, u64), color: gpui::Rgba| svg_spinner(id, color, px(14.0));
         let count_badge = |count: usize, color: gpui::Rgba| {
             div()
                 .text_xs()

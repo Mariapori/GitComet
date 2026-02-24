@@ -22,29 +22,10 @@ impl SidebarPaneView {
             .is_some_and(|r| r.worktrees_in_flight > 0 || matches!(r.worktrees, Loadable::Loading));
 
         let svg_icon = |path: &'static str, color: gpui::Rgba, size_px: f32| {
-            gpui::svg()
-                .path(path)
-                .w(px(size_px))
-                .h(px(size_px))
-                .text_color(color)
-                .flex_shrink_0()
+            super::super::icons::svg_icon(path, color, px(size_px))
         };
         let svg_spinner = |id: (&'static str, u64), color: gpui::Rgba, size_px: f32| {
-            gpui::svg()
-                .path("icons/spinner.svg")
-                .w(px(size_px))
-                .h(px(size_px))
-                .text_color(color)
-                .flex_shrink_0()
-                .with_animation(
-                    id,
-                    Animation::new(Duration::from_millis(850)).repeat(),
-                    |svg, delta| {
-                        svg.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            delta * std::f32::consts::TAU,
-                        )))
-                    },
-                )
+            super::super::icons::svg_spinner(id, color, px(size_px))
         };
 
         fn indent_px(depth: usize) -> Pixels {
@@ -777,7 +758,7 @@ impl SidebarPaneView {
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme.colors.text)
-                        .child(svg_icon("icons/folder.svg", icon_primary, 14.0).flex_shrink_0())
+                        .child(svg_icon("icons/folder.svg", icon_primary, 14.0))
                         .child(
                             div()
                                 .flex_1()
@@ -831,7 +812,7 @@ impl SidebarPaneView {
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(theme.colors.text_muted)
-                    .child(svg_icon("icons/folder.svg", icon_primary, 14.0).flex_shrink_0())
+                    .child(svg_icon("icons/folder.svg", icon_primary, 14.0))
                     .child(label)
                     .into_any_element(),
                 BranchSidebarRow::Branch {

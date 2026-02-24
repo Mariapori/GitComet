@@ -118,7 +118,7 @@ pub(super) fn refresh_primary_effects(repo_state: &mut RepoState) -> Vec<Effect>
     {
         // Block pagination while a refresh log load is in flight, to avoid concurrent LogLoaded
         // merges with different cursors.
-        repo_state.log_loading_more = false;
+        repo_state.set_log_loading_more(false);
         effects.push(Effect::LoadLog {
             repo_id,
             scope: repo_state.history_scope,
@@ -158,7 +158,7 @@ pub(super) fn refresh_full_effects(repo_state: &mut RepoState) -> Vec<Effect> {
         .loads_in_flight
         .request_log(repo_state.history_scope, 200, None)
     {
-        repo_state.log_loading_more = false;
+        repo_state.set_log_loading_more(false);
         effects.push(Effect::LoadLog {
             repo_id,
             scope: repo_state.history_scope,

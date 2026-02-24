@@ -185,35 +185,42 @@ pub struct RepoState {
     pub head_branch: Loadable<String>,
     pub head_branch_rev: u64,
     pub upstream_divergence: Loadable<Option<UpstreamDivergence>>,
-    pub branches: Loadable<Vec<Branch>>,
+    pub upstream_divergence_rev: u64,
+    pub branches: Loadable<Arc<Vec<Branch>>>,
     pub branches_rev: u64,
-    pub tags: Loadable<Vec<Tag>>,
+    pub tags: Loadable<Arc<Vec<Tag>>>,
     pub tags_rev: u64,
-    pub remotes: Loadable<Vec<Remote>>,
+    pub remotes: Loadable<Arc<Vec<Remote>>>,
     pub remotes_rev: u64,
-    pub remote_branches: Loadable<Vec<RemoteBranch>>,
+    pub remote_branches: Loadable<Arc<Vec<RemoteBranch>>>,
     pub remote_branches_rev: u64,
     pub status: Loadable<Shared<RepoStatus>>,
+    pub status_rev: u64,
     pub log: Loadable<Shared<LogPage>>,
     pub log_loading_more: bool,
-    pub stashes: Loadable<Vec<StashEntry>>,
+    pub log_rev: u64,
+    pub stashes: Loadable<Arc<Vec<StashEntry>>>,
     pub stashes_rev: u64,
     pub reflog: Loadable<Vec<ReflogEntry>>,
     pub rebase_in_progress: Loadable<bool>,
     pub merge_commit_message: Loadable<Option<String>>,
+    pub merge_message_rev: u64,
     pub file_history_path: Option<PathBuf>,
     pub file_history: Loadable<Shared<LogPage>>,
     pub blame_path: Option<PathBuf>,
     pub blame_rev: Option<String>,
     pub blame: Loadable<Shared<Vec<BlameLine>>>,
-    pub worktrees: Loadable<Vec<Worktree>>,
+    pub worktrees: Loadable<Arc<Vec<Worktree>>>,
     pub worktrees_rev: u64,
-    pub submodules: Loadable<Vec<Submodule>>,
+    pub submodules: Loadable<Arc<Vec<Submodule>>>,
     pub submodules_rev: u64,
 
     pub selected_commit: Option<CommitId>,
+    pub selected_commit_rev: u64,
     pub commit_details: Loadable<Shared<CommitDetails>>,
+    pub commit_details_rev: u64,
     pub diff_target: Option<DiffTarget>,
+    pub diff_state_rev: u64,
     pub diff_rev: u64,
     pub diff: Loadable<Shared<Diff>>,
     pub diff_file_rev: u64,
@@ -222,6 +229,10 @@ pub struct RepoState {
 
     pub conflict_file_path: Option<PathBuf>,
     pub conflict_file: Loadable<Option<ConflictFile>>,
+    pub conflict_rev: u64,
+
+    pub open_rev: u64,
+    pub ops_rev: u64,
 
     pub last_error: Option<String>,
     pub diagnostics: Vec<DiagnosticEntry>,
@@ -246,6 +257,7 @@ impl RepoState {
             head_branch: Loadable::NotLoaded,
             head_branch_rev: 0,
             upstream_divergence: Loadable::NotLoaded,
+            upstream_divergence_rev: 0,
             branches: Loadable::NotLoaded,
             branches_rev: 0,
             tags: Loadable::NotLoaded,
@@ -255,13 +267,16 @@ impl RepoState {
             remote_branches: Loadable::NotLoaded,
             remote_branches_rev: 0,
             status: Loadable::NotLoaded,
+            status_rev: 0,
             log: Loadable::NotLoaded,
             log_loading_more: false,
+            log_rev: 0,
             stashes: Loadable::NotLoaded,
             stashes_rev: 0,
             reflog: Loadable::NotLoaded,
             rebase_in_progress: Loadable::NotLoaded,
             merge_commit_message: Loadable::NotLoaded,
+            merge_message_rev: 0,
             file_history_path: None,
             file_history: Loadable::NotLoaded,
             blame_path: None,
@@ -272,8 +287,11 @@ impl RepoState {
             submodules: Loadable::NotLoaded,
             submodules_rev: 0,
             selected_commit: None,
+            selected_commit_rev: 0,
             commit_details: Loadable::NotLoaded,
+            commit_details_rev: 0,
             diff_target: None,
+            diff_state_rev: 0,
             diff_rev: 0,
             diff: Loadable::NotLoaded,
             diff_file_rev: 0,
@@ -281,6 +299,9 @@ impl RepoState {
             diff_file_image: Loadable::NotLoaded,
             conflict_file_path: None,
             conflict_file: Loadable::NotLoaded,
+            conflict_rev: 0,
+            open_rev: 0,
+            ops_rev: 0,
             last_error: None,
             diagnostics: Vec::new(),
             command_log: Vec::new(),
@@ -296,6 +317,7 @@ impl RepoState {
     }
 
     pub(crate) fn set_branches(&mut self, branches: Loadable<Vec<Branch>>) {
+        let branches = loadable_into_arc(branches);
         if self.branches == branches {
             return;
         }
@@ -304,6 +326,7 @@ impl RepoState {
     }
 
     pub(crate) fn set_tags(&mut self, tags: Loadable<Vec<Tag>>) {
+        let tags = loadable_into_arc(tags);
         if self.tags == tags {
             return;
         }
@@ -312,6 +335,7 @@ impl RepoState {
     }
 
     pub(crate) fn set_remotes(&mut self, remotes: Loadable<Vec<Remote>>) {
+        let remotes = loadable_into_arc(remotes);
         if self.remotes == remotes {
             return;
         }
@@ -320,6 +344,7 @@ impl RepoState {
     }
 
     pub(crate) fn set_remote_branches(&mut self, remote_branches: Loadable<Vec<RemoteBranch>>) {
+        let remote_branches = loadable_into_arc(remote_branches);
         if self.remote_branches == remote_branches {
             return;
         }
@@ -328,6 +353,7 @@ impl RepoState {
     }
 
     pub(crate) fn set_stashes(&mut self, stashes: Loadable<Vec<StashEntry>>) {
+        let stashes = loadable_into_arc(stashes);
         if self.stashes == stashes {
             return;
         }
@@ -336,6 +362,7 @@ impl RepoState {
     }
 
     pub(crate) fn set_worktrees(&mut self, worktrees: Loadable<Vec<Worktree>>) {
+        let worktrees = loadable_into_arc(worktrees);
         if self.worktrees == worktrees {
             return;
         }
@@ -344,11 +371,89 @@ impl RepoState {
     }
 
     pub(crate) fn set_submodules(&mut self, submodules: Loadable<Vec<Submodule>>) {
+        let submodules = loadable_into_arc(submodules);
         if self.submodules == submodules {
             return;
         }
         self.submodules = submodules;
         self.submodules_rev = self.submodules_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_status(&mut self, status: Loadable<Shared<RepoStatus>>) {
+        self.status = status;
+        self.status_rev = self.status_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_log(&mut self, log: Loadable<Shared<LogPage>>) {
+        self.log = log;
+        self.log_rev = self.log_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_log_loading_more(&mut self, v: bool) {
+        self.log_loading_more = v;
+        self.log_rev = self.log_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_log_scope(&mut self, scope: LogScope) {
+        self.history_scope = scope;
+        self.log_rev = self.log_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_selected_commit(&mut self, v: Option<CommitId>) {
+        self.selected_commit = v;
+        self.selected_commit_rev = self.selected_commit_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_commit_details(&mut self, v: Loadable<Shared<CommitDetails>>) {
+        self.commit_details = v;
+        self.commit_details_rev = self.commit_details_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_merge_commit_message(&mut self, v: Loadable<Option<String>>) {
+        self.merge_commit_message = v;
+        self.merge_message_rev = self.merge_message_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_rebase_in_progress(&mut self, v: Loadable<bool>) {
+        self.rebase_in_progress = v;
+        self.merge_message_rev = self.merge_message_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_upstream_divergence(&mut self, v: Loadable<Option<UpstreamDivergence>>) {
+        self.upstream_divergence = v;
+        self.upstream_divergence_rev = self.upstream_divergence_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_open(&mut self, v: Loadable<()>) {
+        self.open = v;
+        self.open_rev = self.open_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_conflict_file_path(&mut self, v: Option<PathBuf>) {
+        self.conflict_file_path = v;
+        self.conflict_rev = self.conflict_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn set_conflict_file(&mut self, v: Loadable<Option<ConflictFile>>) {
+        self.conflict_file = v;
+        self.conflict_rev = self.conflict_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn bump_diff_state_rev(&mut self) {
+        self.diff_state_rev = self.diff_state_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn bump_ops_rev(&mut self) {
+        self.ops_rev = self.ops_rev.wrapping_add(1);
+    }
+}
+
+fn loadable_into_arc<T>(loadable: Loadable<Vec<T>>) -> Loadable<Arc<Vec<T>>> {
+    match loadable {
+        Loadable::Ready(v) => Loadable::Ready(Arc::new(v)),
+        Loadable::Loading => Loadable::Loading,
+        Loadable::NotLoaded => Loadable::NotLoaded,
+        Loadable::Error(e) => Loadable::Error(e),
     }
 }
 
@@ -467,5 +572,285 @@ mod tests {
         };
         assert!(Arc::ptr_eq(diff1, diff2));
         assert_eq!(Arc::strong_count(diff1), 2);
+    }
+
+    fn new_repo() -> RepoState {
+        RepoState::new_opening(
+            RepoId(1),
+            RepoSpec {
+                workdir: PathBuf::from("/tmp/repo"),
+            },
+        )
+    }
+
+    // --- Setter rev-bump tests ---
+
+    #[test]
+    fn set_status_bumps_status_rev() {
+        let mut repo = new_repo();
+        let before = repo.status_rev;
+        repo.set_status(Loadable::Loading);
+        assert_eq!(repo.status_rev, before + 1);
+        repo.set_status(Loadable::Ready(Arc::new(RepoStatus::default())));
+        assert_eq!(repo.status_rev, before + 2);
+    }
+
+    #[test]
+    fn set_log_bumps_log_rev() {
+        let mut repo = new_repo();
+        let before = repo.log_rev;
+        repo.set_log(Loadable::Loading);
+        assert_eq!(repo.log_rev, before + 1);
+    }
+
+    #[test]
+    fn set_log_loading_more_bumps_log_rev() {
+        let mut repo = new_repo();
+        let before = repo.log_rev;
+        repo.set_log_loading_more(true);
+        assert_eq!(repo.log_rev, before + 1);
+        repo.set_log_loading_more(false);
+        assert_eq!(repo.log_rev, before + 2);
+    }
+
+    #[test]
+    fn set_log_scope_bumps_log_rev() {
+        let mut repo = new_repo();
+        let before = repo.log_rev;
+        repo.set_log_scope(LogScope::AllBranches);
+        assert_eq!(repo.log_rev, before + 1);
+    }
+
+    #[test]
+    fn set_selected_commit_bumps_selected_commit_rev() {
+        let mut repo = new_repo();
+        let before = repo.selected_commit_rev;
+        repo.set_selected_commit(Some(CommitId("abc".to_string())));
+        assert_eq!(repo.selected_commit_rev, before + 1);
+        repo.set_selected_commit(None);
+        assert_eq!(repo.selected_commit_rev, before + 2);
+    }
+
+    #[test]
+    fn set_commit_details_bumps_commit_details_rev() {
+        let mut repo = new_repo();
+        let before = repo.commit_details_rev;
+        repo.set_commit_details(Loadable::Loading);
+        assert_eq!(repo.commit_details_rev, before + 1);
+    }
+
+    #[test]
+    fn set_merge_commit_message_bumps_merge_message_rev() {
+        let mut repo = new_repo();
+        let before = repo.merge_message_rev;
+        repo.set_merge_commit_message(Loadable::Ready(Some("merge".to_string())));
+        assert_eq!(repo.merge_message_rev, before + 1);
+    }
+
+    #[test]
+    fn set_rebase_in_progress_bumps_merge_message_rev() {
+        let mut repo = new_repo();
+        let before = repo.merge_message_rev;
+        repo.set_rebase_in_progress(Loadable::Ready(true));
+        assert_eq!(repo.merge_message_rev, before + 1);
+    }
+
+    #[test]
+    fn merge_message_and_rebase_share_same_rev_counter() {
+        let mut repo = new_repo();
+        let before = repo.merge_message_rev;
+        repo.set_merge_commit_message(Loadable::Ready(None));
+        repo.set_rebase_in_progress(Loadable::Ready(false));
+        assert_eq!(repo.merge_message_rev, before + 2);
+    }
+
+    #[test]
+    fn set_upstream_divergence_bumps_upstream_divergence_rev() {
+        let mut repo = new_repo();
+        let before = repo.upstream_divergence_rev;
+        repo.set_upstream_divergence(Loadable::Loading);
+        assert_eq!(repo.upstream_divergence_rev, before + 1);
+    }
+
+    #[test]
+    fn set_open_bumps_open_rev() {
+        let mut repo = new_repo();
+        let before = repo.open_rev;
+        repo.set_open(Loadable::Ready(()));
+        assert_eq!(repo.open_rev, before + 1);
+    }
+
+    #[test]
+    fn set_conflict_file_path_bumps_conflict_rev() {
+        let mut repo = new_repo();
+        let before = repo.conflict_rev;
+        repo.set_conflict_file_path(Some(PathBuf::from("file.rs")));
+        assert_eq!(repo.conflict_rev, before + 1);
+    }
+
+    #[test]
+    fn set_conflict_file_bumps_conflict_rev() {
+        let mut repo = new_repo();
+        let before = repo.conflict_rev;
+        repo.set_conflict_file(Loadable::Loading);
+        assert_eq!(repo.conflict_rev, before + 1);
+    }
+
+    #[test]
+    fn conflict_file_path_and_file_share_same_rev_counter() {
+        let mut repo = new_repo();
+        let before = repo.conflict_rev;
+        repo.set_conflict_file_path(Some(PathBuf::from("a.rs")));
+        repo.set_conflict_file(Loadable::Loading);
+        assert_eq!(repo.conflict_rev, before + 2);
+    }
+
+    #[test]
+    fn bump_diff_state_rev_increments() {
+        let mut repo = new_repo();
+        let before = repo.diff_state_rev;
+        repo.bump_diff_state_rev();
+        assert_eq!(repo.diff_state_rev, before + 1);
+        repo.bump_diff_state_rev();
+        assert_eq!(repo.diff_state_rev, before + 2);
+    }
+
+    #[test]
+    fn bump_ops_rev_increments() {
+        let mut repo = new_repo();
+        let before = repo.ops_rev;
+        repo.bump_ops_rev();
+        assert_eq!(repo.ops_rev, before + 1);
+        repo.bump_ops_rev();
+        assert_eq!(repo.ops_rev, before + 2);
+    }
+
+    // --- Equality-guard tests: setters that skip rev bump on no-change ---
+
+    #[test]
+    fn set_head_branch_skips_rev_bump_when_unchanged() {
+        let mut repo = new_repo();
+        repo.set_head_branch(Loadable::Ready("main".to_string()));
+        let rev_after_first = repo.head_branch_rev;
+        repo.set_head_branch(Loadable::Ready("main".to_string()));
+        assert_eq!(repo.head_branch_rev, rev_after_first, "rev should not bump for same value");
+    }
+
+    #[test]
+    fn set_head_branch_bumps_rev_when_changed() {
+        let mut repo = new_repo();
+        repo.set_head_branch(Loadable::Ready("main".to_string()));
+        let rev_after_first = repo.head_branch_rev;
+        repo.set_head_branch(Loadable::Ready("develop".to_string()));
+        assert_eq!(repo.head_branch_rev, rev_after_first + 1);
+    }
+
+    #[test]
+    fn set_branches_skips_rev_bump_when_unchanged() {
+        let mut repo = new_repo();
+        repo.set_branches(Loadable::NotLoaded);
+        let rev = repo.branches_rev;
+        repo.set_branches(Loadable::NotLoaded);
+        assert_eq!(repo.branches_rev, rev, "rev should not bump for same Loadable variant");
+    }
+
+    #[test]
+    fn set_tags_skips_rev_bump_when_unchanged() {
+        let mut repo = new_repo();
+        repo.set_tags(Loadable::NotLoaded);
+        let rev = repo.tags_rev;
+        repo.set_tags(Loadable::NotLoaded);
+        assert_eq!(repo.tags_rev, rev);
+    }
+
+    #[test]
+    fn set_remotes_skips_rev_bump_when_unchanged() {
+        let mut repo = new_repo();
+        repo.set_remotes(Loadable::Loading);
+        let rev = repo.remotes_rev;
+        repo.set_remotes(Loadable::Loading);
+        assert_eq!(repo.remotes_rev, rev);
+    }
+
+    #[test]
+    fn set_stashes_skips_rev_bump_when_unchanged() {
+        let mut repo = new_repo();
+        repo.set_stashes(Loadable::Loading);
+        let rev = repo.stashes_rev;
+        repo.set_stashes(Loadable::Loading);
+        assert_eq!(repo.stashes_rev, rev);
+    }
+
+    #[test]
+    fn set_worktrees_bumps_rev_when_changed() {
+        let mut repo = new_repo();
+        let before = repo.worktrees_rev;
+        repo.set_worktrees(Loadable::Loading);
+        assert_eq!(repo.worktrees_rev, before + 1);
+        repo.set_worktrees(Loadable::Ready(vec![]));
+        assert_eq!(repo.worktrees_rev, before + 2);
+    }
+
+    #[test]
+    fn set_submodules_skips_rev_bump_when_unchanged() {
+        let mut repo = new_repo();
+        repo.set_submodules(Loadable::Loading);
+        let rev = repo.submodules_rev;
+        repo.set_submodules(Loadable::Loading);
+        assert_eq!(repo.submodules_rev, rev);
+    }
+
+    // --- Isolation tests: one setter does not bump another's rev ---
+
+    #[test]
+    fn setters_only_bump_their_own_rev_counter() {
+        let mut repo = new_repo();
+        let snap = (
+            repo.status_rev,
+            repo.log_rev,
+            repo.selected_commit_rev,
+            repo.commit_details_rev,
+            repo.merge_message_rev,
+            repo.upstream_divergence_rev,
+            repo.open_rev,
+            repo.conflict_rev,
+            repo.diff_state_rev,
+            repo.ops_rev,
+        );
+
+        repo.set_status(Loadable::Loading);
+        assert_eq!(repo.status_rev, snap.0 + 1);
+        assert_eq!(repo.log_rev, snap.1);
+        assert_eq!(repo.selected_commit_rev, snap.2);
+        assert_eq!(repo.commit_details_rev, snap.3);
+        assert_eq!(repo.merge_message_rev, snap.4);
+        assert_eq!(repo.upstream_divergence_rev, snap.5);
+        assert_eq!(repo.open_rev, snap.6);
+        assert_eq!(repo.conflict_rev, snap.7);
+        assert_eq!(repo.diff_state_rev, snap.8);
+        assert_eq!(repo.ops_rev, snap.9);
+    }
+
+    #[test]
+    fn all_rev_counters_start_at_zero() {
+        let repo = new_repo();
+        assert_eq!(repo.status_rev, 0);
+        assert_eq!(repo.log_rev, 0);
+        assert_eq!(repo.selected_commit_rev, 0);
+        assert_eq!(repo.commit_details_rev, 0);
+        assert_eq!(repo.merge_message_rev, 0);
+        assert_eq!(repo.upstream_divergence_rev, 0);
+        assert_eq!(repo.open_rev, 0);
+        assert_eq!(repo.conflict_rev, 0);
+        assert_eq!(repo.diff_state_rev, 0);
+        assert_eq!(repo.ops_rev, 0);
+        assert_eq!(repo.head_branch_rev, 0);
+        assert_eq!(repo.branches_rev, 0);
+        assert_eq!(repo.tags_rev, 0);
+        assert_eq!(repo.remotes_rev, 0);
+        assert_eq!(repo.remote_branches_rev, 0);
+        assert_eq!(repo.stashes_rev, 0);
+        assert_eq!(repo.worktrees_rev, 0);
+        assert_eq!(repo.submodules_rev, 0);
     }
 }

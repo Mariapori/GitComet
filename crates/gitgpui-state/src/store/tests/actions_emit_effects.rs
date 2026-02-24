@@ -908,3 +908,125 @@ fn repo_operations_emit_effects() {
         }]
     ));
 }
+
+// --- Revision counter regression tests ---
+
+#[test]
+fn pull_push_bump_ops_rev() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    repos.insert(repo_id, Arc::new(DummyRepo::new("/tmp/repo")));
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+
+    let ops_before = state.repos[0].ops_rev;
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::Pull {
+            repo_id,
+            mode: PullMode::Default,
+        },
+    );
+    assert!(
+        state.repos[0].ops_rev > ops_before,
+        "ops_rev should bump after Pull"
+    );
+    let ops_after_pull = state.repos[0].ops_rev;
+
+    reduce(&mut repos, &id_alloc, &mut state, Msg::Push { repo_id });
+    assert!(
+        state.repos[0].ops_rev > ops_after_pull,
+        "ops_rev should bump after Push"
+    );
+    let ops_after_push = state.repos[0].ops_rev;
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::Pull {
+                mode: PullMode::Default,
+            },
+            result: Ok(CommandOutput::empty_success("git pull")),
+        },
+    );
+    assert!(
+        state.repos[0].ops_rev > ops_after_push,
+        "ops_rev should bump when command finishes"
+    );
+}
+
+#[test]
+fn commit_bumps_ops_rev() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    repos.insert(repo_id, Arc::new(DummyRepo::new("/tmp/repo")));
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+
+    let ops_before = state.repos[0].ops_rev;
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::Commit {
+            repo_id,
+            message: "test commit".to_string(),
+        },
+    );
+    assert!(
+        state.repos[0].ops_rev > ops_before,
+        "ops_rev should bump after Commit"
+    );
+}
+
+#[test]
+fn pull_push_do_not_bump_unrelated_revs() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    repos.insert(repo_id, Arc::new(DummyRepo::new("/tmp/repo")));
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+
+    let status_before = state.repos[0].status_rev;
+    let log_before = state.repos[0].log_rev;
+    let selected_before = state.repos[0].selected_commit_rev;
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::Pull {
+            repo_id,
+            mode: PullMode::Default,
+        },
+    );
+
+    assert_eq!(state.repos[0].status_rev, status_before);
+    assert_eq!(state.repos[0].log_rev, log_before);
+    assert_eq!(state.repos[0].selected_commit_rev, selected_before);
+}

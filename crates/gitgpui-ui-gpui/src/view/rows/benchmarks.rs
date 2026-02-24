@@ -8,6 +8,7 @@ use gitgpui_core::domain::{
 };
 use gitgpui_state::model::{Loadable, RepoId, RepoState};
 use std::collections::hash_map::DefaultHasher;
+use std::sync::Arc;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, SystemTime};
 
@@ -185,7 +186,7 @@ fn build_synthetic_repo_state(
             divergence: None,
         });
     }
-    repo.branches = Loadable::Ready(branches);
+    repo.branches = Loadable::Ready(Arc::new(branches));
 
     let mut remotes_vec = Vec::with_capacity(remotes.max(1));
     for r in 0..remotes.max(1) {
@@ -198,7 +199,7 @@ fn build_synthetic_repo_state(
             url: None,
         });
     }
-    repo.remotes = Loadable::Ready(remotes_vec.clone());
+    repo.remotes = Loadable::Ready(Arc::new(remotes_vec.clone()));
 
     let mut remote = Vec::with_capacity(remote_branches);
     for ix in 0..remote_branches {
@@ -213,7 +214,7 @@ fn build_synthetic_repo_state(
             target: target.clone(),
         });
     }
-    repo.remote_branches = Loadable::Ready(remote);
+    repo.remote_branches = Loadable::Ready(Arc::new(remote));
 
     // Minimal "repo is open" status.
     repo.open = Loadable::Ready(());

@@ -60,13 +60,14 @@ pub(super) fn conflict_file_loaded(
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id)
         && repo_state.conflict_file_path.as_ref() == Some(&path)
     {
-        repo_state.conflict_file = match result {
+        let value = match result {
             Ok(v) => Loadable::Ready(v),
             Err(e) => {
                 push_diagnostic(repo_state, DiagnosticKind::Error, e.to_string());
                 Loadable::Error(e.to_string())
             }
         };
+        repo_state.set_conflict_file(value);
     }
     Vec::new()
 }
@@ -120,7 +121,7 @@ pub(super) fn select_commit(
         return Vec::new();
     }
 
-    repo_state.selected_commit = Some(commit_id.clone());
+    repo_state.set_selected_commit(Some(commit_id.clone()));
     let already_loaded = matches!(
         &repo_state.commit_details,
         Loadable::Ready(details) if details.id == commit_id
@@ -133,7 +134,7 @@ pub(super) fn select_commit(
         repo_state.commit_details,
         Loadable::Error(_) | Loadable::NotLoaded
     ) {
-        repo_state.commit_details = Loadable::NotLoaded;
+        repo_state.set_commit_details(Loadable::NotLoaded);
     }
     vec![Effect::LoadCommitDetails { repo_id, commit_id }]
 }
@@ -143,8 +144,8 @@ pub(super) fn clear_commit_selection(state: &mut AppState, repo_id: RepoId) -> V
         return Vec::new();
     };
 
-    repo_state.selected_commit = None;
-    repo_state.commit_details = Loadable::NotLoaded;
+    repo_state.set_selected_commit(None);
+    repo_state.set_commit_details(Loadable::NotLoaded);
     Vec::new()
 }
 
@@ -186,8 +187,8 @@ pub(super) fn load_conflict_file(
     let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) else {
         return Vec::new();
     };
-    repo_state.conflict_file_path = Some(path.clone());
-    repo_state.conflict_file = Loadable::Loading;
+    repo_state.set_conflict_file_path(Some(path.clone()));
+    repo_state.set_conflict_file(Loadable::Loading);
     vec![Effect::LoadConflictFile { repo_id, path }]
 }
 
@@ -347,12 +348,12 @@ pub(super) fn status_loaded(
                     Loadable::Ready(prev) if prev.as_ref() == &next
                 );
                 if !status_unchanged {
-                    repo_state.status = Loadable::Ready(Arc::new(next));
+                    repo_state.set_status(Loadable::Ready(Arc::new(next)));
                 }
             }
             Err(e) => {
                 push_diagnostic(repo_state, DiagnosticKind::Error, e.to_string());
-                repo_state.status = Loadable::Error(e.to_string());
+                repo_state.set_status(Loadable::Error(e.to_string()));
             }
         }
         if repo_state.loads_in_flight.finish(RepoLoadsInFlight::STATUS) {
@@ -394,13 +395,14 @@ pub(super) fn upstream_divergence_loaded(
 ) -> Vec<Effect> {
     let mut effects = Vec::new();
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
-        repo_state.upstream_divergence = match result {
+        let value = match result {
             Ok(v) => Loadable::Ready(v),
             Err(e) => {
                 push_diagnostic(repo_state, DiagnosticKind::Error, e.to_string());
                 Loadable::Error(e.to_string())
             }
         };
+        repo_state.set_upstream_divergence(value);
         if repo_state
             .loads_in_flight
             .finish(RepoLoadsInFlight::UPSTREAM_DIVERGENCE)
@@ -495,13 +497,14 @@ pub(super) fn commit_details_loaded(
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id)
         && repo_state.selected_commit.as_ref() == Some(&commit_id)
     {
-        repo_state.commit_details = match result {
+        let value = match result {
             Ok(v) => Loadable::Ready(Arc::new(v)),
             Err(e) => {
                 push_diagnostic(repo_state, DiagnosticKind::Error, e.to_string());
                 Loadable::Error(e.to_string())
             }
         };
+        repo_state.set_commit_details(value);
     }
     Vec::new()
 }

@@ -104,7 +104,7 @@ fn hit_test_any(bounds: &[Bounds<Pixels>], p: gpui::Point<Pixels>) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn history_commit_row_canvas(
     theme: AppTheme,
-    view: Entity<MainPaneView>,
+    view: Entity<HistoryView>,
     row_id: usize,
     repo_id: RepoId,
     commit_id: CommitId,

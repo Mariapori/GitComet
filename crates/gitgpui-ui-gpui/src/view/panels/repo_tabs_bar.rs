@@ -233,22 +233,8 @@ impl Render for RepoTabsBarView {
         let active = self.active_repo_id();
         let repos_len = self.state.repos.len();
         let active_ix = active.and_then(|id| self.state.repos.iter().position(|r| r.id == id));
-        let spinner = |id: (&'static str, u64), color: gpui::Rgba| {
-            gpui::svg()
-                .path("icons/spinner.svg")
-                .w(px(12.0))
-                .h(px(12.0))
-                .text_color(color)
-                .with_animation(
-                    id,
-                    Animation::new(std::time::Duration::from_millis(850)).repeat(),
-                    |svg, delta| {
-                        svg.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            delta * std::f32::consts::TAU,
-                        )))
-                    },
-                )
-        };
+        let spinner =
+            |id: (&'static str, u64), color: gpui::Rgba| svg_spinner(id, color, px(12.0));
 
         let mut bar = zed::TabBar::new("repo_tab_bar");
         for (ix, repo) in self.state.repos.iter().enumerate() {
@@ -299,11 +285,7 @@ impl Render for RepoTabsBarView {
                 .hover(move |s| s.bg(with_alpha(theme.colors.danger, 0.18)))
                 .active(move |s| s.bg(with_alpha(theme.colors.danger, 0.26)))
                 .child(
-                    gpui::svg()
-                        .path("icons/repo_tab_close.svg")
-                        .w(px(12.0))
-                        .h(px(12.0))
-                        .text_color(theme.colors.danger),
+                    svg_icon("icons/repo_tab_close.svg", theme.colors.danger, px(12.0)),
                 )
                 .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                     cx.stop_propagation();
@@ -446,13 +428,7 @@ impl Render for RepoTabsBarView {
             bar = bar.tab(tab);
         }
 
-        let icon = |path: &'static str| {
-            gpui::svg()
-                .path(path)
-                .w(px(14.0))
-                .h(px(14.0))
-                .text_color(theme.colors.accent)
-        };
+        let icon = |path: &'static str| svg_icon(path, theme.colors.accent, px(14.0));
 
         let root_view = self.root_view.clone();
         let open_repo = zed::Button::new("open_repo", "")

@@ -384,10 +384,12 @@ impl PopoverHost {
                 show_sha,
             } => {
                 self.main_pane.update(cx, |pane, cx| {
-                    pane.history_show_author = show_author;
-                    pane.history_show_date = show_date;
-                    pane.history_show_sha = show_sha;
-                    cx.notify();
+                    pane.history_view.update(cx, |view, cx| {
+                        view.history_show_author = show_author;
+                        view.history_show_date = show_date;
+                        view.history_show_sha = show_sha;
+                        cx.notify();
+                    });
                 });
                 self.schedule_ui_settings_persist(cx);
                 close_after_action = false;

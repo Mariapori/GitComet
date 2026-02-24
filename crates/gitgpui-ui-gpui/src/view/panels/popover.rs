@@ -1642,7 +1642,7 @@ mod tests {
                     }
                     .into(),
                 );
-                repo.tags = Loadable::Ready(vec![]);
+                repo.tags = Loadable::Ready(Arc::new(vec![]));
 
                 this.state = Arc::new(AppState {
                     repos: vec![repo],
@@ -1953,7 +1953,7 @@ mod tests {
                     }
                     .into(),
                 );
-                repo.tags = Loadable::Ready(vec![
+                repo.tags = Loadable::Ready(Arc::new(vec![
                     gitgpui_core::domain::Tag {
                         name: "release".to_string(),
                         target: commit_id.clone(),
@@ -1966,7 +1966,7 @@ mod tests {
                         name: "other".to_string(),
                         target: other_commit,
                     },
-                ]);
+                ]));
 
                 let state = Arc::new(AppState {
                     repos: vec![repo],

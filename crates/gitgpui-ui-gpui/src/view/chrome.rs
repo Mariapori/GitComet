@@ -24,11 +24,7 @@ fn window_top_left_corner(window: &Window) -> Point<Pixels> {
 }
 
 fn titlebar_control_icon(path: &'static str, color: gpui::Rgba) -> gpui::Svg {
-    gpui::svg()
-        .path(path)
-        .w(px(16.0))
-        .h(px(16.0))
-        .text_color(color)
+    svg_icon(path, color, px(16.0))
 }
 
 fn titlebar_app_icon(theme: AppTheme) -> AnyElement {
@@ -48,11 +44,7 @@ fn titlebar_app_icon(theme: AppTheme) -> AnyElement {
                         .size(px(16.0))
                         .object_fit(ObjectFit::Contain)
                         .with_fallback(move || {
-                            gpui::svg()
-                                .path("icons/gitgpui_mark.svg")
-                                .w(px(16.0))
-                                .h(px(16.0))
-                                .text_color(theme.colors.accent)
+                            svg_icon("icons/gitgpui_mark.svg", theme.colors.accent, px(16.0))
                                 .into_any_element()
                         }),
                 ),

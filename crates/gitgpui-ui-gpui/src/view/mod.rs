@@ -15,12 +15,12 @@ use gitgpui_state::session;
 use gitgpui_state::store::AppStore;
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Corner, CursorStyle, Decorations,
-    Element, ElementId, Entity, FocusHandle, FontWeight, GlobalElementId, InspectorElementId,
-    IsZero, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    Render, ResizeEdge, ScrollHandle, ShapedLine, SharedString, Size, Style, TextRun, Tiling,
-    Timer, UniformListScrollHandle, WeakEntity, Window, WindowControlArea, anchored, div, fill,
-    point, px, relative, size, uniform_list,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Corner, CursorStyle,
+    Decorations, Element, ElementId, Entity, FocusHandle, FontWeight, GlobalElementId,
+    InspectorElementId, IsZero, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, ResizeEdge, ScrollHandle, ShapedLine, SharedString, Size,
+    Style, TextRun, Tiling, Timer, UniformListScrollHandle, WeakEntity, Window,
+    WindowControlArea, anchored, div, fill, point, px, relative, size, uniform_list,
 };
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::BTreeMap;
@@ -43,6 +43,7 @@ mod diff_text_selection;
 mod diff_utils;
 mod fingerprint;
 mod history_graph;
+mod icons;
 mod linux_desktop_integration;
 mod panels;
 mod panes;
@@ -60,8 +61,8 @@ mod word_diff;
 use app_model::AppUiModel;
 use branch_sidebar::{BranchSection, BranchSidebarRow};
 use caches::{
-    BranchSidebarCache, HistoryCache, HistoryCacheRequest, HistoryStashIdsCache,
-    HistoryWorktreeSummaryCache,
+    BranchSidebarCache, HistoryCache, HistoryCacheRequest, HistoryCommitRowVm,
+    HistoryStashIdsCache, HistoryWorktreeSummaryCache,
 };
 use chrome::{
     CLIENT_SIDE_DECORATION_INSET, TitleBarView, cursor_style_for_resize_edge, resize_edge,
@@ -86,12 +87,13 @@ use diff_utils::{
     scrollbar_markers_from_flags,
 };
 use panels::{ActionBarView, PopoverHost, RepoTabsBarView};
-use panes::{DetailsPaneView, MainPaneView, SidebarPaneView};
+use panes::{DetailsPaneView, HistoryView, MainPaneView, SidebarPaneView};
 use toast_host::ToastHost;
 use tooltip_host::TooltipHost;
 
 pub(crate) use chrome::window_frame;
 use color::with_alpha;
+use icons::{svg_icon, svg_spinner};
 
 const HISTORY_COL_BRANCH_PX: f32 = 130.0;
 const HISTORY_COL_GRAPH_PX: f32 = 80.0;
@@ -153,6 +155,14 @@ struct HistoryColResizeState {
     start_author: Pixels,
     start_date: Pixels,
     start_sha: Pixels,
+}
+
+struct HistoryColResizeDragGhost;
+
+impl Render for HistoryColResizeDragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div().w(px(0.0)).h(px(0.0))
+    }
 }
 
 fn should_hide_unified_diff_header_line(line: &AnnotatedDiffLine) -> bool {
@@ -1083,7 +1093,7 @@ impl GitGpuiView {
         let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         if let Loadable::Ready(remote_branches) = &repo.remote_branches {
-            for branch in remote_branches {
+            for branch in remote_branches.iter() {
                 grouped
                     .entry(branch.remote.clone())
                     .or_default()
@@ -1094,7 +1104,7 @@ impl GitGpuiView {
         if grouped.is_empty()
             && let Loadable::Ready(remotes) = &repo.remotes
         {
-            for remote in remotes {
+            for remote in remotes.iter() {
                 grouped.entry(remote.name.clone()).or_default();
             }
         }
@@ -1450,7 +1460,7 @@ mod tests {
                 workdir: PathBuf::new(),
             },
         );
-        repo.remote_branches = Loadable::Ready(vec![
+        repo.remote_branches = Loadable::Ready(Arc::new(vec![
             RemoteBranch {
                 remote: "origin".to_string(),
                 name: "b".to_string(),
@@ -1466,7 +1476,7 @@ mod tests {
                 name: "main".to_string(),
                 target: CommitId("c0".to_string()),
             },
-        ]);
+        ]));
 
         let rows = GitGpuiView::remote_rows(&repo);
         assert_eq!(
@@ -1499,7 +1509,7 @@ mod tests {
             },
         );
 
-        repo.remotes = Loadable::Ready(vec![
+        repo.remotes = Loadable::Ready(Arc::new(vec![
             Remote {
                 name: "origin".to_string(),
                 url: Some("https://example.com/origin.git".to_string()),
@@ -1508,12 +1518,12 @@ mod tests {
                 name: "upstream".to_string(),
                 url: Some("https://example.com/upstream.git".to_string()),
             },
-        ]);
-        repo.remote_branches = Loadable::Ready(vec![RemoteBranch {
+        ]));
+        repo.remote_branches = Loadable::Ready(Arc::new(vec![RemoteBranch {
             remote: "origin".to_string(),
             name: "main".to_string(),
             target: CommitId("deadbeef".to_string()),
-        }]);
+        }]));
 
         let rows = GitGpuiView::branch_sidebar_rows(&repo);
         let mut headers = rows
@@ -1546,7 +1556,7 @@ mod tests {
         );
 
         repo.head_branch = Loadable::Ready("main".to_string());
-        repo.branches = Loadable::Ready(vec![Branch {
+        repo.branches = Loadable::Ready(Arc::new(vec![Branch {
             name: "main".to_string(),
             target: CommitId("deadbeef".to_string()),
             upstream: Some(Upstream {
@@ -1554,12 +1564,12 @@ mod tests {
                 branch: "main".to_string(),
             }),
             divergence: None,
-        }]);
-        repo.remote_branches = Loadable::Ready(vec![RemoteBranch {
+        }]));
+        repo.remote_branches = Loadable::Ready(Arc::new(vec![RemoteBranch {
             remote: "origin".to_string(),
             name: "main".to_string(),
             target: CommitId("deadbeef".to_string()),
-        }]);
+        }]));
 
         let rows = GitGpuiView::branch_sidebar_rows(&repo);
         let upstream_row = rows.iter().find(|r| {

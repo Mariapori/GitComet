@@ -172,6 +172,7 @@ pub(super) fn fetch_all(
         && let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id)
     {
         repo_state.pull_in_flight = repo_state.pull_in_flight.saturating_add(1);
+        repo_state.bump_ops_rev();
     }
     vec![Effect::FetchAll { repo_id, prune }]
 }
@@ -186,6 +187,7 @@ pub(super) fn pull(
         && let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id)
     {
         repo_state.pull_in_flight = repo_state.pull_in_flight.saturating_add(1);
+        repo_state.bump_ops_rev();
     }
     vec![Effect::Pull { repo_id, mode }]
 }
@@ -201,6 +203,7 @@ pub(super) fn pull_branch(
         && let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id)
     {
         repo_state.pull_in_flight = repo_state.pull_in_flight.saturating_add(1);
+        repo_state.bump_ops_rev();
     }
     vec![Effect::PullBranch {
         repo_id,
@@ -222,6 +225,7 @@ pub(super) fn push(
         && let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id)
     {
         repo_state.push_in_flight = repo_state.push_in_flight.saturating_add(1);
+        repo_state.bump_ops_rev();
     }
     vec![Effect::Push { repo_id }]
 }
@@ -235,6 +239,7 @@ pub(super) fn force_push(
         && let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id)
     {
         repo_state.push_in_flight = repo_state.push_in_flight.saturating_add(1);
+        repo_state.bump_ops_rev();
     }
     vec![Effect::ForcePush { repo_id }]
 }
@@ -250,6 +255,7 @@ pub(super) fn push_set_upstream(
         && let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id)
     {
         repo_state.push_in_flight = repo_state.push_in_flight.saturating_add(1);
+        repo_state.bump_ops_rev();
     }
     vec![Effect::PushSetUpstream {
         repo_id,
@@ -269,6 +275,7 @@ pub(super) fn delete_remote_branch(
         && let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id)
     {
         repo_state.push_in_flight = repo_state.push_in_flight.saturating_add(1);
+        repo_state.bump_ops_rev();
     }
     vec![Effect::DeleteRemoteBranch {
         repo_id,
@@ -371,6 +378,7 @@ pub(super) fn commit_finished(
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
         repo_state.local_actions_in_flight = repo_state.local_actions_in_flight.saturating_sub(1);
         repo_state.commit_in_flight = repo_state.commit_in_flight.saturating_sub(1);
+        repo_state.bump_ops_rev();
         match result {
             Ok(()) => {
                 repo_state.last_error = None;
@@ -378,6 +386,7 @@ pub(super) fn commit_finished(
                 repo_state.diff = Loadable::NotLoaded;
                 repo_state.diff_file = Loadable::NotLoaded;
                 repo_state.diff_file_image = Loadable::NotLoaded;
+                repo_state.bump_diff_state_rev();
                 push_action_log(
                     repo_state,
                     true,
@@ -407,6 +416,7 @@ pub(super) fn commit_amend_finished(
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
         repo_state.local_actions_in_flight = repo_state.local_actions_in_flight.saturating_sub(1);
         repo_state.commit_in_flight = repo_state.commit_in_flight.saturating_sub(1);
+        repo_state.bump_ops_rev();
         match result {
             Ok(()) => {
                 repo_state.last_error = None;
@@ -414,6 +424,7 @@ pub(super) fn commit_amend_finished(
                 repo_state.diff = Loadable::NotLoaded;
                 repo_state.diff_file = Loadable::NotLoaded;
                 repo_state.diff_file_image = Loadable::NotLoaded;
+                repo_state.bump_diff_state_rev();
                 push_action_log(
                     repo_state,
                     true,
@@ -459,12 +470,14 @@ pub(super) fn repo_command_finished(
             | RepoCommandKind::Pull { .. }
             | RepoCommandKind::PullBranch { .. } => {
                 repo_state.pull_in_flight = repo_state.pull_in_flight.saturating_sub(1);
+                repo_state.bump_ops_rev();
             }
             RepoCommandKind::Push
             | RepoCommandKind::ForcePush
             | RepoCommandKind::PushSetUpstream { .. }
             | RepoCommandKind::DeleteRemoteBranch { .. } => {
                 repo_state.push_in_flight = repo_state.push_in_flight.saturating_sub(1);
+                repo_state.bump_ops_rev();
             }
             RepoCommandKind::AddWorktree { .. } | RepoCommandKind::RemoveWorktree { .. } => {
                 repo_state.worktrees_in_flight = repo_state.worktrees_in_flight.saturating_sub(1);
@@ -486,6 +499,7 @@ pub(super) fn repo_command_finished(
                     repo_state.diff = Loadable::NotLoaded;
                     repo_state.diff_file = Loadable::NotLoaded;
                     repo_state.diff_file_image = Loadable::NotLoaded;
+                    repo_state.bump_diff_state_rev();
                 }
                 push_command_log(repo_state, true, &command, &output, None);
             }
@@ -538,6 +552,7 @@ pub(super) fn repo_command_finished(
         } else {
             Loadable::NotLoaded
         };
+        repo_state.bump_diff_state_rev();
         extra_effects.push(Effect::LoadDiff {
             repo_id,
             target: target.clone(),

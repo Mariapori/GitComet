@@ -86,7 +86,9 @@ impl MainPaneView {
             })
             .collect()
     }
+}
 
+impl HistoryView {
     pub(in super::super) fn render_history_table_rows(
         this: &mut Self,
         range: Range<usize>,
@@ -224,7 +226,7 @@ fn history_table_row(
     is_head: bool,
     is_stash_node: bool,
     active_context_menu_invoker: Option<&SharedString>,
-    cx: &mut gpui::Context<MainPaneView>,
+    cx: &mut gpui::Context<HistoryView>,
 ) -> AnyElement {
     let context_menu_invoker: SharedString = format!(
         "history_commit_menu_{}_{}",
@@ -350,7 +352,7 @@ fn working_tree_summary_history_row(
     repo_id: RepoId,
     selected: bool,
     counts: (usize, usize, usize),
-    cx: &mut gpui::Context<MainPaneView>,
+    cx: &mut gpui::Context<HistoryView>,
 ) -> AnyElement {
     let cell_pad_x = px(HISTORY_COL_HANDLE_PX / 2.0);
     let icon_count = |icon: &'static str, color: gpui::Rgba, count: usize| {

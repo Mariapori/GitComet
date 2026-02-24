@@ -1724,6 +1724,7 @@ impl MainPaneView {
         };
 
         self.diff_text_layout_cache_epoch = self.diff_text_layout_cache_epoch.wrapping_add(1);
+        self.prune_diff_text_layout_cache();
         self.diff_text_hitboxes.clear();
         let diff_editor_menu_active = self
             .active_context_menu_invoker

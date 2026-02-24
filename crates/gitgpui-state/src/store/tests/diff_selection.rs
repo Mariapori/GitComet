@@ -311,3 +311,121 @@ fn diff_loaded_err_records_diagnostic_when_target_matches() {
             .any(|d| d.message.contains("diff failed"))
     );
 }
+
+// --- Revision counter regression tests ---
+
+#[test]
+fn select_diff_bumps_diff_state_rev() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(2);
+    let mut state = AppState::default();
+    state.repos.push(RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(RepoId(1));
+
+    let before = state.repos[0].diff_state_rev;
+
+    let target = DiffTarget::WorkingTree {
+        path: PathBuf::from("src/lib.rs"),
+        area: DiffArea::Unstaged,
+    };
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SelectDiff {
+            repo_id: RepoId(1),
+            target,
+        },
+    );
+
+    assert!(
+        state.repos[0].diff_state_rev > before,
+        "diff_state_rev should bump after SelectDiff"
+    );
+}
+
+#[test]
+fn clear_diff_selection_bumps_diff_state_rev() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(2);
+    let mut state = AppState::default();
+    state.repos.push(RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(RepoId(1));
+
+    // First select a diff
+    let target = DiffTarget::WorkingTree {
+        path: PathBuf::from("src/lib.rs"),
+        area: DiffArea::Unstaged,
+    };
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SelectDiff {
+            repo_id: RepoId(1),
+            target,
+        },
+    );
+    let before = state.repos[0].diff_state_rev;
+
+    // Now clear
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ClearDiffSelection {
+            repo_id: RepoId(1),
+        },
+    );
+
+    assert!(
+        state.repos[0].diff_state_rev > before,
+        "diff_state_rev should bump after ClearDiffSelection"
+    );
+}
+
+#[test]
+fn select_diff_does_not_bump_unrelated_revs() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(2);
+    let mut state = AppState::default();
+    state.repos.push(RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(RepoId(1));
+
+    let ops_before = state.repos[0].ops_rev;
+    let status_before = state.repos[0].status_rev;
+    let log_before = state.repos[0].log_rev;
+
+    let target = DiffTarget::WorkingTree {
+        path: PathBuf::from("src/lib.rs"),
+        area: DiffArea::Unstaged,
+    };
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SelectDiff {
+            repo_id: RepoId(1),
+            target,
+        },
+    );
+
+    assert_eq!(state.repos[0].ops_rev, ops_before);
+    assert_eq!(state.repos[0].status_rev, status_before);
+    assert_eq!(state.repos[0].log_rev, log_before);
+}

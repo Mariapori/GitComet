@@ -32,6 +32,7 @@ pub(super) fn select_diff(
     } else {
         Loadable::NotLoaded
     };
+    repo_state.bump_diff_state_rev();
 
     let mut effects = Vec::new();
     if supports_file {
@@ -61,6 +62,7 @@ pub(super) fn clear_diff_selection(state: &mut AppState, repo_id: RepoId) -> Vec
     repo_state.diff = Loadable::NotLoaded;
     repo_state.diff_file = Loadable::NotLoaded;
     repo_state.diff_file_image = Loadable::NotLoaded;
+    repo_state.bump_diff_state_rev();
     Vec::new()
 }
 
@@ -97,6 +99,7 @@ pub(super) fn diff_loaded(
                 Loadable::Error(e.to_string())
             }
         };
+        repo_state.bump_diff_state_rev();
     }
     Vec::new()
 }
@@ -118,6 +121,7 @@ pub(super) fn diff_file_loaded(
                 Loadable::Error(e.to_string())
             }
         };
+        repo_state.bump_diff_state_rev();
     }
     Vec::new()
 }
@@ -139,6 +143,7 @@ pub(super) fn diff_file_image_loaded(
                 Loadable::Error(e.to_string())
             }
         };
+        repo_state.bump_diff_state_rev();
     }
     Vec::new()
 }

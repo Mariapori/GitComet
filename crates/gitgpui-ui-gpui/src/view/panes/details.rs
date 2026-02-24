@@ -1,4 +1,3 @@
-use super::super::fingerprint;
 use super::super::path_display;
 use super::super::*;
 use std::hash::{Hash, Hasher};
@@ -42,14 +41,11 @@ impl DetailsPaneView {
         if let Some(repo_id) = state.active_repo
             && let Some(repo) = state.repos.iter().find(|r| r.id == repo_id)
         {
-            fingerprint::hash_loadable_arc(&repo.status, &mut hasher);
-            repo.local_actions_in_flight.hash(&mut hasher);
-            repo.commit_in_flight.hash(&mut hasher);
-            repo.selected_commit.hash(&mut hasher);
-            fingerprint::hash_loadable_arc(&repo.commit_details, &mut hasher);
-
-            fingerprint::hash_loadable_kind(&repo.merge_commit_message, &mut hasher);
-            fingerprint::hash_loadable_kind(&repo.rebase_in_progress, &mut hasher);
+            repo.status_rev.hash(&mut hasher);
+            repo.ops_rev.hash(&mut hasher);
+            repo.selected_commit_rev.hash(&mut hasher);
+            repo.commit_details_rev.hash(&mut hasher);
+            repo.merge_message_rev.hash(&mut hasher);
         }
 
         hasher.finish()

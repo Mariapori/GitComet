@@ -18,13 +18,13 @@ pub(super) fn reload_repo(state: &mut AppState, repo_id: crate::model::RepoId) -
     repo_state.set_tags(Loadable::Loading);
     repo_state.set_remotes(Loadable::Loading);
     repo_state.set_remote_branches(Loadable::Loading);
-    repo_state.status = Loadable::Loading;
-    repo_state.log = Loadable::Loading;
+    repo_state.set_status(Loadable::Loading);
+    repo_state.set_log(Loadable::Loading);
     repo_state.log_loading_more = false;
     repo_state.set_stashes(Loadable::Loading);
     repo_state.reflog = Loadable::NotLoaded;
-    repo_state.rebase_in_progress = Loadable::Loading;
-    repo_state.merge_commit_message = Loadable::Loading;
+    repo_state.set_rebase_in_progress(Loadable::Loading);
+    repo_state.set_merge_commit_message(Loadable::Loading);
     repo_state.file_history_path = None;
     repo_state.file_history = Loadable::NotLoaded;
     repo_state.blame_path = None;
@@ -32,8 +32,8 @@ pub(super) fn reload_repo(state: &mut AppState, repo_id: crate::model::RepoId) -
     repo_state.blame = Loadable::NotLoaded;
     repo_state.set_worktrees(Loadable::NotLoaded);
     repo_state.set_submodules(Loadable::NotLoaded);
-    repo_state.selected_commit = None;
-    repo_state.commit_details = Loadable::NotLoaded;
+    repo_state.set_selected_commit(None);
+    repo_state.set_commit_details(Loadable::NotLoaded);
 
     refresh_full_effects(repo_state)
 }
@@ -99,9 +99,9 @@ pub(super) fn set_history_scope(
         return Vec::new();
     }
 
-    repo_state.history_scope = scope;
+    repo_state.set_log_scope(scope);
     let _ = session::persist_repo_history_scope(&repo_state.spec.workdir, scope);
-    repo_state.log = Loadable::Loading;
+    repo_state.set_log(Loadable::Loading);
     repo_state.log_loading_more = false;
 
     if repo_state.loads_in_flight.request_log(scope, 200, None) {
@@ -135,7 +135,7 @@ pub(super) fn load_more_history(
         return Vec::new();
     };
 
-    repo_state.log_loading_more = true;
+    repo_state.set_log_loading_more(true);
     if repo_state
         .loads_in_flight
         .request_log(repo_state.history_scope, 200, Some(cursor.clone()))
@@ -158,13 +158,14 @@ pub(super) fn rebase_state_loaded(
 ) -> Vec<Effect> {
     let mut effects = Vec::new();
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
-        repo_state.rebase_in_progress = match result {
+        let value = match result {
             Ok(v) => Loadable::Ready(v),
             Err(e) => {
                 push_diagnostic(repo_state, DiagnosticKind::Error, e.to_string());
                 Loadable::Error(e.to_string())
             }
         };
+        repo_state.set_rebase_in_progress(value);
         if repo_state
             .loads_in_flight
             .finish(RepoLoadsInFlight::REBASE_STATE)
@@ -182,13 +183,14 @@ pub(super) fn merge_commit_message_loaded(
 ) -> Vec<Effect> {
     let mut effects = Vec::new();
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
-        repo_state.merge_commit_message = match result {
+        let value = match result {
             Ok(v) => Loadable::Ready(v),
             Err(e) => {
                 push_diagnostic(repo_state, DiagnosticKind::Error, e.to_string());
                 Loadable::Error(e.to_string())
             }
         };
+        repo_state.set_merge_commit_message(value);
         if repo_state
             .loads_in_flight
             .finish(RepoLoadsInFlight::MERGE_COMMIT_MESSAGE)
@@ -212,10 +214,10 @@ pub(super) fn log_loaded(
 
         if repo_state.history_scope != scope {
             if is_load_more {
-                repo_state.log_loading_more = false;
+                repo_state.set_log_loading_more(false);
             }
             if let Some(next) = repo_state.loads_in_flight.finish_log() {
-                repo_state.log_loading_more = next.cursor.is_some();
+                repo_state.set_log_loading_more(next.cursor.is_some());
                 effects.push(Effect::LoadLog {
                     repo_id,
                     scope: next.scope,
@@ -232,24 +234,25 @@ pub(super) fn log_loaded(
                     let existing = Arc::make_mut(existing);
                     existing.commits.append(&mut page.commits);
                     existing.next_cursor = page.next_cursor;
+                    repo_state.log_rev = repo_state.log_rev.wrapping_add(1);
                 } else {
-                    repo_state.log = Loadable::Ready(Arc::new(page));
+                    repo_state.set_log(Loadable::Ready(Arc::new(page)));
                 }
             }
             Err(e) => {
                 push_diagnostic(repo_state, DiagnosticKind::Error, e.to_string());
                 if !is_load_more {
-                    repo_state.log = Loadable::Error(e.to_string());
+                    repo_state.set_log(Loadable::Error(e.to_string()));
                 }
             }
         }
 
         if is_load_more {
-            repo_state.log_loading_more = false;
+            repo_state.set_log_loading_more(false);
         }
 
         if let Some(next) = repo_state.loads_in_flight.finish_log() {
-            repo_state.log_loading_more = next.cursor.is_some();
+            repo_state.set_log_loading_more(next.cursor.is_some());
             effects.push(Effect::LoadLog {
                 repo_id,
                 scope: next.scope,
@@ -268,6 +271,7 @@ pub(super) fn repo_action_finished(
 ) -> Vec<Effect> {
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
         repo_state.local_actions_in_flight = repo_state.local_actions_in_flight.saturating_sub(1);
+        repo_state.bump_ops_rev();
         match result {
             Ok(()) => repo_state.last_error = None,
             Err(e) => {

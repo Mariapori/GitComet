@@ -326,20 +326,20 @@ pub(super) fn repo_opened_ok(
     };
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
         repo_state.spec = spec;
-        repo_state.open = Loadable::Ready(());
+        repo_state.set_open(Loadable::Ready(()));
         repo_state.set_head_branch(Loadable::Loading);
-        repo_state.upstream_divergence = Loadable::Loading;
+        repo_state.set_upstream_divergence(Loadable::Loading);
         repo_state.set_branches(Loadable::Loading);
         repo_state.set_tags(Loadable::Loading);
         repo_state.set_remotes(Loadable::Loading);
         repo_state.set_remote_branches(Loadable::Loading);
-        repo_state.status = Loadable::Loading;
-        repo_state.log = Loadable::Loading;
+        repo_state.set_status(Loadable::Loading);
+        repo_state.set_log(Loadable::Loading);
         repo_state.log_loading_more = false;
         repo_state.set_stashes(Loadable::Loading);
         repo_state.reflog = Loadable::NotLoaded;
-        repo_state.rebase_in_progress = Loadable::Loading;
-        repo_state.merge_commit_message = Loadable::Loading;
+        repo_state.set_rebase_in_progress(Loadable::Loading);
+        repo_state.set_merge_commit_message(Loadable::Loading);
         repo_state.file_history_path = None;
         repo_state.file_history = Loadable::NotLoaded;
         repo_state.blame_path = None;
@@ -347,12 +347,13 @@ pub(super) fn repo_opened_ok(
         repo_state.blame = Loadable::NotLoaded;
         repo_state.set_worktrees(Loadable::NotLoaded);
         repo_state.set_submodules(Loadable::NotLoaded);
-        repo_state.selected_commit = None;
-        repo_state.commit_details = Loadable::NotLoaded;
+        repo_state.set_selected_commit(None);
+        repo_state.set_commit_details(Loadable::NotLoaded);
         repo_state.diff_target = None;
         repo_state.diff = Loadable::NotLoaded;
         repo_state.diff_file = Loadable::NotLoaded;
         repo_state.diff_file_image = Loadable::NotLoaded;
+        repo_state.bump_diff_state_rev();
         repo_state.last_error = None;
 
         return refresh_full_effects(repo_state);
@@ -396,7 +397,7 @@ pub(super) fn repo_opened_err(
 
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
         repo_state.spec = spec;
-        repo_state.open = Loadable::Error(error.to_string());
+        repo_state.set_open(Loadable::Error(error.to_string()));
         repo_state.last_error = Some(error.to_string());
         push_diagnostic(repo_state, DiagnosticKind::Error, error.to_string());
     }

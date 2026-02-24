@@ -421,22 +421,8 @@ impl DetailsPaneView {
             })
             .unwrap_or(0);
 
-        let spinner = |id: (&'static str, u64), color: gpui::Rgba| {
-            gpui::svg()
-                .path("icons/spinner.svg")
-                .w(px(14.0))
-                .h(px(14.0))
-                .text_color(color)
-                .with_animation(
-                    id,
-                    gpui::Animation::new(std::time::Duration::from_millis(850)).repeat(),
-                    |svg, delta| {
-                        svg.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            delta * std::f32::consts::TAU,
-                        )))
-                    },
-                )
-        };
+        let spinner =
+            |id: (&'static str, u64), color: gpui::Rgba| svg_spinner(id, color, px(14.0));
         let repo_key = repo_id.map(|id| id.0).unwrap_or(0);
 
         let stage_all = zed::Button::new("stage_all", "Stage all changes")
@@ -765,29 +751,8 @@ impl DetailsPaneView {
             .is_some_and(|repo| repo.commit_in_flight > 0);
         let repo_key = self.active_repo_id().map(|id| id.0).unwrap_or(0);
         let icon_color = theme.colors.accent;
-        let icon = |path: &'static str| {
-            gpui::svg()
-                .path(path)
-                .w(px(14.0))
-                .h(px(14.0))
-                .text_color(icon_color)
-        };
-        let spinner = |id: (&'static str, u64)| {
-            gpui::svg()
-                .path("icons/spinner.svg")
-                .w(px(14.0))
-                .h(px(14.0))
-                .text_color(icon_color)
-                .with_animation(
-                    id,
-                    gpui::Animation::new(std::time::Duration::from_millis(850)).repeat(),
-                    |svg, delta| {
-                        svg.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            delta * std::f32::consts::TAU,
-                        )))
-                    },
-                )
-        };
+        let icon = |path: &'static str| svg_icon(path, icon_color, px(14.0));
+        let spinner = |id: (&'static str, u64)| svg_spinner(id, icon_color, px(14.0));
         if let Some(message) =
             self.active_repo()
                 .and_then(|repo| match &repo.merge_commit_message {

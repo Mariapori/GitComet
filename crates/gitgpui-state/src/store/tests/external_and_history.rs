@@ -686,3 +686,115 @@ fn log_loaded_appends_when_loading_more() {
     assert_eq!(page.commits[1].id.as_ref(), "c2");
     assert_eq!(page.next_cursor, None);
 }
+
+// --- Revision counter regression tests ---
+
+#[test]
+fn log_loaded_bumps_log_rev() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(2);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    repos.insert(repo_id, Arc::new(DummyRepo::new("/tmp/repo")));
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(repo_id);
+
+    let log_before = state.repos[0].log_rev;
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::LogLoaded {
+            repo_id,
+            scope: LogScope::CurrentBranch,
+            cursor: None,
+            result: Ok(LogPage {
+                commits: vec![Commit {
+                    id: CommitId("c1".to_string()),
+                    parent_ids: Vec::new(),
+                    summary: "s1".to_string(),
+                    author: "a".to_string(),
+                    time: SystemTime::UNIX_EPOCH,
+                }],
+                next_cursor: None,
+            }),
+        },
+    );
+
+    assert!(
+        state.repos[0].log_rev > log_before,
+        "log_rev should bump after LogLoaded"
+    );
+}
+
+#[test]
+fn set_history_scope_bumps_log_rev() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(2);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    repos.insert(repo_id, Arc::new(DummyRepo::new("/tmp/repo")));
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(repo_id);
+
+    let log_before = state.repos[0].log_rev;
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SetHistoryScope {
+            repo_id,
+            scope: LogScope::AllBranches,
+        },
+    );
+
+    assert!(
+        state.repos[0].log_rev > log_before,
+        "log_rev should bump after SetHistoryScope"
+    );
+}
+
+#[test]
+fn status_loaded_bumps_status_rev() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(2);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    repos.insert(repo_id, Arc::new(DummyRepo::new("/tmp/repo")));
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(repo_id);
+
+    let status_before = state.repos[0].status_rev;
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::StatusLoaded {
+            repo_id,
+            result: Ok(RepoStatus::default()),
+        },
+    );
+
+    assert!(
+        state.repos[0].status_rev > status_before,
+        "status_rev should bump after StatusLoaded"
+    );
+}

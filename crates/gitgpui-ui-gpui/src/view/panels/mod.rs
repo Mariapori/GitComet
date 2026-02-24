@@ -222,13 +222,7 @@ impl ContextMenuModel {
     }
 }
 
-struct HistoryColResizeDragGhost;
-
-impl Render for HistoryColResizeDragGhost {
-    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        div().w(px(0.0)).h(px(0.0))
-    }
-}
+// HistoryColResizeDragGhost moved to view/mod.rs for accessibility from panes::HistoryView.
 
 mod action_bar;
 mod bars;

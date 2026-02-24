@@ -1,4 +1,3 @@
-use super::super::fingerprint;
 use super::super::path_display;
 use super::super::*;
 use std::hash::{Hash, Hasher};
@@ -39,7 +38,6 @@ pub(in super::super) struct MainPaneView {
     pub(in super::super) diff_split_cache: Vec<PatchSplitRow>,
     pub(in super::super) diff_split_cache_len: usize,
     pub(in super::super) diff_panel_focus_handle: FocusHandle,
-    pub(in super::super) history_panel_focus_handle: FocusHandle,
     pub(in super::super) diff_autoscroll_pending: bool,
     pub(in super::super) diff_raw_input: Entity<zed::TextInput>,
     pub(in super::super) diff_visible_indices: Vec<usize>,
@@ -114,23 +112,7 @@ pub(in super::super) struct MainPaneView {
     pub(in super::super) conflict_resolved_preview_segments_cache:
         HashMap<usize, CachedDiffStyledText>,
 
-    pub(in super::super) history_cache_seq: u64,
-    pub(in super::super) history_cache_inflight: Option<HistoryCacheRequest>,
-    pub(in super::super) history_col_branch: Pixels,
-    pub(in super::super) history_col_graph: Pixels,
-    pub(in super::super) history_col_author: Pixels,
-    pub(in super::super) history_col_date: Pixels,
-    pub(in super::super) history_col_sha: Pixels,
-    pub(in super::super) history_show_author: bool,
-    pub(in super::super) history_show_date: bool,
-    pub(in super::super) history_show_sha: bool,
-    pub(in super::super) history_col_graph_auto: bool,
-    pub(in super::super) history_col_resize: Option<HistoryColResizeState>,
-    pub(in super::super) history_cache: Option<HistoryCache>,
-    pub(in super::super) history_worktree_summary_cache: Option<HistoryWorktreeSummaryCache>,
-    pub(in super::super) history_stash_ids_cache: Option<HistoryStashIdsCache>,
-
-    pub(in super::super) history_scroll: UniformListScrollHandle,
+    pub(in super::super) history_view: Entity<super::HistoryView>,
     pub(in super::super) diff_scroll: UniformListScrollHandle,
     pub(in super::super) diff_split_right_scroll: UniformListScrollHandle,
     pub(in super::super) conflict_resolver_diff_scroll: UniformListScrollHandle,
@@ -156,43 +138,16 @@ impl MainPaneView {
         if let Some(repo_id) = state.active_repo
             && let Some(repo) = state.repos.iter().find(|r| r.id == repo_id)
         {
-            let show_diff = repo.diff_target.is_some();
-            show_diff.hash(&mut hasher);
+            repo.diff_state_rev.hash(&mut hasher);
+            repo.conflict_rev.hash(&mut hasher);
 
-            if show_diff {
-                repo.diff_rev.hash(&mut hasher);
-                if let Some(t) = repo.diff_target.as_ref() {
-                    fingerprint::hash_diff_target(t, &mut hasher)
-                }
-                fingerprint::hash_loadable_arc(&repo.diff, &mut hasher);
-
-                repo.diff_file_rev.hash(&mut hasher);
-                fingerprint::hash_loadable_kind(&repo.diff_file, &mut hasher);
-                fingerprint::hash_loadable_kind(&repo.diff_file_image, &mut hasher);
-
-                repo.conflict_file_path.hash(&mut hasher);
-                fingerprint::hash_loadable_kind(&repo.conflict_file, &mut hasher);
-
-                let needs_status = matches!(repo.diff_target, Some(DiffTarget::WorkingTree { .. }));
-                needs_status.hash(&mut hasher);
-                if needs_status {
-                    fingerprint::hash_loadable_arc(&repo.status, &mut hasher);
-                }
+            // Only include status changes when viewing a working tree diff.
+            let status_rev = if matches!(repo.diff_target, Some(DiffTarget::WorkingTree { .. })) {
+                repo.status_rev
             } else {
-                repo.history_scope.hash(&mut hasher);
-                repo.head_branch_rev.hash(&mut hasher);
-                repo.branches_rev.hash(&mut hasher);
-                repo.remote_branches_rev.hash(&mut hasher);
-                repo.tags_rev.hash(&mut hasher);
-                repo.stashes_rev.hash(&mut hasher);
-
-                repo.selected_commit.hash(&mut hasher);
-                repo.log_loading_more.hash(&mut hasher);
-                fingerprint::hash_loadable_arc(&repo.log, &mut hasher);
-
-                // Used for the "Working Tree" summary row.
-                fingerprint::hash_loadable_arc(&repo.status, &mut hasher);
-            }
+                0
+            };
+            status_rev.hash(&mut hasher);
         }
 
         hasher.finish()
@@ -311,7 +266,24 @@ impl MainPaneView {
         });
 
         let diff_panel_focus_handle = cx.focus_handle().tab_index(0).tab_stop(false);
-        let history_panel_focus_handle = cx.focus_handle().tab_index(0).tab_stop(false);
+
+        let last_window_size = window.window_bounds().get_bounds().size;
+        let history_view = cx.new(|cx| {
+            super::HistoryView::new(
+                Arc::clone(&store),
+                ui_model.clone(),
+                theme,
+                date_time_format,
+                history_show_author,
+                history_show_date,
+                history_show_sha,
+                root_view.clone(),
+                tooltip_host.clone(),
+                last_window_size,
+                window,
+                cx,
+            )
+        });
 
         let mut pane = Self {
             store,
@@ -342,7 +314,6 @@ impl MainPaneView {
             diff_split_cache: Vec::new(),
             diff_split_cache_len: 0,
             diff_panel_focus_handle,
-            history_panel_focus_handle,
             diff_autoscroll_pending: false,
             diff_raw_input,
             diff_visible_indices: Vec::new(),
@@ -409,22 +380,7 @@ impl MainPaneView {
             conflict_resolved_preview_syntax_language: None,
             conflict_resolved_preview_lines: Vec::new(),
             conflict_resolved_preview_segments_cache: HashMap::default(),
-            history_cache_seq: 0,
-            history_cache_inflight: None,
-            history_col_branch: px(HISTORY_COL_BRANCH_PX),
-            history_col_graph: px(HISTORY_COL_GRAPH_PX),
-            history_col_author: px(HISTORY_COL_AUTHOR_PX),
-            history_col_date: px(HISTORY_COL_DATE_PX),
-            history_col_sha: px(HISTORY_COL_SHA_PX),
-            history_show_author,
-            history_show_date,
-            history_show_sha,
-            history_col_graph_auto: true,
-            history_col_resize: None,
-            history_cache: None,
-            history_worktree_summary_cache: None,
-            history_stash_ids_cache: None,
-            history_scroll: UniformListScrollHandle::default(),
+            history_view,
             diff_scroll: UniformListScrollHandle::default(),
             diff_split_right_scroll: UniformListScrollHandle::default(),
             conflict_resolver_diff_scroll: UniformListScrollHandle::default(),
@@ -455,6 +411,8 @@ impl MainPaneView {
         if let Some(input) = &self.diff_hunk_picker_search_input {
             input.update(cx, |input, cx| input.set_theme(theme, cx));
         }
+        self.history_view
+            .update(cx, |view, cx| view.set_theme(theme, cx));
         cx.notify();
     }
 
@@ -466,7 +424,9 @@ impl MainPaneView {
         if self.active_context_menu_invoker == next {
             return;
         }
-        self.active_context_menu_invoker = next;
+        self.active_context_menu_invoker = next.clone();
+        self.history_view
+            .update(cx, |view, cx| view.set_active_context_menu_invoker(next, cx));
         cx.notify();
     }
 
@@ -479,8 +439,8 @@ impl MainPaneView {
             return;
         }
         self.date_time_format = next;
-        self.history_cache = None;
-        self.history_cache_inflight = None;
+        self.history_view
+            .update(cx, |view, cx| view.set_date_time_format(next, cx));
         cx.notify();
     }
 
@@ -493,12 +453,11 @@ impl MainPaneView {
         self.state.repos.iter().find(|r| r.id == repo_id)
     }
 
-    pub(in super::super) fn history_visible_column_preferences(&self) -> (bool, bool, bool) {
-        (
-            self.history_show_author,
-            self.history_show_date,
-            self.history_show_sha,
-        )
+    pub(in super::super) fn history_visible_column_preferences(
+        &self,
+        cx: &gpui::App,
+    ) -> (bool, bool, bool) {
+        self.history_view.read(cx).history_visible_column_preferences()
     }
 
     pub(in super::super) fn open_popover_at(
@@ -514,24 +473,6 @@ impl MainPaneView {
             let _ = window_handle.update(cx, |_, window, cx| {
                 let _ = root_view.update(cx, |root, cx| {
                     root.open_popover_at(kind, anchor, window, cx);
-                });
-            });
-        });
-    }
-
-    pub(in super::super) fn open_popover_for_bounds(
-        &mut self,
-        kind: PopoverKind,
-        anchor_bounds: Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        let root_view = self.root_view.clone();
-        let window_handle = window.window_handle();
-        cx.defer(move |cx| {
-            let _ = window_handle.update(cx, |_, window, cx| {
-                let _ = root_view.update(cx, |root, cx| {
-                    root.open_popover_for_bounds(kind, anchor_bounds, window, cx);
                 });
             });
         });
@@ -649,8 +590,10 @@ impl MainPaneView {
         self.sync_conflict_resolver(cx);
 
         if prev_active_repo_id != next_repo_id {
-            self.history_scroll
-                .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
+            self.history_view.update(cx, |view, _| {
+                view.history_scroll
+                    .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
+            });
         }
 
         let should_rebuild_diff_cache = self.diff_cache_repo_id != next_repo_id
@@ -660,9 +603,7 @@ impl MainPaneView {
             self.rebuild_diff_cache(cx);
         }
 
-        // Precompute derived data that would otherwise be recalculated in hot render paths.
-        let _ = self.ensure_history_worktree_summary_cache();
-        let _ = self.ensure_history_stash_ids_cache();
+        // History caches are now managed by HistoryView.
     }
 
     pub(in super::super) fn cached_path_display(&self, path: &std::path::PathBuf) -> SharedString {
@@ -693,10 +634,12 @@ impl MainPaneView {
             }
         }
 
-        self.prune_diff_text_layout_cache();
     }
 
-    fn prune_diff_text_layout_cache(&mut self) {
+    /// Prune the layout cache if it has grown past the high-water mark.
+    /// Call once per render frame (after bumping the epoch), **not** from
+    /// the per-row `touch_diff_text_layout_cache` hot path.
+    pub(in super::super) fn prune_diff_text_layout_cache(&mut self) {
         if self.diff_text_layout_cache.len()
             <= DIFF_TEXT_LAYOUT_CACHE_MAX_ENTRIES + DIFF_TEXT_LAYOUT_CACHE_PRUNE_OVERAGE
         {
@@ -1082,65 +1025,6 @@ impl MainPaneView {
         (self.last_window_size.width - sidebar_w - details_w - handles_w).max(px(0.0))
     }
 
-    pub(in super::super) fn history_visible_columns(&self) -> (bool, bool, bool) {
-        // Prefer keeping commit message visible. Hide SHA first, then date, then author.
-        let mut available = self.last_window_size.width;
-        available -= px(280.0);
-        available -= px(420.0);
-        available -= px(64.0);
-        if available <= px(0.0) {
-            return (false, false, false);
-        }
-
-        let min_message = px(220.0);
-
-        let mut show_author = self.history_show_author;
-        let mut show_date = self.history_show_date;
-        let mut show_sha = self.history_show_sha;
-
-        // Always show Branch + Graph; Message is flex.
-        let fixed_base = self.history_col_branch + self.history_col_graph;
-        let mut fixed = fixed_base
-            + if show_author {
-                self.history_col_author
-            } else {
-                px(0.0)
-            }
-            + if show_date {
-                self.history_col_date
-            } else {
-                px(0.0)
-            }
-            + if show_sha {
-                self.history_col_sha
-            } else {
-                px(0.0)
-            };
-
-        if available - fixed < min_message && show_sha {
-            show_sha = false;
-            fixed -= self.history_col_sha;
-        }
-        if available - fixed < min_message {
-            if show_date {
-                show_date = false;
-                fixed -= self.history_col_date;
-            }
-            show_sha = false;
-        }
-        if available - fixed < min_message && show_author {
-            show_author = false;
-            fixed -= self.history_col_author;
-        }
-
-        if available - fixed < min_message {
-            show_author = false;
-            show_date = false;
-            show_sha = false;
-        }
-
-        (show_author, show_date, show_sha)
-    }
 }
 
 impl MainPaneView {
@@ -1906,15 +1790,17 @@ impl MainPaneView {
 impl Render for MainPaneView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         self.last_window_size = window.window_bounds().get_bounds().size;
+        self.history_view
+            .update(cx, |v, _| v.set_last_window_size(self.last_window_size));
 
         let show_diff = self
             .active_repo()
             .and_then(|r| r.diff_target.as_ref())
             .is_some();
         if show_diff {
-            self.diff_view(cx)
+            div().size_full().child(self.diff_view(cx))
         } else {
-            self.history_view(cx)
+            div().size_full().child(self.history_view.clone())
         }
     }
 }

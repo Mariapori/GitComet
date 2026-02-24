@@ -32,6 +32,7 @@ fn normalize_repo_relative_path(
 fn begin_local_action(state: &mut AppState, repo_id: RepoId) {
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
         repo_state.local_actions_in_flight = repo_state.local_actions_in_flight.saturating_add(1);
+        repo_state.bump_ops_rev();
     }
 }
 
@@ -39,6 +40,7 @@ fn begin_commit_action(state: &mut AppState, repo_id: RepoId) {
     if let Some(repo_state) = state.repos.iter_mut().find(|r| r.id == repo_id) {
         repo_state.local_actions_in_flight = repo_state.local_actions_in_flight.saturating_add(1);
         repo_state.commit_in_flight = repo_state.commit_in_flight.saturating_add(1);
+        repo_state.bump_ops_rev();
     }
 }
 

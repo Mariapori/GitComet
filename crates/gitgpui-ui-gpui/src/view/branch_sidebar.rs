@@ -142,7 +142,7 @@ pub(super) fn branch_sidebar_rows(repo: &RepoState) -> Vec<BranchSidebarRow> {
             let mut local_meta: HashMap<String, (Option<UpstreamDivergence>, bool)> =
                 HashMap::default();
             local_meta.reserve(branches.len());
-            for b in branches {
+            for b in branches.iter() {
                 local_meta.insert(
                     b.name.clone(),
                     (b.divergence, head.is_some_and(|h| h == b.name)),
@@ -150,7 +150,7 @@ pub(super) fn branch_sidebar_rows(repo: &RepoState) -> Vec<BranchSidebarRow> {
             }
 
             let mut tree = SlashTree::default();
-            for branch in branches {
+            for branch in branches.iter() {
                 tree.insert(&branch.name);
             }
             push_slash_tree_rows(
@@ -188,7 +188,7 @@ pub(super) fn branch_sidebar_rows(repo: &RepoState) -> Vec<BranchSidebarRow> {
     let mut remote_section_is_loading_or_error = false;
     match &repo.remote_branches {
         Loadable::Ready(branches) => {
-            for branch in branches {
+            for branch in branches.iter() {
                 remotes
                     .entry(branch.remote.clone())
                     .or_default()
@@ -216,7 +216,7 @@ pub(super) fn branch_sidebar_rows(repo: &RepoState) -> Vec<BranchSidebarRow> {
         if let Loadable::Ready(known) = &repo.remotes {
             // Ensure remotes with no local remote-tracking branches are still visible (e.g. newly
             // added remotes before an initial fetch).
-            for remote in known {
+            for remote in known.iter() {
                 remotes.entry(remote.name.clone()).or_default();
             }
         }
@@ -261,7 +261,7 @@ pub(super) fn branch_sidebar_rows(repo: &RepoState) -> Vec<BranchSidebarRow> {
     match &repo.worktrees {
         Loadable::Ready(worktrees) => {
             let mut any = false;
-            for worktree in worktrees {
+            for worktree in worktrees.iter() {
                 any = true;
                 let label: SharedString = if let Some(branch) = &worktree.branch {
                     format!("{branch}  {}", worktree.path.display()).into()
@@ -305,7 +305,7 @@ pub(super) fn branch_sidebar_rows(repo: &RepoState) -> Vec<BranchSidebarRow> {
             });
         }
         Loadable::Ready(submodules) => {
-            for submodule in submodules {
+            for submodule in submodules.iter() {
                 let label: SharedString = submodule.path.display().to_string().into();
                 let tooltip: SharedString = submodule.path.display().to_string().into();
                 rows.push(BranchSidebarRow::SubmoduleItem {
@@ -335,7 +335,7 @@ pub(super) fn branch_sidebar_rows(repo: &RepoState) -> Vec<BranchSidebarRow> {
             });
         }
         Loadable::Ready(stashes) => {
-            for stash in stashes {
+            for stash in stashes.iter() {
                 let row_group: SharedString = format!("stash_row_{}", stash.index).into();
                 let apply_button_id: SharedString =
                     format!("stash_sidebar_apply_{}", stash.index).into();

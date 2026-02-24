@@ -10,10 +10,11 @@ impl MainPaneView {
         cx: &mut gpui::Context<Self>,
     ) -> Vec<AnyElement> {
         let min_width = this.diff_horizontal_min_width;
+        static EMPTY_QUERY: SharedString = SharedString::new_static("");
         let query = if this.diff_search_active {
             this.diff_search_query.clone()
         } else {
-            SharedString::default()
+            EMPTY_QUERY.clone()
         };
 
         if this.is_file_diff_view_active() {
@@ -81,7 +82,7 @@ impl MainPaneView {
                             theme,
                             diff_content_text(line),
                             word_ranges,
-                            query.as_ref(),
+                            &query,
                             language,
                             syntax_mode,
                             word_color,
@@ -162,7 +163,7 @@ impl MainPaneView {
                 let language = this.diff_language_for_src_ix.get(src_ix).copied().flatten();
 
                 let should_style =
-                    matches!(click_kind, DiffClickKind::Line) || !query.as_ref().is_empty();
+                    matches!(click_kind, DiffClickKind::Line) || !query.is_empty();
                 if should_style && this.diff_text_segments_cache_get(src_ix).is_none() {
                     let Some(line) = this.diff_cache.get(src_ix) else {
                         return div()
@@ -186,7 +187,7 @@ impl MainPaneView {
                             theme,
                             diff_content_text(line),
                             word_ranges,
-                            query.as_ref(),
+                            &query,
                             language,
                             syntax_mode,
                             word_color,
@@ -198,7 +199,7 @@ impl MainPaneView {
                             theme,
                             display.as_ref(),
                             &[] as &[Range<usize>],
-                            query.as_ref(),
+                            &query,
                             None,
                             syntax_mode,
                             None,
@@ -259,10 +260,11 @@ impl MainPaneView {
         cx: &mut gpui::Context<Self>,
     ) -> Vec<AnyElement> {
         let min_width = this.diff_horizontal_min_width;
+        static EMPTY_QUERY: SharedString = SharedString::new_static("");
         let query = if this.diff_search_active {
             this.diff_search_query.clone()
         } else {
-            SharedString::default()
+            EMPTY_QUERY.clone()
         };
 
         if this.is_file_diff_view_active() {
@@ -323,7 +325,7 @@ impl MainPaneView {
                                 theme,
                                 text,
                                 word_ranges,
-                                query.as_ref(),
+                                &query,
                                 language,
                                 syntax_mode,
                                 word_color,
@@ -439,7 +441,7 @@ impl MainPaneView {
                                 theme,
                                 text,
                                 word_ranges,
-                                query.as_ref(),
+                                &query,
                                 language,
                                 syntax_mode,
                                 word_color,
@@ -489,7 +491,7 @@ impl MainPaneView {
                                 .into_any_element();
                         };
                         let file_stat = this.diff_file_stats.get(src_ix).and_then(|s| *s);
-                        let should_style = !query.as_ref().is_empty();
+                        let should_style = !query.is_empty();
                         if should_style && this.diff_text_segments_cache_get(src_ix).is_none() {
                             let display = this
                                 .diff_text_line_for_region(visible_ix, DiffTextRegion::SplitLeft);
@@ -497,7 +499,7 @@ impl MainPaneView {
                                 theme,
                                 display.as_ref(),
                                 &[],
-                                query.as_ref(),
+                                &query,
                                 None,
                                 syntax_mode,
                                 None,
@@ -550,10 +552,11 @@ impl MainPaneView {
         cx: &mut gpui::Context<Self>,
     ) -> Vec<AnyElement> {
         let min_width = this.diff_horizontal_min_width;
+        static EMPTY_QUERY: SharedString = SharedString::new_static("");
         let query = if this.diff_search_active {
             this.diff_search_query.clone()
         } else {
-            SharedString::default()
+            EMPTY_QUERY.clone()
         };
 
         if this.is_file_diff_view_active() {
@@ -614,7 +617,7 @@ impl MainPaneView {
                                 theme,
                                 text,
                                 word_ranges,
-                                query.as_ref(),
+                                &query,
                                 language,
                                 syntax_mode,
                                 word_color,
@@ -730,7 +733,7 @@ impl MainPaneView {
                                 theme,
                                 text,
                                 word_ranges,
-                                query.as_ref(),
+                                &query,
                                 language,
                                 syntax_mode,
                                 word_color,
@@ -780,7 +783,7 @@ impl MainPaneView {
                                 .into_any_element();
                         };
                         let file_stat = this.diff_file_stats.get(src_ix).and_then(|s| *s);
-                        let should_style = !query.as_ref().is_empty();
+                        let should_style = !query.is_empty();
                         if should_style && this.diff_text_segments_cache_get(src_ix).is_none() {
                             let display = this
                                 .diff_text_line_for_region(visible_ix, DiffTextRegion::SplitRight);
@@ -788,7 +791,7 @@ impl MainPaneView {
                                 theme,
                                 display.as_ref(),
                                 &[],
-                                query.as_ref(),
+                                &query,
                                 None,
                                 syntax_mode,
                                 None,
