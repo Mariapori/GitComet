@@ -26,6 +26,19 @@ impl MainPaneView {
                 .position(|r| r.contains(&ix))
         };
 
+        // Build per-conflict choice lookup so we can highlight the selected column.
+        let conflict_choices: Vec<conflict_resolver::ConflictChoice> = this
+            .conflict_resolver
+            .marker_segments
+            .iter()
+            .filter_map(|seg| match seg {
+                conflict_resolver::ConflictSegment::Block(b) => Some(b.choice),
+                _ => None,
+            })
+            .collect();
+
+        let word_hl_color = Some(theme.colors.warning);
+
         // Pre-build styled text cache entries for lines with word highlights.
         for ix in range.clone() {
             for (col, highlights_vec) in [
@@ -86,12 +99,18 @@ impl MainPaneView {
                     "",
                     None,
                     DiffSyntaxMode::HeuristicOnly,
-                    None,
+                    word_hl_color,
                 );
                 this.conflict_three_way_segments_cache
                     .insert((ix, col), styled);
             }
         }
+
+        // Background for the selected (chosen) column in a conflict range.
+        let chosen_bg = with_alpha(
+            theme.colors.accent,
+            if theme.is_dark { 0.16 } else { 0.12 },
+        );
 
         let mut elements = Vec::with_capacity(range.len());
         for ix in range {
@@ -102,6 +121,15 @@ impl MainPaneView {
                 active_range.as_ref().map_or(false, |r| r.contains(&ix));
             let range_ix = conflict_range_for_ix(ix);
             let is_in_conflict = range_ix.is_some();
+
+            // Which column is chosen for this conflict?
+            let choice_for_row = range_ix.and_then(|ri| conflict_choices.get(ri).copied());
+            let base_is_chosen =
+                choice_for_row == Some(conflict_resolver::ConflictChoice::Base);
+            let ours_is_chosen =
+                choice_for_row == Some(conflict_resolver::ConflictChoice::Ours);
+            let theirs_is_chosen =
+                choice_for_row == Some(conflict_resolver::ConflictChoice::Theirs);
 
             let base_styled = this
                 .conflict_three_way_segments_cache
@@ -129,6 +157,7 @@ impl MainPaneView {
                     theme.colors.text_muted
                 })
                 .whitespace_nowrap()
+                .when(base_is_chosen, |d| d.bg(chosen_bg))
                 .child(
                     div().w(px(38.0)).text_color(theme.colors.text_muted).child(
                         line_number_string(
@@ -175,6 +204,7 @@ impl MainPaneView {
                     theme.colors.text_muted
                 })
                 .whitespace_nowrap()
+                .when(ours_is_chosen, |d| d.bg(chosen_bg))
                 .child(
                     div().w(px(38.0)).text_color(theme.colors.text_muted).child(
                         line_number_string(
@@ -220,6 +250,7 @@ impl MainPaneView {
                     theme.colors.text_muted
                 })
                 .whitespace_nowrap()
+                .when(theirs_is_chosen, |d| d.bg(chosen_bg))
                 .child(
                     div().w(px(38.0)).text_color(theme.colors.text_muted).child(
                         line_number_string(

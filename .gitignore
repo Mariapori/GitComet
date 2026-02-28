@@ -8,3 +8,5 @@ zed
 callgrind.out*
 *.orig
 gitgpui-agent*
+local_*.sh
+tmp/*

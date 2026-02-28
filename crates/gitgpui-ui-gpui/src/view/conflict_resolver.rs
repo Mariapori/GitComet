@@ -358,6 +358,65 @@ pub fn compute_two_way_word_highlights(
         .collect()
 }
 
+/// When conflict markers use 2-way style (no `|||||||` base section), `block.base`
+/// will be `None` even though the git ancestor content (index stage :1:) is available.
+/// This function populates `block.base` by using the Text segments as anchors to
+/// locate the corresponding base content in the ancestor file.
+pub fn populate_block_bases_from_ancestor(
+    segments: &mut [ConflictSegment],
+    ancestor_text: &str,
+) {
+    if ancestor_text.is_empty() {
+        return;
+    }
+    let any_missing = segments
+        .iter()
+        .any(|s| matches!(s, ConflictSegment::Block(b) if b.base.is_none()));
+    if !any_missing {
+        return;
+    }
+
+    // Find each Text segment's byte position in the ancestor file.
+    // Text segments are the non-conflicting parts that exist in all three versions.
+    let mut text_byte_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut cursor = 0usize;
+    for seg in segments.iter() {
+        if let ConflictSegment::Text(text) = seg {
+            if let Some(rel) = ancestor_text[cursor..].find(text.as_str()) {
+                let start = cursor + rel;
+                let end = start + text.len();
+                text_byte_ranges.push(start..end);
+                cursor = end;
+            } else {
+                // Text not found in ancestor – bail out.
+                return;
+            }
+        }
+    }
+
+    // Extract base content for each block from the gaps between text positions.
+    let mut text_idx = 0usize;
+    let mut prev_end = 0usize;
+    for seg in segments.iter_mut() {
+        match seg {
+            ConflictSegment::Text(_) => {
+                prev_end = text_byte_ranges[text_idx].end;
+                text_idx += 1;
+            }
+            ConflictSegment::Block(block) => {
+                if block.base.is_some() {
+                    continue;
+                }
+                let next_start = text_byte_ranges
+                    .get(text_idx)
+                    .map(|r| r.start)
+                    .unwrap_or(ancestor_text.len());
+                block.base = Some(ancestor_text[prev_end..next_start].to_string());
+            }
+        }
+    }
+}
+
 pub fn append_lines_to_output(output: &str, lines: &[String]) -> String {
     if lines.is_empty() {
         return output.to_string();
@@ -467,5 +526,87 @@ mod tests {
         assert_eq!(out, "a\nb\nc\n");
         let out = append_lines_to_output("a", &["b".into()]);
         assert_eq!(out, "a\nb\n");
+    }
+
+    #[test]
+    fn populate_block_bases_from_ancestor_fills_missing_base() {
+        // 2-way conflict markers (no base section)
+        let input = "a\n<<<<<<< HEAD\none\ntwo\n=======\nuno\ndos\n>>>>>>> other\nb\n";
+        let mut segments = parse_conflict_markers(input);
+        assert_eq!(conflict_count(&segments), 1);
+
+        // The block has no base initially (2-way markers)
+        let block = segments.iter().find_map(|s| match s {
+            ConflictSegment::Block(b) => Some(b),
+            _ => None,
+        }).unwrap();
+        assert!(block.base.is_none());
+
+        // Populate base from ancestor file
+        let ancestor = "a\norig\nb\n";
+        populate_block_bases_from_ancestor(&mut segments, ancestor);
+
+        // Now the block should have base content extracted from the ancestor
+        let block = segments.iter().find_map(|s| match s {
+            ConflictSegment::Block(b) => Some(b),
+            _ => None,
+        }).unwrap();
+        assert_eq!(block.base.as_deref(), Some("orig\n"));
+    }
+
+    #[test]
+    fn populate_block_bases_preserves_existing_base() {
+        // 3-way conflict markers (with base section)
+        let input = "a\n<<<<<<< ours\none\n||||||| base\norig\n=======\nuno\n>>>>>>> theirs\nb\n";
+        let mut segments = parse_conflict_markers(input);
+
+        // Block already has base from markers
+        let block = segments.iter().find_map(|s| match s {
+            ConflictSegment::Block(b) => Some(b),
+            _ => None,
+        }).unwrap();
+        assert_eq!(block.base.as_deref(), Some("orig\n"));
+
+        // populate should not overwrite existing base
+        populate_block_bases_from_ancestor(&mut segments, "a\nDIFFERENT\nb\n");
+        let block = segments.iter().find_map(|s| match s {
+            ConflictSegment::Block(b) => Some(b),
+            _ => None,
+        }).unwrap();
+        assert_eq!(block.base.as_deref(), Some("orig\n")); // unchanged
+    }
+
+    #[test]
+    fn populate_block_bases_multiple_conflicts() {
+        let input = "a\n<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> other\nb\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\nc\n";
+        let mut segments = parse_conflict_markers(input);
+        assert_eq!(conflict_count(&segments), 2);
+
+        let ancestor = "a\norig_foo\nb\norig_x\nc\n";
+        populate_block_bases_from_ancestor(&mut segments, ancestor);
+
+        let blocks: Vec<_> = segments.iter().filter_map(|s| match s {
+            ConflictSegment::Block(b) => Some(b),
+            _ => None,
+        }).collect();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].base.as_deref(), Some("orig_foo\n"));
+        assert_eq!(blocks[1].base.as_deref(), Some("orig_x\n"));
+    }
+
+    #[test]
+    fn populate_block_bases_generates_correct_resolved_text() {
+        let input = "a\n<<<<<<< HEAD\none\n=======\nuno\n>>>>>>> other\nb\n";
+        let mut segments = parse_conflict_markers(input);
+
+        let ancestor = "a\norig\nb\n";
+        populate_block_bases_from_ancestor(&mut segments, ancestor);
+
+        // Pick Base and generate resolved text
+        if let Some(ConflictSegment::Block(block)) = segments.iter_mut().find(|s| matches!(s, ConflictSegment::Block(_))) {
+            block.choice = ConflictChoice::Base;
+        }
+        let resolved = generate_resolved_text(&segments);
+        assert_eq!(resolved, "a\norig\nb\n");
     }
 }

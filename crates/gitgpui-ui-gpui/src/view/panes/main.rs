@@ -1499,7 +1499,7 @@ impl MainPaneView {
         self.conflict_diff_segments_cache_split.clear();
         self.conflict_diff_segments_cache_inline.clear();
 
-        let (marker_segments, resolved) = if let Some(cur) = file.current.as_deref() {
+        let (mut marker_segments, resolved) = if let Some(cur) = file.current.as_deref() {
             let segments = conflict_resolver::parse_conflict_markers(cur);
             if conflict_resolver::conflict_count(&segments) > 0 {
                 let resolved = conflict_resolver::generate_resolved_text(&segments);
@@ -1517,6 +1517,16 @@ impl MainPaneView {
         let ours_text = file.ours.as_deref().unwrap_or("");
         let theirs_text = file.theirs.as_deref().unwrap_or("");
         let base_text = file.base.as_deref().unwrap_or("");
+
+        // When conflict markers are 2-way (no base section), populate block.base
+        // from the git ancestor file so "A (base)" picks work.
+        if !base_text.is_empty() {
+            conflict_resolver::populate_block_bases_from_ancestor(
+                &mut marker_segments,
+                base_text,
+            );
+        }
+
         let diff_rows = gitgpui_core::file_diff::side_by_side_rows(ours_text, theirs_text);
         let inline_rows = conflict_resolver::build_inline_rows(&diff_rows);
 
@@ -1878,8 +1888,8 @@ impl MainPaneView {
                 self.conflict_resolver_diff_scroll
                     .scroll_to_item_strict(range.start, gpui::ScrollStrategy::Center);
             }
-            cx.notify();
         }
+        cx.notify();
     }
 
     pub(in super::super) fn conflict_resolver_pick_all_conflicts(
@@ -1903,6 +1913,7 @@ impl MainPaneView {
         let resolved =
             conflict_resolver::generate_resolved_text(&self.conflict_resolver.marker_segments);
         self.conflict_resolver_set_output(resolved, cx);
+        cx.notify();
     }
 }
 
