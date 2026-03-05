@@ -1162,11 +1162,10 @@ fn build_synthetic_commits_with_merge_stride(
             parent_ids.push(CommitId(format!("{:040x}", ix - 1)));
         }
         // Synthetic merge-like commits at a fixed cadence.
-        if merge_every > 0 && merge_back_distance > 0 && ix >= merge_back_distance {
-            if ix % merge_every == 0 {
+        if merge_every > 0 && merge_back_distance > 0 && ix >= merge_back_distance
+            && ix % merge_every == 0 {
                 parent_ids.push(CommitId(format!("{:040x}", ix - merge_back_distance)));
             }
-        }
 
         commits.push(Commit {
             id,
