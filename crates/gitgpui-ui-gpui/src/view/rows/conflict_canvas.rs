@@ -718,8 +718,8 @@ fn whitespace_visible_text_and_highlights(
         }
         let end = start + ch.len_utf8();
         let mapped_end = out.len();
-        for ix in (start + 1)..=end {
-            byte_map[ix] = mapped_end;
+        for mapped in byte_map.iter_mut().take(end + 1).skip(start + 1) {
+            *mapped = mapped_end;
         }
     }
 
