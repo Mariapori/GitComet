@@ -272,9 +272,11 @@ fn set_fixed_mtime(path: &Path) {
 
 #[cfg(not(windows))]
 fn set_fixed_mtime(path: &Path) {
+    // `touch -d` is GNU-specific; `-t [[CC]YY]MMDDhhmm[.ss]` is supported on
+    // both GNU/Linux and BSD/macOS.
     let status = Command::new("touch")
-        .arg("-d")
-        .arg("@1700000000")
+        .arg("-t")
+        .arg("202311142213.20")
         .arg(path)
         .status()
         .expect("touch to run");
@@ -288,7 +290,7 @@ fn cmd_same_size_content_change_and_exit_failure() -> &'static str {
 
 #[cfg(not(windows))]
 fn cmd_same_size_content_change_and_exit_failure() -> &'static str {
-    "len=$(wc -c < \"$MERGED\"); head -c \"$len\" /dev/zero | tr '\\0' 'R' > \"$MERGED\"; touch -d '@1700000000' \"$MERGED\"; exit 1"
+    "len=$(wc -c < \"$MERGED\"); head -c \"$len\" /dev/zero | tr '\\0' 'R' > \"$MERGED\"; touch -t 202311142213.20 \"$MERGED\"; exit 1"
 }
 
 #[cfg(windows)]
@@ -1922,10 +1924,7 @@ fn launch_mergetool_trust_exit_false_requires_content_change() {
     setup_both_modified_text_conflict(repo, "a.txt", "ours\n", "theirs\n");
 
     run_git(repo, &["config", "merge.tool", "fake"]);
-    run_git(
-        repo,
-        &["config", "mergetool.fake.cmd", cmd_exit_success()],
-    );
+    run_git(repo, &["config", "mergetool.fake.cmd", cmd_exit_success()]);
     run_git(repo, &["config", "mergetool.fake.trustExitCode", "false"]);
 
     let backend = GixBackend;
@@ -2148,7 +2147,10 @@ fn launch_mergetool_custom_cmd_supports_cmd_percent_env_variables() {
     assert!(result.success, "{result:?}");
     assert_eq!(result.tool_name, "fake");
     assert_eq!(result.output.exit_code, Some(0));
-    assert_eq!(fs::read_to_string(repo.join(conflicted_path)).unwrap(), "theirs\n");
+    assert_eq!(
+        fs::read_to_string(repo.join(conflicted_path)).unwrap(),
+        "theirs\n"
+    );
 }
 
 #[test]
@@ -2218,19 +2220,11 @@ fn launch_mergetool_prefers_merge_guitool_when_gui_default_true() {
     run_git(repo, &["config", "mergetool.guiDefault", "true"]);
     run_git(
         repo,
-        &[
-            "config",
-            "mergetool.cli.cmd",
-            cmd_write_cli_to_merged(),
-        ],
+        &["config", "mergetool.cli.cmd", cmd_write_cli_to_merged()],
     );
     run_git(
         repo,
-        &[
-            "config",
-            "mergetool.gui.cmd",
-            cmd_write_gui_to_merged(),
-        ],
+        &["config", "mergetool.gui.cmd", cmd_write_gui_to_merged()],
     );
     run_git(repo, &["config", "mergetool.cli.trustExitCode", "true"]);
     run_git(repo, &["config", "mergetool.gui.trustExitCode", "true"]);
@@ -2314,11 +2308,7 @@ fn launch_mergetool_prefers_custom_cmd_over_tool_path_override() {
     );
     run_git(
         repo,
-        &[
-            "config",
-            "mergetool.fake.cmd",
-            cmd_write_cmd_to_merged(),
-        ],
+        &["config", "mergetool.fake.cmd", cmd_write_cmd_to_merged()],
     );
     run_git(repo, &["config", "mergetool.fake.trustExitCode", "true"]);
 
