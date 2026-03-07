@@ -3395,6 +3395,7 @@ fn stash_create_list_apply_and_drop_work() {
 
     let stashes = opened.stash_list().unwrap();
     assert!(!stashes.is_empty());
+    assert_eq!(stashes[0].index, 0);
     assert!(stashes[0].message.contains("wip"));
 
     opened.stash_apply(0).unwrap();
@@ -3406,6 +3407,336 @@ fn stash_create_list_apply_and_drop_work() {
     opened.stash_drop(0).unwrap();
     let stashes = opened.stash_list().unwrap();
     assert!(stashes.is_empty());
+}
+
+#[test]
+fn stash_apply_conflict_is_mergeable() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\nline\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    write(repo, "a.txt", "base\nstash-change\n");
+    opened.stash_create("wip", false).unwrap();
+
+    write(repo, "a.txt", "base\nbranch-change\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "branch-change",
+        ],
+    );
+
+    let err = opened
+        .stash_apply(0)
+        .expect_err("stash apply conflict should report failure");
+    assert!(
+        err.to_string().contains("git stash apply failed"),
+        "unexpected error: {err}"
+    );
+
+    let status = opened.status().unwrap();
+    let conflict_entry = status
+        .unstaged
+        .iter()
+        .find(|entry| entry.path == Path::new("a.txt"))
+        .expect("expected conflicted path after stash apply merge");
+    assert_eq!(conflict_entry.kind, FileStatusKind::Conflicted);
+    assert_eq!(
+        conflict_entry.conflict,
+        Some(FileConflictKind::BothModified)
+    );
+
+    let contents = fs::read_to_string(repo.join("a.txt")).unwrap();
+    assert!(contents.contains("<<<<<<<"));
+    assert!(contents.contains("======="));
+    assert!(contents.contains(">>>>>>>"));
+}
+
+#[test]
+fn stash_apply_still_errors_when_merge_does_not_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\nline\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    write(repo, "a.txt", "base\nstash-change\n");
+    opened.stash_create("wip", false).unwrap();
+
+    write(repo, "a.txt", "base\nlocal-uncommitted-change\n");
+
+    let err = opened
+        .stash_apply(0)
+        .expect_err("stash apply should fail when local edits would be overwritten");
+    assert!(
+        err.to_string().contains("overwritten by merge"),
+        "unexpected error: {err}"
+    );
+
+    let status = opened.status().unwrap();
+    let entry = status
+        .unstaged
+        .iter()
+        .find(|candidate| candidate.path == Path::new("a.txt"))
+        .expect("expected modified file in unstaged status");
+    assert_eq!(entry.kind, FileStatusKind::Modified);
+    assert_eq!(entry.conflict, None);
+}
+
+#[test]
+fn stash_apply_allows_merge_when_only_untracked_restore_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\nline\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    write(repo, "a.txt", "base\nstash-change\n");
+    write(repo, "Cargo.toml.orig", "from stash\n");
+    opened.stash_create("wip", true).unwrap();
+
+    // Existing untracked file blocks restoration of untracked payload from stash.
+    write(repo, "Cargo.toml.orig", "local copy\n");
+
+    let err = opened
+        .stash_apply(0)
+        .expect_err("stash apply should report untracked restore failure");
+    assert!(
+        err.to_string()
+            .contains("could not restore untracked files from stash")
+            || err.to_string().contains("already exists, no checkout"),
+        "unexpected error: {err}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "base\nstash-change\n"
+    );
+    let untracked_merged = fs::read_to_string(repo.join("Cargo.toml.orig")).unwrap();
+    assert!(untracked_merged.contains("<<<<<<< Current file"));
+    assert!(untracked_merged.contains("local copy"));
+    assert!(untracked_merged.contains("======="));
+    assert!(untracked_merged.contains("from stash"));
+    assert!(untracked_merged.contains(">>>>>>> Stashed file"));
+
+    let status = opened.status().unwrap();
+    let tracked = status
+        .unstaged
+        .iter()
+        .find(|candidate| candidate.path == Path::new("a.txt"))
+        .expect("expected tracked stash change to be present");
+    assert_eq!(tracked.kind, FileStatusKind::Modified);
+    assert_eq!(tracked.conflict, None);
+    assert!(status.unstaged.iter().any(|candidate| {
+        candidate.path == Path::new("Cargo.toml.orig")
+            && candidate.kind == FileStatusKind::Untracked
+    }));
+}
+
+#[test]
+fn stash_apply_allows_untracked_restore_failure_when_stash_has_tracked_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\nline\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    // Stash contains tracked and untracked payload.
+    write(repo, "a.txt", "base\nstash-change\n");
+    write(repo, "Cargo.toml.orig", "from stash\n");
+    opened.stash_create("wip", true).unwrap();
+
+    // Apply the same tracked change on the branch first, so stash apply has no
+    // tracked-status delta even though stash had tracked payload.
+    write(repo, "a.txt", "base\nstash-change\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "same-tracked-change",
+        ],
+    );
+
+    // Existing untracked file blocks restoration of stash untracked payload.
+    write(repo, "Cargo.toml.orig", "local copy\n");
+
+    let err = opened
+        .stash_apply(0)
+        .expect_err("stash apply should report untracked restore failure");
+    assert!(
+        err.to_string()
+            .contains("could not restore untracked files from stash")
+            || err.to_string().contains("already exists, no checkout"),
+        "unexpected error: {err}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "base\nstash-change\n"
+    );
+    let untracked_merged = fs::read_to_string(repo.join("Cargo.toml.orig")).unwrap();
+    assert!(untracked_merged.contains("<<<<<<< Current file"));
+    assert!(untracked_merged.contains("local copy"));
+    assert!(untracked_merged.contains("======="));
+    assert!(untracked_merged.contains("from stash"));
+    assert!(untracked_merged.contains(">>>>>>> Stashed file"));
+
+    let status = opened.status().unwrap();
+    assert!(
+        status
+            .unstaged
+            .iter()
+            .all(|entry| entry.path != Path::new("a.txt"))
+    );
+    assert!(status.unstaged.iter().any(|candidate| {
+        candidate.path == Path::new("Cargo.toml.orig")
+            && candidate.kind == FileStatusKind::Untracked
+    }));
+}
+
+#[test]
+fn stash_apply_merges_when_only_untracked_restore_fails_without_tracked_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\nline\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    write(repo, "Cargo.toml.orig", "from stash\n");
+    opened.stash_create("wip", true).unwrap();
+
+    write(repo, "Cargo.toml.orig", "local copy\n");
+
+    let err = opened
+        .stash_apply(0)
+        .expect_err("stash apply should report untracked restore failure");
+    assert!(
+        err.to_string()
+            .contains("could not restore untracked files from stash")
+            || err.to_string().contains("already exists, no checkout"),
+        "unexpected error: {err}"
+    );
+
+    let contents = fs::read_to_string(repo.join("Cargo.toml.orig")).unwrap();
+    assert!(contents.contains("<<<<<<< Current file"));
+    assert!(contents.contains("local copy"));
+    assert!(contents.contains("======="));
+    assert!(contents.contains("from stash"));
+    assert!(contents.contains(">>>>>>> Stashed file"));
+
+    let status = opened.status().unwrap();
+    assert!(status.unstaged.iter().any(|entry| {
+        entry.path == Path::new("Cargo.toml.orig") && entry.kind == FileStatusKind::Untracked
+    }));
+}
+
+#[test]
+fn stash_list_reports_reflog_indices_for_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "one\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    write(repo, "a.txt", "one\ntwo\n");
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+    opened.stash_create("wip-1", false).unwrap();
+
+    write(repo, "a.txt", "one\nthree\n");
+    opened.stash_create("wip-2", false).unwrap();
+
+    let stashes = opened.stash_list().unwrap();
+    assert_eq!(stashes.len(), 2);
+    assert_eq!(stashes[0].index, 0);
+    assert_eq!(stashes[1].index, 1);
+
+    // Drop the older stash by the index returned from `stash_list`.
+    opened.stash_drop(stashes[1].index).unwrap();
+    let stashes = opened.stash_list().unwrap();
+    assert_eq!(stashes.len(), 1);
+    assert_eq!(stashes[0].index, 0);
+    assert!(stashes[0].message.contains("wip-2"));
 }
 
 #[test]

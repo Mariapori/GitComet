@@ -77,6 +77,8 @@ fn repo_for_popover<'a>(state: &'a AppState, popover: &PopoverKind) -> Option<&'
         PopoverKind::ResetPrompt { repo_id, .. }
         | PopoverKind::CheckoutRemoteBranchPrompt { repo_id, .. }
         | PopoverKind::RebasePrompt { repo_id }
+        | PopoverKind::StashDropConfirm { repo_id, .. }
+        | PopoverKind::StashMenu { repo_id, .. }
         | PopoverKind::CreateTagPrompt { repo_id, .. }
         | PopoverKind::RemoteAddPrompt { repo_id }
         | PopoverKind::RemoteUrlPicker { repo_id, .. }
@@ -171,6 +173,9 @@ fn hash_repo_for_popover<H: Hasher>(repo: &RepoState, popover: &PopoverKind, has
             repo.stashes_rev.hash(hasher);
             view_fingerprint::hash_loadable_arc(&repo.status, hasher);
         }
+        PopoverKind::StashDropConfirm { .. } | PopoverKind::StashMenu { .. } => {
+            repo.stashes_rev.hash(hasher);
+        }
 
         PopoverKind::FileHistory { .. } => {
             repo.file_history_path.hash(hasher);
@@ -257,6 +262,26 @@ fn hash_popover_kind<H: Hasher>(kind: &PopoverKind, hasher: &mut H) {
             branch.hash(hasher);
         }
         PopoverKind::StashPrompt => 3u8.hash(hasher),
+        PopoverKind::StashDropConfirm {
+            repo_id,
+            index,
+            message,
+        } => {
+            55u8.hash(hasher);
+            repo_id.hash(hasher);
+            index.hash(hasher);
+            message.hash(hasher);
+        }
+        PopoverKind::StashMenu {
+            repo_id,
+            index,
+            message,
+        } => {
+            56u8.hash(hasher);
+            repo_id.hash(hasher);
+            index.hash(hasher);
+            message.hash(hasher);
+        }
         PopoverKind::CloneRepo => 4u8.hash(hasher),
         PopoverKind::Settings => 5u8.hash(hasher),
         PopoverKind::OpenSourceLicenses => 60u8.hash(hasher),

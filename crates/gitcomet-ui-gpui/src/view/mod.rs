@@ -609,6 +609,16 @@ enum PopoverKind {
         branch: String,
     },
     StashPrompt,
+    StashDropConfirm {
+        repo_id: RepoId,
+        index: usize,
+        message: String,
+    },
+    StashMenu {
+        repo_id: RepoId,
+        index: usize,
+        message: String,
+    },
     CloneRepo,
     Settings,
     OpenSourceLicenses,

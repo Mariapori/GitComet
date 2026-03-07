@@ -299,10 +299,11 @@ pub(super) fn schedule_stash(
     include_untracked: bool,
 ) {
     spawn_with_repo(executor, repos, repo_id, msg_tx, move |repo, msg_tx| {
-        let _ = msg_tx.send(Msg::RepoActionFinished {
-            repo_id,
-            result: repo.stash_create(&message, include_untracked),
-        });
+        let result = repo.stash_create(&message, include_untracked);
+        if result.is_ok() {
+            let _ = msg_tx.send(Msg::LoadStashes { repo_id });
+        }
+        let _ = msg_tx.send(Msg::RepoActionFinished { repo_id, result });
     });
 }
 
@@ -321,6 +322,34 @@ pub(super) fn schedule_apply_stash(
     });
 }
 
+pub(super) fn schedule_pop_stash(
+    executor: &TaskExecutor,
+    repos: &RepoMap,
+    msg_tx: mpsc::Sender<Msg>,
+    repo_id: RepoId,
+    index: usize,
+) {
+    spawn_with_repo(
+        executor,
+        repos,
+        repo_id,
+        msg_tx,
+        move |repo, msg_tx| match repo.stash_apply(index) {
+            Ok(()) => {
+                let result = repo.stash_drop(index);
+                let _ = msg_tx.send(Msg::LoadStashes { repo_id });
+                let _ = msg_tx.send(Msg::RepoActionFinished { repo_id, result });
+            }
+            Err(err) => {
+                let _ = msg_tx.send(Msg::RepoActionFinished {
+                    repo_id,
+                    result: Err(err),
+                });
+            }
+        },
+    );
+}
+
 pub(super) fn schedule_drop_stash(
     executor: &TaskExecutor,
     repos: &RepoMap,
@@ -329,24 +358,8 @@ pub(super) fn schedule_drop_stash(
     index: usize,
 ) {
     spawn_with_repo(executor, repos, repo_id, msg_tx, move |repo, msg_tx| {
-        let _ = msg_tx.send(Msg::RepoActionFinished {
-            repo_id,
-            result: repo.stash_drop(index),
-        });
-    });
-}
-
-pub(super) fn schedule_pop_stash(
-    executor: &TaskExecutor,
-    repos: &RepoMap,
-    msg_tx: mpsc::Sender<Msg>,
-    repo_id: RepoId,
-    index: usize,
-) {
-    spawn_with_repo(executor, repos, repo_id, msg_tx, move |repo, msg_tx| {
-        let result = repo
-            .stash_apply(index)
-            .and_then(|()| repo.stash_drop(index));
+        let result = repo.stash_drop(index);
+        let _ = msg_tx.send(Msg::LoadStashes { repo_id });
         let _ = msg_tx.send(Msg::RepoActionFinished { repo_id, result });
     });
 }

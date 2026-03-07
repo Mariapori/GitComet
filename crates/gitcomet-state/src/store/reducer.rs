@@ -370,13 +370,13 @@ pub(super) fn reduce(
             begin_local_action(state, repo_id);
             actions_emit_effects::apply_stash(repo_id, index)
         }
-        Msg::DropStash { repo_id, index } => {
-            begin_local_action(state, repo_id);
-            actions_emit_effects::drop_stash(repo_id, index)
-        }
         Msg::PopStash { repo_id, index } => {
             begin_local_action(state, repo_id);
             actions_emit_effects::pop_stash(repo_id, index)
+        }
+        Msg::DropStash { repo_id, index } => {
+            begin_local_action(state, repo_id);
+            actions_emit_effects::drop_stash(repo_id, index)
         }
         Msg::RepoOpenedOk {
             repo_id,

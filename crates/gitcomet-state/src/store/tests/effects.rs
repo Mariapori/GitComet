@@ -929,7 +929,175 @@ fn load_stashes_effect_truncates_results_to_limit() {
 }
 
 #[test]
-fn pop_stash_effect_applies_then_drops() {
+fn stash_effect_requests_stash_reload_on_success() {
+    use std::sync::Mutex;
+
+    struct RecordingRepo {
+        spec: RepoSpec,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl GitRepository for RecordingRepo {
+        fn spec(&self) -> &RepoSpec {
+            &self.spec
+        }
+
+        fn log_head_page(&self, _limit: usize, _cursor: Option<&LogCursor>) -> Result<LogPage> {
+            unimplemented!()
+        }
+        fn commit_details(&self, _id: &CommitId) -> Result<CommitDetails> {
+            unimplemented!()
+        }
+        fn reflog_head(&self, _limit: usize) -> Result<Vec<ReflogEntry>> {
+            unimplemented!()
+        }
+        fn current_branch(&self) -> Result<String> {
+            unimplemented!()
+        }
+        fn list_branches(&self) -> Result<Vec<Branch>> {
+            unimplemented!()
+        }
+        fn list_remotes(&self) -> Result<Vec<Remote>> {
+            unimplemented!()
+        }
+        fn list_remote_branches(&self) -> Result<Vec<RemoteBranch>> {
+            unimplemented!()
+        }
+        fn status(&self) -> Result<RepoStatus> {
+            unimplemented!()
+        }
+        fn diff_unified(&self, _target: &DiffTarget) -> Result<String> {
+            unimplemented!()
+        }
+
+        fn create_branch(&self, _name: &str, _target: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn delete_branch(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn checkout_branch(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn revert(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+
+        fn stash_create(&self, message: &str, include_untracked: bool) -> Result<()> {
+            self.calls.lock().unwrap().push(format!(
+                "stash {message} include_untracked={include_untracked}"
+            ));
+            Ok(())
+        }
+        fn stash_list(&self) -> Result<Vec<StashEntry>> {
+            unimplemented!()
+        }
+        fn stash_apply(&self, _index: usize) -> Result<()> {
+            unimplemented!()
+        }
+        fn stash_drop(&self, _index: usize) -> Result<()> {
+            unimplemented!()
+        }
+
+        fn stage(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+        fn unstage(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+        fn commit(&self, _message: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn fetch_all(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn pull(&self, _mode: PullMode) -> Result<()> {
+            unimplemented!()
+        }
+        fn push(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    struct Backend;
+    impl GitBackend for Backend {
+        fn open(&self, _workdir: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
+            Err(Error::new(ErrorKind::Unsupported("test backend")))
+        }
+    }
+
+    let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let repo: Arc<RecordingRepo> = Arc::new(RecordingRepo {
+        spec: RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+        calls: Arc::clone(&calls),
+    });
+
+    let executor = super::executor::TaskExecutor::new(1);
+    let backend: Arc<dyn GitBackend> = Arc::new(Backend);
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    repos.insert(RepoId(1), repo);
+    let (msg_tx, msg_rx) = std::sync::mpsc::channel::<Msg>();
+
+    super::effects::schedule_effect(
+        &executor,
+        &backend,
+        &repos,
+        msg_tx,
+        Effect::Stash {
+            repo_id: RepoId(1),
+            message: "wip".to_string(),
+            include_untracked: true,
+        },
+    );
+
+    let start = Instant::now();
+    let mut saw_load_stashes = false;
+    let mut saw_finished = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        let msg = match msg_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(msg) => msg,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(e) => panic!("channel closed: {e:?}"),
+        };
+
+        match msg {
+            Msg::LoadStashes { repo_id: RepoId(1) } => saw_load_stashes = true,
+            Msg::RepoActionFinished {
+                repo_id: RepoId(1),
+                result: Ok(()),
+            } => saw_finished = true,
+            _ => {}
+        }
+
+        if saw_load_stashes && saw_finished {
+            break;
+        }
+    }
+
+    assert!(
+        saw_load_stashes,
+        "expected stash effect to request stash reload"
+    );
+    assert!(saw_finished, "expected stash effect to complete");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["stash wip include_untracked=true".to_string()]
+    );
+}
+
+#[test]
+fn pop_stash_effect_applies_and_drops_then_requests_stash_reload() {
     use std::sync::Mutex;
 
     struct RecordingRepo {
@@ -1027,6 +1195,13 @@ fn pop_stash_effect_applies_then_drops() {
         }
     }
 
+    struct Backend;
+    impl GitBackend for Backend {
+        fn open(&self, _workdir: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
+            Err(Error::new(ErrorKind::Unsupported("test backend")))
+        }
+    }
+
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let repo: Arc<RecordingRepo> = Arc::new(RecordingRepo {
         spec: RepoSpec {
@@ -1034,13 +1209,6 @@ fn pop_stash_effect_applies_then_drops() {
         },
         calls: Arc::clone(&calls),
     });
-
-    struct Backend;
-    impl GitBackend for Backend {
-        fn open(&self, _workdir: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
-            Err(Error::new(ErrorKind::Unsupported("test backend")))
-        }
-    }
 
     let executor = super::executor::TaskExecutor::new(1);
     let backend: Arc<dyn GitBackend> = Arc::new(Backend);
@@ -1055,23 +1223,532 @@ fn pop_stash_effect_applies_then_drops() {
         msg_tx,
         Effect::PopStash {
             repo_id: RepoId(1),
-            index: 0,
+            index: 3,
         },
     );
 
-    let msg = msg_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("expected RepoActionFinished");
-    assert!(matches!(
-        msg,
-        Msg::RepoActionFinished {
-            repo_id: RepoId(1),
-            result: Ok(())
-        }
-    ));
+    let start = Instant::now();
+    let mut saw_load_stashes = false;
+    let mut saw_finished = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        let msg = match msg_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(msg) => msg,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(e) => panic!("channel closed: {e:?}"),
+        };
 
+        match msg {
+            Msg::LoadStashes { repo_id: RepoId(1) } => saw_load_stashes = true,
+            Msg::RepoActionFinished {
+                repo_id: RepoId(1),
+                result: Ok(()),
+            } => saw_finished = true,
+            _ => {}
+        }
+
+        if saw_load_stashes && saw_finished {
+            break;
+        }
+    }
+
+    assert!(
+        saw_load_stashes,
+        "expected pop stash effect to request stash reload"
+    );
+    assert!(saw_finished, "expected pop stash effect to complete");
     assert_eq!(
         *calls.lock().unwrap(),
-        vec!["apply 0".to_string(), "drop 0".to_string()]
+        vec!["apply 3".to_string(), "drop 3".to_string()]
     );
+}
+
+#[test]
+fn pop_stash_effect_propagates_apply_error_without_drop_or_reload() {
+    use std::sync::Mutex;
+
+    struct FailingApplyRepo {
+        spec: RepoSpec,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl GitRepository for FailingApplyRepo {
+        fn spec(&self) -> &RepoSpec {
+            &self.spec
+        }
+
+        fn log_head_page(&self, _limit: usize, _cursor: Option<&LogCursor>) -> Result<LogPage> {
+            unimplemented!()
+        }
+        fn commit_details(&self, _id: &CommitId) -> Result<CommitDetails> {
+            unimplemented!()
+        }
+        fn reflog_head(&self, _limit: usize) -> Result<Vec<ReflogEntry>> {
+            unimplemented!()
+        }
+        fn current_branch(&self) -> Result<String> {
+            unimplemented!()
+        }
+        fn list_branches(&self) -> Result<Vec<Branch>> {
+            unimplemented!()
+        }
+        fn list_remotes(&self) -> Result<Vec<Remote>> {
+            unimplemented!()
+        }
+        fn list_remote_branches(&self) -> Result<Vec<RemoteBranch>> {
+            unimplemented!()
+        }
+        fn status(&self) -> Result<RepoStatus> {
+            unimplemented!()
+        }
+        fn diff_unified(&self, _target: &DiffTarget) -> Result<String> {
+            unimplemented!()
+        }
+
+        fn create_branch(&self, _name: &str, _target: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn delete_branch(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn checkout_branch(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn revert(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+
+        fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
+            unimplemented!()
+        }
+        fn stash_list(&self) -> Result<Vec<StashEntry>> {
+            unimplemented!()
+        }
+        fn stash_apply(&self, index: usize) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("apply {index}"));
+            Err(Error::new(ErrorKind::Backend("apply failed".to_string())))
+        }
+        fn stash_drop(&self, index: usize) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("drop {index}"));
+            Ok(())
+        }
+
+        fn stage(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+        fn unstage(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+        fn commit(&self, _message: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn fetch_all(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn pull(&self, _mode: PullMode) -> Result<()> {
+            unimplemented!()
+        }
+        fn push(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    struct Backend;
+    impl GitBackend for Backend {
+        fn open(&self, _workdir: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
+            Err(Error::new(ErrorKind::Unsupported("test backend")))
+        }
+    }
+
+    let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let repo: Arc<FailingApplyRepo> = Arc::new(FailingApplyRepo {
+        spec: RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+        calls: Arc::clone(&calls),
+    });
+
+    let executor = super::executor::TaskExecutor::new(1);
+    let backend: Arc<dyn GitBackend> = Arc::new(Backend);
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    repos.insert(RepoId(1), repo);
+    let (msg_tx, msg_rx) = std::sync::mpsc::channel::<Msg>();
+
+    super::effects::schedule_effect(
+        &executor,
+        &backend,
+        &repos,
+        msg_tx,
+        Effect::PopStash {
+            repo_id: RepoId(1),
+            index: 7,
+        },
+    );
+
+    let start = Instant::now();
+    let mut saw_load_stashes = false;
+    let mut saw_finished_err = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        let msg = match msg_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(msg) => msg,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(e) => panic!("channel closed: {e:?}"),
+        };
+
+        match msg {
+            Msg::LoadStashes { repo_id: RepoId(1) } => saw_load_stashes = true,
+            Msg::RepoActionFinished {
+                repo_id: RepoId(1),
+                result: Err(_),
+            } => {
+                saw_finished_err = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        !saw_load_stashes,
+        "pop stash apply failure should not request stash reload"
+    );
+    assert!(
+        saw_finished_err,
+        "expected pop stash effect to emit apply error completion"
+    );
+    assert_eq!(*calls.lock().unwrap(), vec!["apply 7".to_string()]);
+}
+
+#[test]
+fn drop_stash_effect_requests_stash_reload_on_success() {
+    use std::sync::Mutex;
+
+    struct RecordingRepo {
+        spec: RepoSpec,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl GitRepository for RecordingRepo {
+        fn spec(&self) -> &RepoSpec {
+            &self.spec
+        }
+
+        fn log_head_page(&self, _limit: usize, _cursor: Option<&LogCursor>) -> Result<LogPage> {
+            unimplemented!()
+        }
+        fn commit_details(&self, _id: &CommitId) -> Result<CommitDetails> {
+            unimplemented!()
+        }
+        fn reflog_head(&self, _limit: usize) -> Result<Vec<ReflogEntry>> {
+            unimplemented!()
+        }
+        fn current_branch(&self) -> Result<String> {
+            unimplemented!()
+        }
+        fn list_branches(&self) -> Result<Vec<Branch>> {
+            unimplemented!()
+        }
+        fn list_remotes(&self) -> Result<Vec<Remote>> {
+            unimplemented!()
+        }
+        fn list_remote_branches(&self) -> Result<Vec<RemoteBranch>> {
+            unimplemented!()
+        }
+        fn status(&self) -> Result<RepoStatus> {
+            unimplemented!()
+        }
+        fn diff_unified(&self, _target: &DiffTarget) -> Result<String> {
+            unimplemented!()
+        }
+
+        fn create_branch(&self, _name: &str, _target: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn delete_branch(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn checkout_branch(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn revert(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+
+        fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
+            unimplemented!()
+        }
+        fn stash_list(&self) -> Result<Vec<StashEntry>> {
+            unimplemented!()
+        }
+        fn stash_apply(&self, _index: usize) -> Result<()> {
+            unimplemented!()
+        }
+        fn stash_drop(&self, index: usize) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("drop {index}"));
+            Ok(())
+        }
+
+        fn stage(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+        fn unstage(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+        fn commit(&self, _message: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn fetch_all(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn pull(&self, _mode: PullMode) -> Result<()> {
+            unimplemented!()
+        }
+        fn push(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    struct Backend;
+    impl GitBackend for Backend {
+        fn open(&self, _workdir: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
+            Err(Error::new(ErrorKind::Unsupported("test backend")))
+        }
+    }
+
+    let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let repo: Arc<RecordingRepo> = Arc::new(RecordingRepo {
+        spec: RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+        calls: Arc::clone(&calls),
+    });
+
+    let executor = super::executor::TaskExecutor::new(1);
+    let backend: Arc<dyn GitBackend> = Arc::new(Backend);
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    repos.insert(RepoId(1), repo);
+    let (msg_tx, msg_rx) = std::sync::mpsc::channel::<Msg>();
+
+    super::effects::schedule_effect(
+        &executor,
+        &backend,
+        &repos,
+        msg_tx,
+        Effect::DropStash {
+            repo_id: RepoId(1),
+            index: 3,
+        },
+    );
+
+    let start = Instant::now();
+    let mut saw_load_stashes = false;
+    let mut saw_finished = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        let msg = match msg_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(msg) => msg,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(e) => panic!("channel closed: {e:?}"),
+        };
+
+        match msg {
+            Msg::LoadStashes { repo_id: RepoId(1) } => saw_load_stashes = true,
+            Msg::RepoActionFinished {
+                repo_id: RepoId(1),
+                result: Ok(()),
+            } => saw_finished = true,
+            _ => {}
+        }
+
+        if saw_load_stashes && saw_finished {
+            break;
+        }
+    }
+
+    assert!(
+        saw_load_stashes,
+        "expected drop stash effect to request stash reload"
+    );
+    assert!(saw_finished, "expected drop stash effect to complete");
+    assert_eq!(*calls.lock().unwrap(), vec!["drop 3".to_string()]);
+}
+
+#[test]
+fn drop_stash_effect_requests_stash_reload_on_error() {
+    use std::sync::Mutex;
+
+    struct FailingRepo {
+        spec: RepoSpec,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl GitRepository for FailingRepo {
+        fn spec(&self) -> &RepoSpec {
+            &self.spec
+        }
+
+        fn log_head_page(&self, _limit: usize, _cursor: Option<&LogCursor>) -> Result<LogPage> {
+            unimplemented!()
+        }
+        fn commit_details(&self, _id: &CommitId) -> Result<CommitDetails> {
+            unimplemented!()
+        }
+        fn reflog_head(&self, _limit: usize) -> Result<Vec<ReflogEntry>> {
+            unimplemented!()
+        }
+        fn current_branch(&self) -> Result<String> {
+            unimplemented!()
+        }
+        fn list_branches(&self) -> Result<Vec<Branch>> {
+            unimplemented!()
+        }
+        fn list_remotes(&self) -> Result<Vec<Remote>> {
+            unimplemented!()
+        }
+        fn list_remote_branches(&self) -> Result<Vec<RemoteBranch>> {
+            unimplemented!()
+        }
+        fn status(&self) -> Result<RepoStatus> {
+            unimplemented!()
+        }
+        fn diff_unified(&self, _target: &DiffTarget) -> Result<String> {
+            unimplemented!()
+        }
+
+        fn create_branch(&self, _name: &str, _target: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn delete_branch(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn checkout_branch(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+        fn revert(&self, _id: &CommitId) -> Result<()> {
+            unimplemented!()
+        }
+
+        fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
+            unimplemented!()
+        }
+        fn stash_list(&self) -> Result<Vec<StashEntry>> {
+            unimplemented!()
+        }
+        fn stash_apply(&self, _index: usize) -> Result<()> {
+            unimplemented!()
+        }
+        fn stash_drop(&self, index: usize) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("drop {index}"));
+            Err(Error::new(ErrorKind::Backend("drop failed".to_string())))
+        }
+
+        fn stage(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+        fn unstage(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+        fn commit(&self, _message: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn fetch_all(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn pull(&self, _mode: PullMode) -> Result<()> {
+            unimplemented!()
+        }
+        fn push(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    struct Backend;
+    impl GitBackend for Backend {
+        fn open(&self, _workdir: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
+            Err(Error::new(ErrorKind::Unsupported("test backend")))
+        }
+    }
+
+    let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let repo: Arc<FailingRepo> = Arc::new(FailingRepo {
+        spec: RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+        calls: Arc::clone(&calls),
+    });
+
+    let executor = super::executor::TaskExecutor::new(1);
+    let backend: Arc<dyn GitBackend> = Arc::new(Backend);
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    repos.insert(RepoId(1), repo);
+    let (msg_tx, msg_rx) = std::sync::mpsc::channel::<Msg>();
+
+    super::effects::schedule_effect(
+        &executor,
+        &backend,
+        &repos,
+        msg_tx,
+        Effect::DropStash {
+            repo_id: RepoId(1),
+            index: 4,
+        },
+    );
+
+    let start = Instant::now();
+    let mut saw_load_stashes = false;
+    let mut saw_finished_err = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        let msg = match msg_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(msg) => msg,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(e) => panic!("channel closed: {e:?}"),
+        };
+
+        match msg {
+            Msg::LoadStashes { repo_id: RepoId(1) } => saw_load_stashes = true,
+            Msg::RepoActionFinished {
+                repo_id: RepoId(1),
+                result: Err(_),
+            } => {
+                saw_finished_err = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_load_stashes,
+        "drop stash failure should still request stash reload"
+    );
+    assert!(
+        saw_finished_err,
+        "expected drop stash effect to emit error completion"
+    );
+    assert_eq!(*calls.lock().unwrap(), vec!["drop 4".to_string()]);
 }

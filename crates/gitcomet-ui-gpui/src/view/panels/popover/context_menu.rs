@@ -14,6 +14,7 @@ mod history_column_settings;
 mod pull;
 mod push;
 mod remote;
+mod stash;
 mod status_file;
 mod submodule;
 mod submodule_section;
@@ -209,6 +210,11 @@ impl PopoverHost {
                 Some(branch_section::model(self, *repo_id, *section))
             }
             PopoverKind::RemoteMenu { repo_id, name } => Some(remote::model(self, *repo_id, name)),
+            PopoverKind::StashMenu {
+                repo_id,
+                index,
+                message,
+            } => Some(stash::model(*repo_id, *index, message)),
             PopoverKind::WorktreeSectionMenu { repo_id } => Some(worktree_section::model(*repo_id)),
             PopoverKind::WorktreeMenu { repo_id, path } => Some(worktree::model(*repo_id, path)),
             PopoverKind::SubmoduleSectionMenu { repo_id } => {
@@ -614,6 +620,37 @@ impl PopoverHost {
             }
             ContextMenuAction::MergeRef { repo_id, reference } => {
                 self.store.dispatch(Msg::MergeRef { repo_id, reference });
+            }
+            ContextMenuAction::ApplyStash { repo_id, index } => {
+                self.store.dispatch(Msg::ApplyStash { repo_id, index });
+            }
+            ContextMenuAction::PopStash { repo_id, index } => {
+                self.store.dispatch(Msg::PopStash { repo_id, index });
+            }
+            ContextMenuAction::DropStashConfirm {
+                repo_id,
+                index,
+                message,
+            } => {
+                let anchor = self
+                    .popover_anchor
+                    .as_ref()
+                    .map(|anchor| match anchor {
+                        PopoverAnchor::Point(point) => *point,
+                        PopoverAnchor::Bounds(bounds) => bounds.bottom_right(),
+                    })
+                    .unwrap_or_else(|| point(px(64.0), px(64.0)));
+                self.open_popover_at(
+                    PopoverKind::StashDropConfirm {
+                        repo_id,
+                        index,
+                        message,
+                    },
+                    anchor,
+                    window,
+                    cx,
+                );
+                return;
             }
             ContextMenuAction::Push { repo_id } => {
                 self.store.dispatch(Msg::Push { repo_id });

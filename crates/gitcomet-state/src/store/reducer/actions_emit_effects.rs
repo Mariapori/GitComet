@@ -379,12 +379,12 @@ pub(super) fn apply_stash(repo_id: RepoId, index: usize) -> Vec<Effect> {
     vec![Effect::ApplyStash { repo_id, index }]
 }
 
-pub(super) fn drop_stash(repo_id: RepoId, index: usize) -> Vec<Effect> {
-    vec![Effect::DropStash { repo_id, index }]
-}
-
 pub(super) fn pop_stash(repo_id: RepoId, index: usize) -> Vec<Effect> {
     vec![Effect::PopStash { repo_id, index }]
+}
+
+pub(super) fn drop_stash(repo_id: RepoId, index: usize) -> Vec<Effect> {
+    vec![Effect::DropStash { repo_id, index }]
 }
 
 pub(super) fn commit_finished(

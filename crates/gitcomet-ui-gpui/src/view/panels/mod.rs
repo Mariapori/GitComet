@@ -129,6 +129,19 @@ enum ContextMenuAction {
         repo_id: RepoId,
         reference: String,
     },
+    ApplyStash {
+        repo_id: RepoId,
+        index: usize,
+    },
+    PopStash {
+        repo_id: RepoId,
+        index: usize,
+    },
+    DropStashConfirm {
+        repo_id: RepoId,
+        index: usize,
+        message: String,
+    },
     Push {
         repo_id: RepoId,
     },

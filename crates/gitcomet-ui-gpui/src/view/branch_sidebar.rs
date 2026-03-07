@@ -70,10 +70,6 @@ pub(super) enum BranchSidebarRow {
         index: usize,
         message: SharedString,
         tooltip: SharedString,
-        row_group: SharedString,
-        apply_button_id: SharedString,
-        pop_button_id: SharedString,
-        drop_button_id: SharedString,
         created_at: Option<std::time::SystemTime>,
     },
 }
@@ -336,13 +332,6 @@ pub(super) fn branch_sidebar_rows(repo: &RepoState) -> Vec<BranchSidebarRow> {
         }
         Loadable::Ready(stashes) => {
             for stash in stashes.iter() {
-                let row_group: SharedString = format!("stash_row_{}", stash.index).into();
-                let apply_button_id: SharedString =
-                    format!("stash_sidebar_apply_{}", stash.index).into();
-                let pop_button_id: SharedString =
-                    format!("stash_sidebar_pop_{}", stash.index).into();
-                let drop_button_id: SharedString =
-                    format!("stash_sidebar_drop_{}", stash.index).into();
                 let message: SharedString = stash.message.clone().into();
                 let tooltip: SharedString = if stash.message.is_empty() {
                     "Stash".into()
@@ -353,10 +342,6 @@ pub(super) fn branch_sidebar_rows(repo: &RepoState) -> Vec<BranchSidebarRow> {
                     index: stash.index,
                     message,
                     tooltip,
-                    row_group,
-                    apply_button_id,
-                    pop_button_id,
-                    drop_button_id,
                     created_at: stash.created_at,
                 });
             }

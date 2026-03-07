@@ -701,7 +701,7 @@ fn create_and_delete_tag_emit_effects() {
 }
 
 #[test]
-fn apply_drop_and_pop_stash_emit_effects() {
+fn apply_pop_and_drop_stash_emit_effects() {
     let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
     let id_alloc = AtomicU64::new(1);
     let mut state = AppState::default();
@@ -730,23 +730,6 @@ fn apply_drop_and_pop_stash_emit_effects() {
         }]
     ));
 
-    let drop = reduce(
-        &mut repos,
-        &id_alloc,
-        &mut state,
-        Msg::DropStash {
-            repo_id: RepoId(1),
-            index: 0,
-        },
-    );
-    assert!(matches!(
-        drop.as_slice(),
-        [Effect::DropStash {
-            repo_id: RepoId(1),
-            index: 0
-        }]
-    ));
-
     let pop = reduce(
         &mut repos,
         &id_alloc,
@@ -759,6 +742,23 @@ fn apply_drop_and_pop_stash_emit_effects() {
     assert!(matches!(
         pop.as_slice(),
         [Effect::PopStash {
+            repo_id: RepoId(1),
+            index: 0
+        }]
+    ));
+
+    let drop = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DropStash {
+            repo_id: RepoId(1),
+            index: 0,
+        },
+    );
+    assert!(matches!(
+        drop.as_slice(),
+        [Effect::DropStash {
             repo_id: RepoId(1),
             index: 0
         }]

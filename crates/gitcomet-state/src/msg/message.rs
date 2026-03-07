@@ -417,11 +417,11 @@ pub enum Msg {
         repo_id: RepoId,
         index: usize,
     },
-    DropStash {
+    PopStash {
         repo_id: RepoId,
         index: usize,
     },
-    PopStash {
+    DropStash {
         repo_id: RepoId,
         index: usize,
     },

@@ -532,13 +532,13 @@ impl std::fmt::Debug for Msg {
                 .field("repo_id", repo_id)
                 .field("index", index)
                 .finish(),
-            Msg::DropStash { repo_id, index } => f
-                .debug_struct("DropStash")
+            Msg::PopStash { repo_id, index } => f
+                .debug_struct("PopStash")
                 .field("repo_id", repo_id)
                 .field("index", index)
                 .finish(),
-            Msg::PopStash { repo_id, index } => f
-                .debug_struct("PopStash")
+            Msg::DropStash { repo_id, index } => f
+                .debug_struct("DropStash")
                 .field("repo_id", repo_id)
                 .field("index", index)
                 .finish(),

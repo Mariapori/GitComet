@@ -161,7 +161,8 @@ impl SidebarPaneView {
                             .child("Stash"),
                     )
                     .on_hover(cx.listener(|this, hovering: &bool, _w, cx| {
-                        let text: SharedString = "Stashes (Apply / Drop)".into();
+                        let text: SharedString =
+                            "Stashes (Right-click for actions, double-click to apply)".into();
                         let mut changed = false;
                         if *hovering {
                             changed |= this.set_tooltip_text_if_changed(Some(text), cx);
@@ -186,115 +187,71 @@ impl SidebarPaneView {
                     index,
                     message,
                     tooltip,
-                    row_group,
-                    apply_button_id,
-                    pop_button_id,
-                    drop_button_id,
                     created_at: _,
                 } => {
                     let tooltip = tooltip.clone();
-                    let row_group = row_group.clone();
-                    let apply_button_id = apply_button_id.clone();
-                    let pop_button_id = pop_button_id.clone();
-                    let drop_button_id = drop_button_id.clone();
-
-                    let apply_tooltip: SharedString = "Apply stash".into();
-                    let apply_button = components::Button::new(apply_button_id, "Apply")
-                        .style(components::ButtonStyle::Solid)
-                        .on_click(theme, cx, move |this, _e, _w, cx| {
-                            this.store.dispatch(Msg::ApplyStash { repo_id, index });
-                            cx.notify();
-                        })
-                        .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
-                            let mut changed = false;
-                            if *hovering {
-                                changed |= this
-                                    .set_tooltip_text_if_changed(Some(apply_tooltip.clone()), cx);
-                            } else {
-                                changed |= this.clear_tooltip_if_matches(&apply_tooltip, cx);
-                            }
-                            if changed {
-                                cx.notify();
-                            }
-                        }));
-
-                    let pop_tooltip: SharedString = "Pop stash".into();
-                    let pop_button = components::Button::new(pop_button_id, "Pop")
-                        .style(components::ButtonStyle::Solid)
-                        .on_click(theme, cx, move |this, _e, _w, cx| {
-                            this.store.dispatch(Msg::PopStash { repo_id, index });
-                            cx.notify();
-                        })
-                        .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
-                            let mut changed = false;
-                            if *hovering {
-                                changed |=
-                                    this.set_tooltip_text_if_changed(Some(pop_tooltip.clone()), cx);
-                            } else {
-                                changed |= this.clear_tooltip_if_matches(&pop_tooltip, cx);
-                            }
-                            if changed {
-                                cx.notify();
-                            }
-                        }));
-
-                    let drop_tooltip: SharedString = "Drop stash".into();
-                    let drop_button = components::Button::new(drop_button_id, "Drop")
-                        .style(components::ButtonStyle::DangerSolid)
-                        .on_click(theme, cx, move |this, _e, _w, cx| {
-                            this.store.dispatch(Msg::DropStash { repo_id, index });
-                            cx.notify();
-                        })
-                        .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
-                            let mut changed = false;
-                            if *hovering {
-                                changed |= this
-                                    .set_tooltip_text_if_changed(Some(drop_tooltip.clone()), cx);
-                            } else {
-                                changed |= this.clear_tooltip_if_matches(&drop_tooltip, cx);
-                            }
-                            if changed {
-                                cx.notify();
-                            }
-                        }));
+                    let stash_message_for_menu = message.as_ref().to_owned();
+                    let context_menu_invoker: SharedString =
+                        format!("stash_menu_{}_{}", repo_id.0, index).into();
+                    let context_menu_active =
+                        this.active_context_menu_invoker.as_ref() == Some(&context_menu_invoker);
+                    let context_menu_invoker_for_right_click = context_menu_invoker.clone();
+                    let stash_message_for_right_click = stash_message_for_menu.clone();
 
                     div()
                         .id(("stash_sidebar_row", index))
-                        .relative()
-                        .group(row_group.clone())
                         .flex()
                         .items_center()
                         .gap_2()
                         .px_2()
                         .h(px(24.0))
                         .w_full()
-                        .hover(move |s| s.bg(theme.colors.hover))
+                        .rounded(px(theme.radii.row))
+                        .when(context_menu_active, |d| d.bg(theme.colors.active))
+                        .hover(move |s| {
+                            if context_menu_active {
+                                s.bg(theme.colors.active)
+                            } else {
+                                s.bg(theme.colors.hover)
+                            }
+                        })
                         .active(move |s| s.bg(theme.colors.active))
                         .child(svg_icon("icons/box.svg", icon_primary, 12.0))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w(px(0.0))
-                                .pr(px(160.0))
                                 .text_sm()
                                 .line_clamp(1)
                                 .whitespace_nowrap()
                                 .child(message.clone()),
                         )
-                        .child(
-                            div()
-                                .absolute()
-                                .right(px(6.0))
-                                .top(px(2.0))
-                                .bottom(px(2.0))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .invisible()
-                                .group_hover(row_group.clone(), |d| d.visible())
-                                .child(apply_button)
-                                .child(pop_button)
-                                .child(drop_button),
+                        .on_click(cx.listener(move |this, e: &ClickEvent, _w, cx| {
+                            if !e.standard_click() || e.click_count() < 2 {
+                                return;
+                            }
+                            this.store.dispatch(Msg::ApplyStash { repo_id, index });
+                            cx.notify();
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.activate_context_menu_invoker(
+                                    context_menu_invoker_for_right_click.clone(),
+                                    cx,
+                                );
+                                this.open_popover_at(
+                                    PopoverKind::StashMenu {
+                                        repo_id,
+                                        index,
+                                        message: stash_message_for_right_click.clone(),
+                                    },
+                                    e.position,
+                                    window,
+                                    cx,
+                                );
+                            }),
                         )
                         .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
                             let mut changed = false;
