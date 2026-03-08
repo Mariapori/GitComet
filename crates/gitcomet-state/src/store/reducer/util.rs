@@ -11,6 +11,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Default page size for log fetches.
+pub(super) const DEFAULT_LOG_PAGE_SIZE: usize = 200;
+
 fn is_supported_image_path(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
         return false;
@@ -116,7 +119,7 @@ pub(super) fn refresh_primary_effects(repo_state: &mut RepoState) -> Vec<Effect>
     }
     if repo_state
         .loads_in_flight
-        .request_log(repo_state.history_scope, 200, None)
+        .request_log(repo_state.history_scope, DEFAULT_LOG_PAGE_SIZE, None)
     {
         // Block pagination while a refresh log load is in flight, to avoid concurrent LogLoaded
         // merges with different cursors.
@@ -124,7 +127,7 @@ pub(super) fn refresh_primary_effects(repo_state: &mut RepoState) -> Vec<Effect>
         effects.push(Effect::LoadLog {
             repo_id,
             scope: repo_state.history_scope,
-            limit: 200,
+            limit: DEFAULT_LOG_PAGE_SIZE,
             cursor: None,
         });
     }
@@ -158,13 +161,13 @@ pub(super) fn refresh_full_effects(repo_state: &mut RepoState) -> Vec<Effect> {
     }
     if repo_state
         .loads_in_flight
-        .request_log(repo_state.history_scope, 200, None)
+        .request_log(repo_state.history_scope, DEFAULT_LOG_PAGE_SIZE, None)
     {
         repo_state.set_log_loading_more(false);
         effects.push(Effect::LoadLog {
             repo_id,
             scope: repo_state.history_scope,
-            limit: 200,
+            limit: DEFAULT_LOG_PAGE_SIZE,
             cursor: None,
         });
     }

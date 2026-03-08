@@ -147,9 +147,10 @@ pub fn compute_graph(
             hits.iter()
                 .copied()
                 .find(|ix| lanes.get(*ix).is_some_and(|lane| lane.id == main_lane_id))
-                .unwrap_or_else(|| *hits.first().unwrap())
+                .or_else(|| hits.first().copied())
+                .unwrap_or(0)
         } else {
-            *hits.first().unwrap()
+            hits.first().copied().unwrap_or(0)
         };
 
         let mut swap_node_into_col: Option<usize> = None;

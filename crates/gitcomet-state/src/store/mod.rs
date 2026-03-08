@@ -58,14 +58,16 @@ impl AppStore {
                 }
 
                 let effects = {
-                    let mut app_state = thread_state.write().expect("state lock poisoned (write)");
+                    let mut app_state = thread_state
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
 
                     reduce(&mut repos, &id_alloc, &mut app_state, msg)
                 };
 
                 let active_value = thread_state
                     .read()
-                    .expect("state lock poisoned (read)")
+                    .unwrap_or_else(|e| e.into_inner())
                     .active_repo
                     .map(|id| id.0)
                     .unwrap_or(0);
@@ -76,7 +78,7 @@ impl AppStore {
                 // Keep filesystem monitoring scoped to the active repository only, to minimize
                 // OS watcher load in large multi-repo sessions.
                 let (active_repo, active_workdir) = {
-                    let state = thread_state.read().expect("state lock poisoned (read)");
+                    let state = thread_state.read().unwrap_or_else(|e| e.into_inner());
                     let active_repo = state.active_repo;
                     let active_workdir = active_repo.and_then(|repo_id| {
                         state
@@ -127,7 +129,7 @@ impl AppStore {
     pub fn snapshot(&self) -> AppState {
         self.state
             .read()
-            .expect("state lock poisoned (read)")
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 }

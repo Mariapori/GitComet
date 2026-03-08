@@ -299,8 +299,10 @@ impl MainPaneView {
                             .child("")
                             .into_any_element();
                     };
-                    let key = row_ix * 2;
-                    if this.diff_text_segments_cache_get(key).is_none() {
+                    let key = this.file_diff_split_cache_key(row_ix, DiffTextRegion::SplitLeft);
+                    if let Some(key) = key
+                        && this.diff_text_segments_cache_get(key).is_none()
+                    {
                         let Some(row) = this.file_diff_cache_rows.get(row_ix) else {
                             return div()
                                 .id(("diff_split_left_oob", visible_ix))
@@ -349,11 +351,11 @@ impl MainPaneView {
                             .child("")
                             .into_any_element();
                     };
-                    let styled: Option<&CachedDiffStyledText> = row
-                        .old
-                        .is_some()
-                        .then(|| this.diff_text_segments_cache_get(key))
-                        .flatten();
+                    let styled: Option<&CachedDiffStyledText> = if row.old.is_some() {
+                        key.and_then(|k| this.diff_text_segments_cache_get(k))
+                    } else {
+                        None
+                    };
 
                     patch_split_column_row(
                         theme,
@@ -591,8 +593,10 @@ impl MainPaneView {
                             .child("")
                             .into_any_element();
                     };
-                    let key = row_ix * 2 + 1;
-                    if this.diff_text_segments_cache_get(key).is_none() {
+                    let key = this.file_diff_split_cache_key(row_ix, DiffTextRegion::SplitRight);
+                    if let Some(key) = key
+                        && this.diff_text_segments_cache_get(key).is_none()
+                    {
                         let Some(row) = this.file_diff_cache_rows.get(row_ix) else {
                             return div()
                                 .id(("diff_split_right_oob", visible_ix))
@@ -641,11 +645,11 @@ impl MainPaneView {
                             .child("")
                             .into_any_element();
                     };
-                    let styled: Option<&CachedDiffStyledText> = row
-                        .new
-                        .is_some()
-                        .then(|| this.diff_text_segments_cache_get(key))
-                        .flatten();
+                    let styled: Option<&CachedDiffStyledText> = if row.new.is_some() {
+                        key.and_then(|k| this.diff_text_segments_cache_get(k))
+                    } else {
+                        None
+                    };
 
                     patch_split_column_row(
                         theme,

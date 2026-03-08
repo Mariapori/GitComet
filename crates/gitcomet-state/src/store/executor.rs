@@ -24,7 +24,7 @@ impl TaskExecutor {
             worker_threads.push(thread::spawn(move || {
                 loop {
                     let task = {
-                        let rx = rx.lock().expect("executor lock poisoned");
+                        let rx = rx.lock().unwrap_or_else(|e| e.into_inner());
                         rx.recv()
                     };
                     match task {

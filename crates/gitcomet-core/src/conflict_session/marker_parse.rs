@@ -16,7 +16,7 @@ pub enum ParsedConflictSegment {
 /// Parse merged text into alternating context text and conflict blocks.
 ///
 /// Parsing is intentionally conservative. If a marker block is malformed,
-/// all consumed marker text is preserved as context and parsing stops.
+/// all consumed marker text is preserved as context and parsing continues.
 pub fn parse_conflict_marker_segments(text: &str) -> Vec<ParsedConflictSegment> {
     let mut segments = Vec::new();
     let mut context = String::new();
@@ -72,7 +72,7 @@ pub fn parse_conflict_marker_segments(text: &str) -> Vec<ParsedConflictSegment> 
             if let Some(ref base_content) = base {
                 context.push_str(base_content);
             }
-            break;
+            continue;
         }
 
         let mut theirs = String::new();
@@ -99,7 +99,7 @@ pub fn parse_conflict_marker_segments(text: &str) -> Vec<ParsedConflictSegment> 
                 context.push_str(sep);
             }
             context.push_str(&theirs);
-            break;
+            continue;
         }
 
         segments.push(ParsedConflictSegment::Conflict(ParsedConflictBlock {

@@ -1055,6 +1055,19 @@ impl MainPaneView {
             .and_then(Option::as_ref)
     }
 
+    pub(in crate::view) fn file_diff_split_cache_key(
+        &self,
+        row_ix: usize,
+        region: DiffTextRegion,
+    ) -> Option<usize> {
+        let base = row_ix.checked_mul(2)?;
+        match region {
+            DiffTextRegion::SplitLeft => Some(base),
+            DiffTextRegion::SplitRight => base.checked_add(1),
+            DiffTextRegion::Inline => None,
+        }
+    }
+
     pub(in crate::view) fn diff_text_segments_cache_set(
         &mut self,
         key: usize,

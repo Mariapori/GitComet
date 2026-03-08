@@ -56,94 +56,11 @@ impl PopoverHost {
     }
 
     fn open_path_default(&mut self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg(path).spawn()?;
-            return Ok(());
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", ""])
-                .arg(path)
-                .spawn()?;
-            return Ok(());
-        }
-
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            match std::process::Command::new("xdg-open").arg(path).spawn() {
-                Ok(_) => Ok(()),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    let _ = std::process::Command::new("gio")
-                        .args(["open"])
-                        .arg(path)
-                        .spawn()?;
-                    Ok(())
-                }
-                Err(err) => Err(err),
-            }
-        }
-
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "windows",
-            target_os = "linux",
-            target_os = "freebsd"
-        )))]
-        {
-            let _ = path;
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Opening files is not supported on this platform",
-            ))
-        }
+        super::super::super::platform_open::open_path(path)
     }
 
     fn open_file_location(&mut self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        if path.is_dir() {
-            return self.open_path_default(path);
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open")
-                .arg("-R")
-                .arg(path)
-                .spawn()?;
-            return Ok(());
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let mut arg = std::ffi::OsString::from("/select,");
-            arg.push(path.as_os_str());
-            let _ = std::process::Command::new("explorer.exe")
-                .arg(arg)
-                .spawn()?;
-            return Ok(());
-        }
-
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            let parent = path.parent().unwrap_or(path);
-            self.open_path_default(parent)
-        }
-
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "windows",
-            target_os = "linux",
-            target_os = "freebsd"
-        )))]
-        {
-            let _ = path;
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Opening file locations is not supported on this platform",
-            ))
-        }
+        super::super::super::platform_open::open_file_location(path)
     }
 
     fn take_status_paths_for_action(

@@ -277,7 +277,11 @@ pub(crate) fn parse_name_status_line(line: &str) -> Option<CommitFileChange> {
         'D' => FileStatusKind::Deleted,
         'R' => FileStatusKind::Renamed,
         'C' => FileStatusKind::Added,
-        _ => FileStatusKind::Modified,
+        'T' | 'U' | 'X' | '!' | '?' => FileStatusKind::Modified,
+        _ => {
+            debug_assert!(false, "unrecognized git status code: {status_kind:?}");
+            FileStatusKind::Modified
+        }
     };
 
     let path = match status_kind {

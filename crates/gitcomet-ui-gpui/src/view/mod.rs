@@ -53,6 +53,7 @@ mod panes;
 mod patch_split;
 mod path_display;
 mod perf;
+pub(super) mod platform_open;
 mod poller;
 mod repo_open;
 pub(crate) mod rows;
@@ -714,56 +715,7 @@ impl GitCometView {
     }
 
     fn open_external_url(&mut self, url: &str) -> Result<(), std::io::Error> {
-        if url.trim().is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "URL is empty",
-            ));
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg(url).spawn()?;
-            return Ok(());
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", ""])
-                .arg(url)
-                .spawn()?;
-            return Ok(());
-        }
-
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            match std::process::Command::new("xdg-open").arg(url).spawn() {
-                Ok(_) => Ok(()),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    let _ = std::process::Command::new("gio")
-                        .args(["open"])
-                        .arg(url)
-                        .spawn()?;
-                    Ok(())
-                }
-                Err(err) => Err(err),
-            }
-        }
-
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "windows",
-            target_os = "linux",
-            target_os = "freebsd"
-        )))]
-        {
-            let _ = url;
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Opening URLs is not supported on this platform",
-            ))
-        }
+        platform_open::open_url(url)
     }
 
     #[cfg(test)]

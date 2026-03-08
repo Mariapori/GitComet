@@ -646,8 +646,10 @@ fn emit_conflict_markers(
                 output.push_str(line_ending);
             }
 
-            let ours_conflict = &ours_lines[prefix_len..ours_lines.len() - suffix_len];
-            let theirs_conflict = &theirs_lines[prefix_len..theirs_lines.len() - suffix_len];
+            let ours_end = ours_lines.len().saturating_sub(suffix_len).max(prefix_len);
+            let theirs_end = theirs_lines.len().saturating_sub(suffix_len).max(prefix_len);
+            let ours_conflict = &ours_lines[prefix_len..ours_end];
+            let theirs_conflict = &theirs_lines[prefix_len..theirs_end];
 
             // Emit conflict markers for the remaining inner region.
             emit_marker(output, '<', ms, options.labels.ours.as_deref(), line_ending);

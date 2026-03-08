@@ -330,12 +330,9 @@ impl MainPaneView {
         }
 
         if self.is_file_diff_view_active() {
-            let key = match region {
-                DiffTextRegion::SplitLeft => mapped_ix * 2,
-                DiffTextRegion::SplitRight => mapped_ix * 2 + 1,
-                DiffTextRegion::Inline => unreachable!(),
-            };
-            if let Some(styled) = self.diff_text_segments_cache_get(key) {
+            if let Some(key) = self.file_diff_split_cache_key(mapped_ix, region)
+                && let Some(styled) = self.diff_text_segments_cache_get(key)
+            {
                 return styled.text.clone();
             }
             let Some(row) = self.file_diff_cache_rows.get(mapped_ix) else {

@@ -94,12 +94,22 @@ pub(super) fn word_diff_ranges(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<
 
     // Compute the longest common subsequence via Myers' diff algorithm, marking matching tokens
     // as "kept". This is substantially faster than O(n*m) DP for typical lines.
+    let Some(sum) = old_slices.len().checked_add(new_slices.len()) else {
+        return fallback_affix_diff_ranges(old, new);
+    };
+    if sum > isize::MAX as usize {
+        return fallback_affix_diff_ranges(old, new);
+    }
+
     let n = old_slices.len() as isize;
     let m = new_slices.len() as isize;
     let max = (n + m) as usize;
     let offset = max as isize;
 
-    let mut v: Vec<isize> = vec![0; 2 * max + 1];
+    let Some(v_size) = max.checked_mul(2).and_then(|v| v.checked_add(1)) else {
+        return fallback_affix_diff_ranges(old, new);
+    };
+    let mut v: Vec<isize> = vec![0; v_size];
     let mut trace: Vec<Vec<isize>> = Vec::with_capacity(max + 1);
 
     let mut done = false;

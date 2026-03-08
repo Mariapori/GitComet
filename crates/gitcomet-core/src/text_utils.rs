@@ -451,17 +451,35 @@ fn remap_discarded_blocks(
             continue;
         }
 
-        let first_a = aindex[block.a_start] + common_prefix;
-        let first_b = bindex[block.b_start] + common_prefix;
+        let Some(&first_a_raw) = aindex.get(block.a_start) else {
+            continue;
+        };
+        let Some(&first_b_raw) = bindex.get(block.b_start) else {
+            continue;
+        };
+        let first_a = first_a_raw + common_prefix;
+        let first_b = first_b_raw + common_prefix;
         let mut run_start_a = first_a;
         let mut run_start_b = first_b;
         let mut run_length = 1usize;
 
         for offset in 1..block.length {
-            let current_a = aindex[block.a_start + offset] + common_prefix;
-            let current_b = bindex[block.b_start + offset] + common_prefix;
-            let prev_a = aindex[block.a_start + offset - 1] + common_prefix;
-            let prev_b = bindex[block.b_start + offset - 1] + common_prefix;
+            let Some(&cur_a_raw) = aindex.get(block.a_start + offset) else {
+                break;
+            };
+            let Some(&cur_b_raw) = bindex.get(block.b_start + offset) else {
+                break;
+            };
+            let Some(&prev_a_raw) = aindex.get(block.a_start + offset - 1) else {
+                break;
+            };
+            let Some(&prev_b_raw) = bindex.get(block.b_start + offset - 1) else {
+                break;
+            };
+            let current_a = cur_a_raw + common_prefix;
+            let current_b = cur_b_raw + common_prefix;
+            let prev_a = prev_a_raw + common_prefix;
+            let prev_b = prev_b_raw + common_prefix;
 
             if current_a == prev_a + 1 && current_b == prev_b + 1 {
                 run_length += 1;

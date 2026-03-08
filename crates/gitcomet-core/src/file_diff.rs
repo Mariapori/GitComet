@@ -501,8 +501,11 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 /// for code with repetitive structural tokens (braces, returns, etc.)
 /// by preferring semantically unique lines (function signatures) as
 /// alignment points.
+/// Maximum recursion depth for histogram/patience diff before falling back to Myers.
+const PATIENCE_MAX_DEPTH: usize = 32;
+
 pub(crate) fn histogram_edits<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Edit<'a>> {
-    patience_recurse(old, new, 0, old.len(), 0, new.len())
+    patience_recurse(old, new, 0, old.len(), 0, new.len(), 0)
 }
 
 fn patience_recurse<'a>(
@@ -512,7 +515,15 @@ fn patience_recurse<'a>(
     old_end: usize,
     new_start: usize,
     new_end: usize,
+    depth: usize,
 ) -> Vec<Edit<'a>> {
+    // Fall back to Myers if recursion is too deep.
+    if depth >= PATIENCE_MAX_DEPTH {
+        let old_slice: Vec<&str> = old[old_start..old_end].to_vec();
+        let new_slice: Vec<&str> = new[new_start..new_end].to_vec();
+        return myers_edits(&old_slice, &new_slice);
+    }
+
     // Strip common prefix.
     let mut prefix = 0;
     while old_start + prefix < old_end
@@ -590,7 +601,7 @@ fn patience_recurse<'a>(
 
             for &(old_idx, new_idx) in &anchors {
                 if oi < old_idx || ni < new_idx {
-                    edits.extend(patience_recurse(old, new, oi, old_idx, ni, new_idx));
+                    edits.extend(patience_recurse(old, new, oi, old_idx, ni, new_idx, depth + 1));
                 }
                 edits.push(Edit {
                     kind: EditKind::Equal,
@@ -610,6 +621,7 @@ fn patience_recurse<'a>(
                     inner_old_end,
                     ni,
                     inner_new_end,
+                    depth + 1,
                 ));
             }
         }
@@ -767,13 +779,47 @@ fn eof_newline_delta(old_text: &str, new_text: &str) -> Option<FileDiffEofNewlin
     }
 }
 
+/// Trivial fallback for inputs too large for Myers: emit all deletes then all inserts.
+fn myers_fallback_edits<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Edit<'a>> {
+    // Avoid unchecked capacity arithmetic here: this fallback is used when
+    // extremely large inputs would make the regular Myers bookkeeping unsafe.
+    let mut edits = Vec::new();
+    for &line in old {
+        edits.push(Edit {
+            kind: EditKind::Delete,
+            old: Some(line),
+            new: None,
+        });
+    }
+    for &line in new {
+        edits.push(Edit {
+            kind: EditKind::Insert,
+            old: None,
+            new: Some(line),
+        });
+    }
+    edits
+}
+
 pub(crate) fn myers_edits<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Edit<'a>> {
+    // Guard against overflow: if n + m exceeds isize::MAX, fall back to a
+    // simple delete-all / insert-all edit sequence.
+    let Some(sum) = old.len().checked_add(new.len()) else {
+        return myers_fallback_edits(old, new);
+    };
+    if sum > isize::MAX as usize {
+        return myers_fallback_edits(old, new);
+    }
+
     let n = old.len() as isize;
     let m = new.len() as isize;
     let max = (n + m) as usize;
     let offset = max as isize;
 
-    let mut v = vec![0isize; 2 * max + 1];
+    let Some(v_size) = max.checked_mul(2).and_then(|v| v.checked_add(1)) else {
+        return myers_fallback_edits(old, new);
+    };
+    let mut v = vec![0isize; v_size];
     let mut trace: Vec<Vec<isize>> = Vec::with_capacity(max + 1);
     {
         let mut x = 0isize;

@@ -118,12 +118,12 @@ pub(super) fn set_history_scope(
 
     if state.repos[repo_ix]
         .loads_in_flight
-        .request_log(scope, 200, None)
+        .request_log(scope, super::util::DEFAULT_LOG_PAGE_SIZE, None)
     {
         vec![Effect::LoadLog {
             repo_id,
             scope,
-            limit: 200,
+            limit: super::util::DEFAULT_LOG_PAGE_SIZE,
             cursor: None,
         }]
     } else {
@@ -153,12 +153,12 @@ pub(super) fn load_more_history(
     repo_state.set_log_loading_more(true);
     if repo_state
         .loads_in_flight
-        .request_log(repo_state.history_scope, 200, Some(cursor.clone()))
+        .request_log(repo_state.history_scope, super::util::DEFAULT_LOG_PAGE_SIZE, Some(cursor.clone()))
     {
         vec![Effect::LoadLog {
             repo_id,
             scope: repo_state.history_scope,
-            limit: 200,
+            limit: super::util::DEFAULT_LOG_PAGE_SIZE,
             cursor: Some(cursor),
         }]
     } else {
