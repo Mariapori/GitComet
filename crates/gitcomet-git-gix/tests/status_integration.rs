@@ -629,6 +629,45 @@ fn diff_file_text_reports_old_and_new_for_working_tree_and_commits() {
 }
 
 #[test]
+fn diff_file_text_root_commit_has_no_parent_side() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "one\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "root"],
+    );
+
+    let head = git_command()
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git rev-parse to run");
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+    let commit = opened
+        .diff_file_text(&DiffTarget::Commit {
+            commit_id: gitcomet_core::domain::CommitId(head),
+            path: Some(PathBuf::from("a.txt")),
+        })
+        .unwrap()
+        .expect("file diff for root commit");
+    assert_eq!(commit.old.as_deref(), None);
+    assert_eq!(commit.new.as_deref(), Some("one\n"));
+}
+
+#[test]
 fn diff_file_text_staged_add_and_delete_report_missing_sides() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
