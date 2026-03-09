@@ -909,20 +909,6 @@ impl MainPaneView {
                                  cx: &mut gpui::Context<Self>| {
                                     this.conflict_resolver_auto_resolve(cx);
                                 };
-                            let auto_resolve_regex =
-                                |this: &mut Self,
-                                 _e: &ClickEvent,
-                                 _w: &mut Window,
-                                 cx: &mut gpui::Context<Self>| {
-                                    this.conflict_resolver_auto_resolve_regex(cx);
-                                };
-                            let auto_resolve_history =
-                                |this: &mut Self,
-                                 _e: &ClickEvent,
-                                 _w: &mut Window,
-                                 cx: &mut gpui::Context<Self>| {
-                                    this.conflict_resolver_auto_resolve_history(cx);
-                                };
                             let toggle_hide_resolved =
                                 |this: &mut Self,
                                  _e: &ClickEvent,
@@ -931,8 +917,6 @@ impl MainPaneView {
                                     this.conflict_resolver_toggle_hide_resolved(cx);
                                 };
                             let hide_resolved = self.conflict_resolver.hide_resolved;
-                            let regex_autosolve_enabled = self.conflict_enable_regex_autosolve;
-                            let history_autosolve_enabled = self.conflict_enable_history_autosolve;
 
                             let start_controls = div()
                                 .flex()
@@ -993,7 +977,7 @@ impl MainPaneView {
                                         .child(
                                             components::Button::new(
                                                 "conflict_auto_resolve",
-                                                "Auto-resolve safe",
+                                                "Auto-resolve",
                                             )
                                             .style(components::ButtonStyle::Outlined)
                                             .on_click(
@@ -1002,26 +986,6 @@ impl MainPaneView {
                                                 auto_resolve,
                                             ),
                                         )
-                                        .when(regex_autosolve_enabled, |d| {
-                                            d.child(
-                                                components::Button::new(
-                                                    "conflict_auto_resolve_regex",
-                                                    "Auto-resolve regex",
-                                                )
-                                                .style(components::ButtonStyle::Transparent)
-                                                .on_click(theme, cx, auto_resolve_regex),
-                                            )
-                                        })
-                                        .when(history_autosolve_enabled, |d| {
-                                            d.child(
-                                                components::Button::new(
-                                                    "conflict_auto_resolve_history",
-                                                    "Auto-resolve history",
-                                                )
-                                                .style(components::ButtonStyle::Transparent)
-                                                .on_click(theme, cx, auto_resolve_history),
-                                            )
-                                        })
                                 })
                                 .when(has_conflicts && resolved_count > 0, |d| {
                                     d.child(

@@ -152,14 +152,6 @@ pub(super) fn panel(this: &mut PopoverHost, cx: &mut gpui::Context<PopoverHost>)
     let current_timezone = this.timezone;
     let show_timezone = this.show_timezone;
     let runtime = &this.settings_runtime_info;
-    let (
-        conflict_enable_whitespace_autosolve,
-        conflict_enable_regex_autosolve,
-        conflict_enable_history_autosolve,
-    ) = this
-        .main_pane
-        .read(cx)
-        .conflict_advanced_autosolve_settings();
     let preview_now = std::time::SystemTime::now();
 
     let row = |id: &'static str, label: &'static str, value: SharedString, open: bool| {
@@ -404,68 +396,6 @@ pub(super) fn panel(this: &mut PopoverHost, cx: &mut gpui::Context<PopoverHost>)
                 .child(tz_row)
                 .child(show_timezone_row),
         );
-
-    let conflict_section_label = div()
-        .px_2()
-        .pt(px(6.0))
-        .pb(px(4.0))
-        .text_xs()
-        .text_color(theme.colors.text_muted)
-        .child("Conflict resolver");
-
-    let whitespace_row = toggle_row(
-        "settings_conflict_whitespace_autosolve",
-        "Auto-resolve whitespace-only",
-        conflict_enable_whitespace_autosolve,
-    )
-    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-        let (enabled, _, _) = this
-            .main_pane
-            .read(cx)
-            .conflict_advanced_autosolve_settings();
-        this.set_conflict_enable_whitespace_autosolve(!enabled, cx);
-        cx.notify();
-    }));
-
-    let regex_row = toggle_row(
-        "settings_conflict_regex_autosolve",
-        "Enable regex auto-resolve",
-        conflict_enable_regex_autosolve,
-    )
-    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-        let (_, enabled, _) = this
-            .main_pane
-            .read(cx)
-            .conflict_advanced_autosolve_settings();
-        this.set_conflict_enable_regex_autosolve(!enabled, cx);
-        cx.notify();
-    }));
-
-    let history_row = toggle_row(
-        "settings_conflict_history_autosolve",
-        "Enable history auto-resolve",
-        conflict_enable_history_autosolve,
-    )
-    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-        let (_, _, enabled) = this
-            .main_pane
-            .read(cx)
-            .conflict_advanced_autosolve_settings();
-        this.set_conflict_enable_history_autosolve(!enabled, cx);
-        cx.notify();
-    }));
-
-    content = content.child(conflict_section_label).child(
-        div()
-            .px_2()
-            .pb_1()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(whitespace_row)
-            .child(regex_row)
-            .child(history_row),
-    );
 
     let environment_section_label = div()
         .px_2()

@@ -2,6 +2,7 @@ use super::GixRepo;
 use crate::util::{run_git_with_output, validate_ref_like_arg};
 use gitcomet_core::error::{Error, ErrorKind};
 use gitcomet_core::services::{CommandOutput, ResetMode, Result};
+use std::path::PathBuf;
 use std::process::Command;
 use std::str;
 
@@ -52,7 +53,24 @@ impl GixRepo {
             .arg(&self.spec.workdir)
             .arg("rebase")
             .arg("--abort");
-        run_git_with_output(cmd, "git rebase --abort")
+        match run_git_with_output(cmd, "git rebase --abort") {
+            Ok(output) => Ok(output),
+            Err(rebase_error) => {
+                // `git am` uses its own sequencer state. Falling back here allows a
+                // single "abort in-progress operation" UI action to handle both rebase
+                // and patch-apply flows.
+                let mut am_cmd = Command::new("git");
+                am_cmd
+                    .arg("-C")
+                    .arg(&self.spec.workdir)
+                    .arg("am")
+                    .arg("--abort");
+                match run_git_with_output(am_cmd, "git am --abort") {
+                    Ok(output) => Ok(output),
+                    Err(_) => Err(rebase_error),
+                }
+            }
+        }
     }
 
     pub(super) fn merge_abort_with_output_impl(&self) -> Result<CommandOutput> {
@@ -73,7 +91,38 @@ impl GixRepo {
             .arg("REBASE_HEAD")
             .output()
             .map_err(|e| Error::new(ErrorKind::Io(e.kind())))?;
-        Ok(output.status.success())
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        // `git am` tracks progress in `.git/rebase-apply` and does not set REBASE_HEAD.
+        let applying_path = Command::new("git")
+            .arg("-C")
+            .arg(&self.spec.workdir)
+            .arg("rev-parse")
+            .arg("--git-path")
+            .arg("rebase-apply/applying")
+            .output()
+            .map_err(|e| Error::new(ErrorKind::Io(e.kind())))?;
+
+        if !applying_path.status.success() {
+            return Ok(false);
+        }
+
+        let applying_path = String::from_utf8_lossy(&applying_path.stdout);
+        let applying_path = applying_path.trim();
+        if applying_path.is_empty() {
+            return Ok(false);
+        }
+
+        let applying_path = PathBuf::from(applying_path);
+        let applying_path = if applying_path.is_absolute() {
+            applying_path
+        } else {
+            self.spec.workdir.join(applying_path)
+        };
+
+        Ok(applying_path.exists())
     }
 
     pub(super) fn merge_commit_message_impl(&self) -> Result<Option<String>> {

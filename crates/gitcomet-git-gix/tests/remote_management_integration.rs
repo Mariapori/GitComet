@@ -99,25 +99,17 @@ fn remote_add_set_url_and_remove_round_trip() {
         .expect("add remote");
     assert_eq!(add_output.exit_code, Some(0));
 
-    let remotes = backend
-        .open(&repo)
-        .expect("re-open repository after add")
-        .list_remotes()
-        .expect("list remotes after add");
+    let remotes = opened.list_remotes().expect("list remotes after add");
     assert_eq!(remotes.len(), 1);
     assert_eq!(remotes[0].name, "origin");
     assert_eq!(remotes[0].url.as_deref(), Some(fetch_remote_str.as_str()));
 
-    let fetch_set_output = backend
-        .open(&repo)
-        .expect("re-open repository before fetch url update")
+    let fetch_set_output = opened
         .set_remote_url_with_output("origin", &push_remote_str, RemoteUrlKind::Fetch)
         .expect("set fetch url");
     assert_eq!(fetch_set_output.exit_code, Some(0));
 
-    let remotes_after_fetch = backend
-        .open(&repo)
-        .expect("re-open repository after fetch url update")
+    let remotes_after_fetch = opened
         .list_remotes()
         .expect("list remotes after fetch url update");
     assert_eq!(remotes_after_fetch.len(), 1);
@@ -126,9 +118,7 @@ fn remote_add_set_url_and_remove_round_trip() {
         Some(push_remote_str.as_str())
     );
 
-    let push_set_output = backend
-        .open(&repo)
-        .expect("re-open repository before push url update")
+    let push_set_output = opened
         .set_remote_url_with_output("origin", &fetch_remote_str, RemoteUrlKind::Push)
         .expect("set push url");
     assert_eq!(push_set_output.exit_code, Some(0));
@@ -138,18 +128,12 @@ fn remote_add_set_url_and_remove_round_trip() {
         .to_string();
     assert_eq!(push_url, fetch_remote_str);
 
-    let remove_output = backend
-        .open(&repo)
-        .expect("re-open repository before remove")
+    let remove_output = opened
         .remove_remote_with_output("origin")
         .expect("remove remote");
     assert_eq!(remove_output.exit_code, Some(0));
 
-    let remotes_after_remove = backend
-        .open(&repo)
-        .expect("re-open repository after remove")
-        .list_remotes()
-        .expect("list remotes after remove");
+    let remotes_after_remove = opened.list_remotes().expect("list remotes after remove");
     assert!(remotes_after_remove.is_empty());
 }
 

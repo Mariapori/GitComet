@@ -2104,36 +2104,16 @@ impl MainPaneView {
     /// Apply safe auto-resolve rules to all unresolved conflict blocks.
     /// Updates the resolved output text and notifies the UI.
     pub(in crate::view) fn conflict_resolver_auto_resolve(&mut self, cx: &mut gpui::Context<Self>) {
-        self.conflict_resolver_auto_resolve_inner(false, cx);
-    }
-
-    /// Apply safe + regex-assisted auto-resolve rules (explicit opt-in).
-    pub(in crate::view) fn conflict_resolver_auto_resolve_regex(
-        &mut self,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        if !self.conflict_enable_regex_autosolve {
-            return;
-        }
-        self.conflict_resolver_auto_resolve_inner(true, cx);
-    }
-
-    pub(super) fn conflict_resolver_auto_resolve_inner(
-        &mut self,
-        include_regex_pass: bool,
-        cx: &mut gpui::Context<Self>,
-    ) {
         let total_before = self.conflict_resolver_conflict_count();
         if total_before == 0 {
             return;
         }
         let unresolved_before =
             total_before.saturating_sub(self.conflict_resolver_resolved_count());
-        let ws = self.conflict_enable_whitespace_autosolve;
         // Pass 1: safe whole-block auto-resolve.
         let pass1 = conflict_resolver::auto_resolve_segments_with_options(
             &mut self.conflict_resolver.marker_segments,
-            ws,
+            false,
         );
         // Pass 2: heuristic subchunk splitting — split remaining unresolved
         // blocks into finer line-level subchunks where possible.
@@ -2146,22 +2126,12 @@ impl MainPaneView {
             // satisfy whole-block rules after splitting).
             conflict_resolver::auto_resolve_segments_with_options(
                 &mut self.conflict_resolver.marker_segments,
-                ws,
+                false,
             )
         } else {
             0
         };
-        let regex = if include_regex_pass {
-            let options =
-                gitcomet_core::conflict_session::RegexAutosolveOptions::whitespace_insensitive();
-            conflict_resolver::auto_resolve_segments_regex(
-                &mut self.conflict_resolver.marker_segments,
-                &options,
-            )
-        } else {
-            0
-        };
-        let count = pass1 + pass2 + pass1_after_split + regex;
+        let count = pass1 + pass2 + pass1_after_split;
         if count > 0 {
             let resolved =
                 conflict_resolver::generate_resolved_text(&self.conflict_resolver.marker_segments);
@@ -2181,17 +2151,12 @@ impl MainPaneView {
             pass1,
             pass2_split: pass2,
             pass1_after_split,
-            regex,
+            regex: 0,
             history: 0,
         };
-        let trace_mode = if include_regex_pass {
-            conflict_resolver::AutosolveTraceMode::Regex
-        } else {
-            conflict_resolver::AutosolveTraceMode::Safe
-        };
         self.conflict_resolver.last_autosolve_summary = Some(
             conflict_resolver::format_autosolve_trace_summary(
-                trace_mode,
+                conflict_resolver::AutosolveTraceMode::Safe,
                 unresolved_before,
                 unresolved_after,
                 &stats,
@@ -2199,11 +2164,7 @@ impl MainPaneView {
             .into(),
         );
         self.dispatch_conflict_autosolve_telemetry(
-            if include_regex_pass {
-                gitcomet_state::msg::ConflictAutosolveMode::Regex
-            } else {
-                gitcomet_state::msg::ConflictAutosolveMode::Safe
-            },
+            gitcomet_state::msg::ConflictAutosolveMode::Safe,
             total_before,
             total_after,
             unresolved_before,
@@ -2221,90 +2182,7 @@ impl MainPaneView {
             self.store.dispatch(Msg::ConflictApplyAutosolve {
                 repo_id,
                 path,
-                mode: if include_regex_pass {
-                    gitcomet_state::msg::ConflictAutosolveMode::Regex
-                } else {
-                    gitcomet_state::msg::ConflictAutosolveMode::Safe
-                },
-                whitespace_normalize: ws,
-            });
-        }
-        cx.notify();
-    }
-
-    /// Apply history-aware auto-resolve to unresolved conflict blocks.
-    /// Detects changelog/history sections and merges entries by deduplication.
-    pub(in crate::view) fn conflict_resolver_auto_resolve_history(
-        &mut self,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        if !self.conflict_enable_history_autosolve {
-            return;
-        }
-        let total_before = self.conflict_resolver_conflict_count();
-        if total_before == 0 {
-            return;
-        }
-        let unresolved_before =
-            total_before.saturating_sub(self.conflict_resolver_resolved_count());
-        // Use bullet_list preset as default; in a real settings integration
-        // this would come from user configuration.
-        let options = gitcomet_core::conflict_session::HistoryAutosolveOptions::bullet_list();
-        let count = conflict_resolver::auto_resolve_segments_history_with_region_indices(
-            &mut self.conflict_resolver.marker_segments,
-            &options,
-            &mut self.conflict_resolver.conflict_region_indices,
-        );
-        if count > 0 {
-            let resolved =
-                conflict_resolver::generate_resolved_text(&self.conflict_resolver.marker_segments);
-            self.conflict_resolver_set_output(resolved, cx);
-            self.conflict_resolver_rebuild_visible_map();
-            if let Some(next_unresolved) = conflict_resolver::next_unresolved_conflict_index(
-                &self.conflict_resolver.marker_segments,
-                self.conflict_resolver.active_conflict,
-            ) {
-                self.conflict_resolver.active_conflict = next_unresolved;
-            }
-        }
-        let total_after = self.conflict_resolver_conflict_count();
-        let unresolved_after = total_after.saturating_sub(self.conflict_resolver_resolved_count());
-        let stats = gitcomet_state::msg::ConflictAutosolveStats {
-            pass1: 0,
-            pass2_split: 0,
-            pass1_after_split: 0,
-            regex: 0,
-            history: count,
-        };
-        self.conflict_resolver.last_autosolve_summary = Some(
-            conflict_resolver::format_autosolve_trace_summary(
-                conflict_resolver::AutosolveTraceMode::History,
-                unresolved_before,
-                unresolved_after,
-                &stats,
-            )
-            .into(),
-        );
-        self.dispatch_conflict_autosolve_telemetry(
-            gitcomet_state::msg::ConflictAutosolveMode::History,
-            total_before,
-            total_after,
-            unresolved_before,
-            unresolved_after,
-            stats,
-        );
-        if count > 0
-            && let (Some(repo_id), Some(path)) = (
-                self.conflict_resolver
-                    .repo_id
-                    .or_else(|| self.active_repo_id()),
-                self.conflict_resolver.path.clone(),
-            )
-        {
-            self.store.dispatch(Msg::ConflictApplyAutosolve {
-                repo_id,
-                path,
-                mode: gitcomet_state::msg::ConflictAutosolveMode::History,
+                mode: gitcomet_state::msg::ConflictAutosolveMode::Safe,
                 whitespace_normalize: false,
             });
         }

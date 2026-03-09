@@ -25,6 +25,7 @@ pub enum ConflictPickSide {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum AutosolveTraceMode {
     Safe,
     Regex,
@@ -673,6 +674,7 @@ pub fn auto_resolve_segments_with_options(
 ///
 /// This mode uses regex normalization rules from core and only performs
 /// side-picks (`Ours` / `Theirs`), never synthetic text rewrites.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn auto_resolve_segments_regex(
     segments: &mut [ConflictSegment],
     options: &gitcomet_core::conflict_session::RegexAutosolveOptions,

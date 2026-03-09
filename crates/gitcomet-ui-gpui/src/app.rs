@@ -180,6 +180,22 @@ fn bind_text_input_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("backspace", crate::kit::Backspace, Some("TextInput")),
         KeyBinding::new("delete", crate::kit::Delete, Some("TextInput")),
+        KeyBinding::new(
+            "ctrl-backspace",
+            crate::kit::DeleteWordLeft,
+            Some("TextInput"),
+        ),
+        KeyBinding::new(
+            "ctrl-delete",
+            crate::kit::DeleteWordRight,
+            Some("TextInput"),
+        ),
+        KeyBinding::new(
+            "alt-backspace",
+            crate::kit::DeleteWordLeft,
+            Some("TextInput"),
+        ),
+        KeyBinding::new("alt-delete", crate::kit::DeleteWordRight, Some("TextInput")),
         KeyBinding::new("enter", crate::kit::Enter, Some("TextInput")),
         KeyBinding::new("left", crate::kit::Left, Some("TextInput")),
         KeyBinding::new("right", crate::kit::Right, Some("TextInput")),
@@ -218,6 +234,10 @@ fn bind_text_input_keys(cx: &mut App) {
         KeyBinding::new("shift-home", crate::kit::SelectHome, Some("TextInput")),
         KeyBinding::new("end", crate::kit::End, Some("TextInput")),
         KeyBinding::new("shift-end", crate::kit::SelectEnd, Some("TextInput")),
+        KeyBinding::new("cmd-left", crate::kit::Home, Some("TextInput")),
+        KeyBinding::new("cmd-shift-left", crate::kit::SelectHome, Some("TextInput")),
+        KeyBinding::new("cmd-right", crate::kit::End, Some("TextInput")),
+        KeyBinding::new("cmd-shift-right", crate::kit::SelectEnd, Some("TextInput")),
         KeyBinding::new("pageup", crate::kit::PageUp, Some("TextInput")),
         KeyBinding::new("shift-pageup", crate::kit::SelectPageUp, Some("TextInput")),
         KeyBinding::new("pagedown", crate::kit::PageDown, Some("TextInput")),

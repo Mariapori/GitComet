@@ -673,39 +673,12 @@ impl SidebarPaneView {
                         format!("remote_menu_{}_{}", repo_id.0, remote_name).into();
                     let context_menu_active =
                         this.active_context_menu_invoker.as_ref() == Some(&context_menu_invoker);
-                    let row_group: SharedString = format!("branch_remote_row_{ix}").into();
-                    let menu_button_id: SharedString = format!("branch_remote_menu_{ix}").into();
-                    let remote_name_for_button: String = name.as_ref().to_owned();
-                    let context_menu_invoker_for_button = context_menu_invoker.clone();
-                    let menu_button = components::Button::new(menu_button_id, "")
-                        .start_slot(svg_icon("icons/menu.svg", theme.colors.text_muted, 14.0))
-                        .style(components::ButtonStyle::Transparent)
-                        .on_click(theme, cx, move |this, e, window, cx| {
-                            cx.stop_propagation();
-                            this.activate_context_menu_invoker(
-                                context_menu_invoker_for_button.clone(),
-                                cx,
-                            );
-                            this.open_popover_at(
-                                PopoverKind::remote(
-                                    repo_id,
-                                    RemotePopoverKind::Menu {
-                                        name: remote_name_for_button.clone(),
-                                    },
-                                ),
-                                e.position(),
-                                window,
-                                cx,
-                            );
-                            cx.notify();
-                        });
                     let remote_name_for_right_click: String = name.as_ref().to_owned();
                     let context_menu_invoker_for_right_click = context_menu_invoker.clone();
 
                     div()
                         .id(("branch_remote", ix))
                         .relative()
-                        .group(row_group.clone())
                         .h(px(24.0))
                         .w_full()
                         .px_2()
@@ -726,26 +699,7 @@ impl SidebarPaneView {
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme.colors.text)
                         .child(svg_icon("icons/folder.svg", icon_primary, 14.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .pr(px(28.0))
-                                .line_clamp(1)
-                                .child(name),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .right(px(6.0))
-                                .top(px(2.0))
-                                .bottom(px(2.0))
-                                .flex()
-                                .items_center()
-                                .invisible()
-                                .group_hover(row_group, |d| d.visible())
-                                .child(menu_button),
-                        )
+                        .child(div().flex_1().min_w(px(0.0)).line_clamp(1).child(name))
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {

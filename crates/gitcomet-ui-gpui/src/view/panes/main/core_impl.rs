@@ -130,9 +130,6 @@ impl MainPaneView {
         history_show_author: bool,
         history_show_date: bool,
         history_show_sha: bool,
-        conflict_enable_whitespace_autosolve: bool,
-        conflict_enable_regex_autosolve: bool,
-        conflict_enable_history_autosolve: bool,
         view_mode: GitCometViewMode,
         focused_mergetool_labels: Option<FocusedMergetoolLabels>,
         focused_mergetool_exit_code: Option<Arc<AtomicI32>>,
@@ -269,9 +266,6 @@ impl MainPaneView {
             active_context_menu_invoker: None,
             last_window_size: size(px(0.0), px(0.0)),
             show_whitespace: false,
-            conflict_enable_whitespace_autosolve,
-            conflict_enable_regex_autosolve,
-            conflict_enable_history_autosolve,
             diff_view: DiffViewMode::Split,
             svg_diff_view_mode: SvgDiffViewMode::Image,
             diff_word_wrap: false,
@@ -639,50 +633,6 @@ impl MainPaneView {
         self.history_view
             .read(cx)
             .history_visible_column_preferences()
-    }
-
-    pub(in crate::view) fn conflict_advanced_autosolve_settings(&self) -> (bool, bool, bool) {
-        (
-            self.conflict_enable_whitespace_autosolve,
-            self.conflict_enable_regex_autosolve,
-            self.conflict_enable_history_autosolve,
-        )
-    }
-
-    pub(in crate::view) fn set_conflict_enable_whitespace_autosolve(
-        &mut self,
-        enabled: bool,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        if self.conflict_enable_whitespace_autosolve == enabled {
-            return;
-        }
-        self.conflict_enable_whitespace_autosolve = enabled;
-        cx.notify();
-    }
-
-    pub(in crate::view) fn set_conflict_enable_regex_autosolve(
-        &mut self,
-        enabled: bool,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        if self.conflict_enable_regex_autosolve == enabled {
-            return;
-        }
-        self.conflict_enable_regex_autosolve = enabled;
-        cx.notify();
-    }
-
-    pub(in crate::view) fn set_conflict_enable_history_autosolve(
-        &mut self,
-        enabled: bool,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        if self.conflict_enable_history_autosolve == enabled {
-            return;
-        }
-        self.conflict_enable_history_autosolve = enabled;
-        cx.notify();
     }
 
     pub(in crate::view) fn open_popover_at(

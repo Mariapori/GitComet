@@ -17,6 +17,8 @@ actions!(
     [
         Backspace,
         Delete,
+        DeleteWordLeft,
+        DeleteWordRight,
         Enter,
         Left,
         Right,
@@ -684,6 +686,36 @@ impl TextInput {
         }
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.read_only {
+            return;
+        }
+        if self.selected_range.is_empty() {
+            self.select_to(self.previous_word_start(self.cursor_offset()), cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_right(
+        &mut self,
+        _: &DeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.read_only {
+            return;
+        }
+        if self.selected_range.is_empty() {
+            self.select_to(self.next_word_end(self.cursor_offset()), cx)
         }
         self.replace_text_in_range(None, "", window, cx)
     }
@@ -1826,6 +1858,8 @@ impl Render for TextInput {
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
             .on_action(cx.listener(Self::enter))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))

@@ -1451,9 +1451,6 @@ pub(in crate::view) struct MainPaneView {
     pub(in crate::view) last_window_size: Size<Pixels>,
 
     pub(in crate::view) show_whitespace: bool,
-    pub(in crate::view) conflict_enable_whitespace_autosolve: bool,
-    pub(in crate::view) conflict_enable_regex_autosolve: bool,
-    pub(in crate::view) conflict_enable_history_autosolve: bool,
     pub(in crate::view) diff_view: DiffViewMode,
     pub(in crate::view) svg_diff_view_mode: SvgDiffViewMode,
     pub(in crate::view) diff_word_wrap: bool,

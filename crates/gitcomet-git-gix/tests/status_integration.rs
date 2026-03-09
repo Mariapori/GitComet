@@ -3923,6 +3923,79 @@ fn rebase_continue_without_in_progress_rebase_returns_error() {
 }
 
 #[test]
+fn rebase_abort_falls_back_to_git_am_abort() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    run_git(repo, &["checkout", "-b", "feature"]);
+    write(repo, "a.txt", "feature\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+
+    let patch_output = git_command()
+        .arg("-C")
+        .arg(repo)
+        .args(["format-patch", "-1", "HEAD", "--stdout"])
+        .output()
+        .expect("git format-patch to run");
+    assert!(
+        patch_output.status.success(),
+        "git format-patch failed: {}",
+        String::from_utf8_lossy(&patch_output.stderr)
+    );
+
+    let patch_file = tempfile::NamedTempFile::new().expect("create patch temp file");
+    fs::write(patch_file.path(), &patch_output.stdout).expect("write patch file");
+
+    run_git(repo, &["checkout", "main"]);
+    write(repo, "a.txt", "main\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "main"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    assert!(opened.apply_patch_with_output(patch_file.path()).is_err());
+    assert!(
+        opened.rebase_in_progress().unwrap(),
+        "expected apply-patch sequencer state to be in progress"
+    );
+
+    let abort_output = opened.rebase_abort_with_output().unwrap();
+    assert_eq!(
+        abort_output.command, "git am --abort",
+        "expected rebase abort fallback to use git am --abort"
+    );
+    assert!(!opened.rebase_in_progress().unwrap());
+
+    let status = opened.status().unwrap();
+    assert!(status.staged.is_empty());
+    assert!(status.unstaged.is_empty());
+    assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "main\n");
+}
+
+#[test]
 fn merge_abort_with_output_clears_conflict_state() {
     if !require_git_shell_for_status_integration_tests() {
         return;

@@ -6,6 +6,44 @@ pub(super) fn panel(
     cx: &mut gpui::Context<PopoverHost>,
 ) -> gpui::Div {
     let theme = this.theme;
+    #[derive(Clone, Copy)]
+    enum AbortMode {
+        Merge,
+        RebaseOrApply,
+    }
+
+    let mode = this
+        .state
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .map(|repo| {
+            if matches!(&repo.merge_commit_message, Loadable::Ready(Some(_))) {
+                AbortMode::Merge
+            } else if matches!(&repo.rebase_in_progress, Loadable::Ready(true)) {
+                AbortMode::RebaseOrApply
+            } else {
+                AbortMode::Merge
+            }
+        })
+        .unwrap_or(AbortMode::Merge);
+
+    let (title, body, command, button_id, button_label) = match mode {
+        AbortMode::Merge => (
+            "Abort merge?",
+            "This will abort the current merge and restore the pre-merge state. Any resolved conflicts will be lost.",
+            "git merge --abort",
+            "merge_abort_go",
+            "Abort merge",
+        ),
+        AbortMode::RebaseOrApply => (
+            "Abort apply/rebase?",
+            "This will abort the in-progress patch apply or rebase and restore the previous state. Any resolved conflicts will be lost.",
+            "git rebase --abort / git am --abort",
+            "rebase_or_apply_abort_go",
+            "Abort",
+        ),
+    };
 
     div()
         .flex()
@@ -17,7 +55,7 @@ pub(super) fn panel(
                 .py_1()
                 .text_sm()
                 .font_weight(FontWeight::BOLD)
-                .child("Abort merge?"),
+                .child(title),
         )
         .child(div().border_t_1().border_color(theme.colors.border))
         .child(
@@ -26,7 +64,7 @@ pub(super) fn panel(
                 .py_1()
                 .text_sm()
                 .text_color(theme.colors.text_muted)
-                .child("This will abort the current merge and restore the pre-merge state. Any resolved conflicts will be lost."),
+                .child(body),
         )
         .child(
             div()
@@ -35,7 +73,7 @@ pub(super) fn panel(
                 .text_xs()
                 .font_family("monospace")
                 .text_color(theme.colors.text_muted)
-                .child("git merge --abort"),
+                .child(command),
         )
         .child(div().border_t_1().border_color(theme.colors.border))
         .child(
@@ -55,10 +93,17 @@ pub(super) fn panel(
                         }),
                 )
                 .child(
-                    components::Button::new("merge_abort_go", "Abort merge")
+                    components::Button::new(button_id, button_label)
                         .style(components::ButtonStyle::Danger)
                         .on_click(theme, cx, move |this, _e, _w, cx| {
-                            this.store.dispatch(Msg::MergeAbort { repo_id });
+                            match mode {
+                                AbortMode::Merge => {
+                                    this.store.dispatch(Msg::MergeAbort { repo_id })
+                                }
+                                AbortMode::RebaseOrApply => {
+                                    this.store.dispatch(Msg::RebaseAbort { repo_id })
+                                }
+                            }
                             this.popover = None;
                             this.popover_anchor = None;
                             cx.notify();

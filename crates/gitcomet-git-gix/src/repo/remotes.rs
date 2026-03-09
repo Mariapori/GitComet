@@ -136,21 +136,25 @@ impl GixRepo {
     }
 
     pub(super) fn list_remotes_impl(&self) -> Result<Vec<Remote>> {
-        let repo = self._repo.to_thread_local();
         let mut remotes = Vec::new();
 
-        for name in repo.remote_names() {
-            let remote = repo
-                .find_remote(name.as_ref())
-                .map_err(|e| Error::new(ErrorKind::Backend(format!("gix find_remote: {e}"))))?;
-
-            let url = remote
-                .url(gix::remote::Direction::Fetch)
-                .map(|u| u.to_string());
+        let mut list_cmd = Command::new("git");
+        list_cmd.arg("-C").arg(&self.spec.workdir).arg("remote");
+        let names = run_git_capture(list_cmd, "git remote")?;
+        for name in names.lines().map(str::trim).filter(|name| !name.is_empty()) {
+            let mut url_cmd = Command::new("git");
+            url_cmd
+                .arg("-C")
+                .arg(&self.spec.workdir)
+                .arg("remote")
+                .arg("get-url")
+                .arg(name);
+            let url = run_git_capture(url_cmd, &format!("git remote get-url {name}"))?;
+            let url = url.trim();
 
             remotes.push(Remote {
-                name: name.to_str_lossy().into_owned(),
-                url,
+                name: name.to_string(),
+                url: (!url.is_empty()).then(|| url.to_string()),
             });
         }
 

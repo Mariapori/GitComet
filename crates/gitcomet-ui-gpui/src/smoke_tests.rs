@@ -232,6 +232,17 @@ fn text_input_supports_basic_clipboard_and_word_shortcuts(cx: &mut gpui::TestApp
             KeyBinding::new("ctrl-c", crate::kit::Copy, Some("TextInput")),
             KeyBinding::new("ctrl-x", crate::kit::Cut, Some("TextInput")),
             KeyBinding::new("ctrl-v", crate::kit::Paste, Some("TextInput")),
+            KeyBinding::new("ctrl-left", crate::kit::WordLeft, Some("TextInput")),
+            KeyBinding::new(
+                "ctrl-backspace",
+                crate::kit::DeleteWordLeft,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                "ctrl-delete",
+                crate::kit::DeleteWordRight,
+                Some("TextInput"),
+            ),
             KeyBinding::new(
                 "ctrl-shift-left",
                 crate::kit::SelectWordLeft,
@@ -276,6 +287,32 @@ fn text_input_supports_basic_clipboard_and_word_shortcuts(cx: &mut gpui::TestApp
         cx.read_from_clipboard().and_then(|item| item.text()),
         Some("world".into())
     );
+
+    cx.update(|window, app| {
+        let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
+        window.focus(&focus);
+        view.update(app, |this, cx| {
+            this.input
+                .update(cx, |input, cx| input.set_text("hello brave world", cx));
+        });
+    });
+
+    cx.simulate_keystrokes("ctrl-backspace");
+    let text = cx.update(|_window, app| view.read(app).input.read(app).text().to_string());
+    assert_eq!(text, "hello brave ");
+
+    cx.update(|window, app| {
+        let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
+        window.focus(&focus);
+        view.update(app, |this, cx| {
+            this.input
+                .update(cx, |input, cx| input.set_text("hello brave world", cx));
+        });
+    });
+
+    cx.simulate_keystrokes("ctrl-left ctrl-delete");
+    let text = cx.update(|_window, app| view.read(app).input.read(app).text().to_string());
+    assert_eq!(text, "hello brave ");
 }
 
 #[gpui::test]

@@ -214,6 +214,9 @@ impl Render for ActionBarView {
         let is_merging = self
             .active_repo()
             .is_some_and(|r| matches!(&r.merge_commit_message, Loadable::Ready(Some(_))));
+        let is_rebase_or_apply_in_progress = self
+            .active_repo()
+            .is_some_and(|r| matches!(&r.rebase_in_progress, Loadable::Ready(true)));
 
         let (pull_count, push_count) = self
             .active_repo()
@@ -625,6 +628,35 @@ impl Render for ActionBarView {
                                 )
                                 .child(
                                     components::Button::new("abort_merge", "Abort merge")
+                                        .style(components::ButtonStyle::Danger)
+                                        .on_click(theme, cx, |this, e: &ClickEvent, window, cx| {
+                                            if let Some(repo_id) = this.active_repo_id() {
+                                                this.open_popover_at(
+                                                    PopoverKind::MergeAbortConfirm { repo_id },
+                                                    e.position(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        }),
+                                ),
+                        )
+                    })
+                    .when(!is_merging && is_rebase_or_apply_in_progress, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.colors.warning)
+                                        .font_weight(FontWeight::BOLD)
+                                        .child("APPLY/REBASE"),
+                                )
+                                .child(
+                                    components::Button::new("abort_rebase_or_apply", "Abort")
                                         .style(components::ButtonStyle::Danger)
                                         .on_click(theme, cx, |this, e: &ClickEvent, window, cx| {
                                             if let Some(repo_id) = this.active_repo_id() {
