@@ -458,7 +458,10 @@ fn build_untracked_conflict_markers(current: &str, stashed: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::untracked_restore_conflict_paths;
+    use super::{
+        build_untracked_conflict_markers, stash_apply_blocked_before_merge,
+        stash_apply_reports_untracked_restore_failure, untracked_restore_conflict_paths,
+    };
     use std::path::Path;
 
     #[test]
@@ -475,5 +478,66 @@ mod tests {
         let paths = untracked_restore_conflict_paths("", stderr);
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], Path::new("docs/a file.txt"));
+    }
+
+    #[test]
+    fn stash_apply_reports_untracked_restore_failure_detects_known_messages() {
+        assert!(stash_apply_reports_untracked_restore_failure(
+            "Could not restore untracked files from stash",
+            "",
+        ));
+        assert!(stash_apply_reports_untracked_restore_failure(
+            "",
+            "fatal: docs/a.txt already exists, no checkout",
+        ));
+        assert!(!stash_apply_reports_untracked_restore_failure(
+            "fatal: merge conflict",
+            "fatal: merge conflict",
+        ));
+    }
+
+    #[test]
+    fn stash_apply_blocked_before_merge_detects_known_messages() {
+        assert!(stash_apply_blocked_before_merge(
+            "error: local changes would be overwritten by merge",
+            "",
+        ));
+        assert!(stash_apply_blocked_before_merge(
+            "",
+            "Please commit your changes or stash them before you merge.",
+        ));
+        assert!(!stash_apply_blocked_before_merge(
+            "could not restore untracked files from stash",
+            "",
+        ));
+    }
+
+    #[test]
+    fn untracked_restore_conflict_paths_dedups_and_skips_empty_entries() {
+        let stderr = concat!(
+            "fatal: 'docs/a file.txt' already exists, no checkout\n",
+            "error: 'docs/a file.txt' already exists, no checkout\n",
+            "\"\" already exists, no checkout\n",
+        );
+        let stdout = "docs/b file.txt already exists, no checkout\n";
+        let paths = untracked_restore_conflict_paths(stdout, stderr);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], Path::new("docs/a file.txt"));
+        assert_eq!(paths[1], Path::new("docs/b file.txt"));
+    }
+
+    #[test]
+    fn build_untracked_conflict_markers_appends_missing_newlines() {
+        let merged = build_untracked_conflict_markers("ours", "theirs");
+        assert_eq!(
+            merged,
+            concat!(
+                "<<<<<<< Current file\n",
+                "ours\n",
+                "=======\n",
+                "theirs\n",
+                ">>>>>>> Stashed file\n"
+            )
+        );
     }
 }

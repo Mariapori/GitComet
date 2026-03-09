@@ -190,6 +190,206 @@ fn clone_repo_sets_running_state_and_emits_effect() {
 }
 
 #[test]
+fn clone_repo_progress_trims_tail_and_skips_blank_lines() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let dest = PathBuf::from("/tmp/example");
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepo {
+            url: "file:///tmp/example.git".to_string(),
+            dest: dest.clone(),
+        },
+    );
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepoProgress {
+            dest: dest.clone(),
+            line: "   ".to_string(),
+        },
+    );
+    for i in 0..84 {
+        reduce(
+            &mut repos,
+            &id_alloc,
+            &mut state,
+            Msg::CloneRepoProgress {
+                dest: dest.clone(),
+                line: format!("line-{i}"),
+            },
+        );
+    }
+
+    let op = state.clone.as_ref().expect("clone op set");
+    assert_eq!(op.seq, 85);
+    assert_eq!(op.output_tail.len(), 80);
+    assert_eq!(op.output_tail.first().map(String::as_str), Some("line-4"));
+    assert_eq!(op.output_tail.last().map(String::as_str), Some("line-83"));
+}
+
+#[test]
+fn clone_repo_progress_ignores_mismatched_or_non_running_operation() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let dest = PathBuf::from("/tmp/example");
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepo {
+            url: "file:///tmp/example.git".to_string(),
+            dest: dest.clone(),
+        },
+    );
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepoProgress {
+            dest: PathBuf::from("/tmp/other"),
+            line: "ignored".to_string(),
+        },
+    );
+    {
+        let op = state.clone.as_ref().expect("clone op set");
+        assert_eq!(op.seq, 0);
+        assert!(op.output_tail.is_empty());
+    }
+
+    if let Some(op) = state.clone.as_mut() {
+        op.status = CloneOpStatus::FinishedOk;
+    }
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepoProgress {
+            dest: dest.clone(),
+            line: "ignored-too".to_string(),
+        },
+    );
+    {
+        let op = state.clone.as_ref().expect("clone op set");
+        assert_eq!(op.seq, 0);
+        assert!(op.output_tail.is_empty());
+    }
+
+    state.clone = None;
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepoProgress {
+            dest,
+            line: "no-op".to_string(),
+        },
+    );
+    assert!(state.clone.is_none());
+}
+
+#[test]
+fn clone_repo_finished_updates_existing_operation_for_success_and_error() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let dest = PathBuf::from("/tmp/example");
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepo {
+            url: "file:///tmp/example.git".to_string(),
+            dest: dest.clone(),
+        },
+    );
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepoFinished {
+            url: "file:///tmp/success.git".to_string(),
+            dest: dest.clone(),
+            result: Ok(CommandOutput::empty_success("git clone")),
+        },
+    );
+    {
+        let op = state.clone.as_ref().expect("clone op set");
+        assert_eq!(op.url, "file:///tmp/success.git");
+        assert_eq!(op.dest, dest);
+        assert!(matches!(op.status, CloneOpStatus::FinishedOk));
+        assert_eq!(op.seq, 1);
+    }
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepoFinished {
+            url: "file:///tmp/failure.git".to_string(),
+            dest: PathBuf::from("/tmp/example"),
+            result: Err(Error::new(ErrorKind::Backend("boom".to_string()))),
+        },
+    );
+    let op = state.clone.as_ref().expect("clone op set");
+    assert_eq!(op.url, "file:///tmp/failure.git");
+    assert_eq!(op.seq, 2);
+    match &op.status {
+        CloneOpStatus::FinishedErr(message) => {
+            assert!(message.contains("Clone failed"));
+            assert!(message.contains("boom"));
+        }
+        other => panic!("expected clone error status, got {other:?}"),
+    }
+}
+
+#[test]
+fn clone_repo_finished_replaces_state_when_destination_differs() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepo {
+            url: "file:///tmp/original.git".to_string(),
+            dest: PathBuf::from("/tmp/original"),
+        },
+    );
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CloneRepoFinished {
+            url: "file:///tmp/replacement.git".to_string(),
+            dest: PathBuf::from("/tmp/replacement"),
+            result: Ok(CommandOutput::empty_success("git clone")),
+        },
+    );
+
+    let op = state.clone.as_ref().expect("clone op set");
+    assert_eq!(op.url, "file:///tmp/replacement.git");
+    assert_eq!(op.dest, PathBuf::from("/tmp/replacement"));
+    assert!(matches!(op.status, CloneOpStatus::FinishedOk));
+    assert_eq!(op.seq, 1);
+    assert!(op.output_tail.is_empty());
+}
+
+#[test]
 fn close_repo_removes_and_moves_active() {
     let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
     let id_alloc = AtomicU64::new(10);
@@ -289,6 +489,109 @@ fn reorder_repo_tabs_moves_repo_and_keeps_active() {
         vec![RepoId(1), RepoId(2), RepoId(3)]
     );
     assert_eq!(state.active_repo, Some(RepoId(3)));
+}
+
+#[test]
+fn reorder_repo_tabs_noops_for_invalid_or_already_stable_ordering() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::OpenRepo(PathBuf::from("/tmp/repo1")),
+    );
+    let original = state.repos.iter().map(|r| r.id).collect::<Vec<_>>();
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ReorderRepoTabs {
+            repo_id: RepoId(1),
+            insert_before: None,
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.repos.iter().map(|r| r.id).collect::<Vec<_>>(),
+        original
+    );
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::OpenRepo(PathBuf::from("/tmp/repo2")),
+    );
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::OpenRepo(PathBuf::from("/tmp/repo3")),
+    );
+    let original = state.repos.iter().map(|r| r.id).collect::<Vec<_>>();
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ReorderRepoTabs {
+            repo_id: RepoId(999),
+            insert_before: Some(RepoId(1)),
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.repos.iter().map(|r| r.id).collect::<Vec<_>>(),
+        original
+    );
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ReorderRepoTabs {
+            repo_id: RepoId(2),
+            insert_before: Some(RepoId(2)),
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.repos.iter().map(|r| r.id).collect::<Vec<_>>(),
+        original
+    );
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ReorderRepoTabs {
+            repo_id: RepoId(1),
+            insert_before: Some(RepoId(2)),
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.repos.iter().map(|r| r.id).collect::<Vec<_>>(),
+        original
+    );
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ReorderRepoTabs {
+            repo_id: RepoId(3),
+            insert_before: None,
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.repos.iter().map(|r| r.id).collect::<Vec<_>>(),
+        original
+    );
 }
 
 #[test]
@@ -438,6 +741,175 @@ fn set_active_repo_refreshes_repo_state_and_selected_diff() {
     assert!(has_log, "expected log refresh on activation");
     assert!(has_diff, "expected diff refresh on activation");
     assert!(has_diff_file, "expected diff-file refresh on activation");
+}
+
+#[test]
+fn set_active_repo_png_diff_enqueues_image_preview_only() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::OpenRepo(PathBuf::from("/tmp/repo1")),
+    );
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::OpenRepo(PathBuf::from("/tmp/repo2")),
+    );
+
+    let repo1 = RepoId(1);
+    let repo1_state = state
+        .repos
+        .iter_mut()
+        .find(|r| r.id == repo1)
+        .expect("repo1 exists");
+    repo1_state.diff_target = Some(DiffTarget::WorkingTree {
+        path: PathBuf::from("image.png"),
+        area: gitcomet_core::domain::DiffArea::Unstaged,
+    });
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SetActiveRepo { repo_id: repo1 },
+    );
+
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadDiff { repo_id, .. } if *repo_id == repo1)),
+        "expected diff refresh for png target"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadDiffFileImage { repo_id, .. } if *repo_id == repo1)),
+        "expected image preview refresh for png target"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadDiffFile { repo_id, .. } if *repo_id == repo1)),
+        "did not expect text diff-file refresh for png target"
+    );
+}
+
+#[test]
+fn set_active_repo_svg_diff_enqueues_image_and_text_previews() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::OpenRepo(PathBuf::from("/tmp/repo1")),
+    );
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::OpenRepo(PathBuf::from("/tmp/repo2")),
+    );
+
+    let repo1 = RepoId(1);
+    let repo1_state = state
+        .repos
+        .iter_mut()
+        .find(|r| r.id == repo1)
+        .expect("repo1 exists");
+    repo1_state.diff_target = Some(DiffTarget::WorkingTree {
+        path: PathBuf::from("vector.svg"),
+        area: gitcomet_core::domain::DiffArea::Unstaged,
+    });
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SetActiveRepo { repo_id: repo1 },
+    );
+
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadDiffFileImage { repo_id, .. } if *repo_id == repo1)),
+        "expected image preview refresh for svg target"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadDiffFile { repo_id, .. } if *repo_id == repo1)),
+        "expected text diff-file refresh for svg target"
+    );
+}
+
+#[test]
+fn set_fetch_prune_deleted_remote_tracking_branches_updates_and_noops() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::OpenRepo(PathBuf::from("/tmp/repo")),
+    );
+    let initial = state.repos[0].fetch_prune_deleted_remote_tracking_branches;
+    let target = !initial;
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SetFetchPruneDeletedRemoteTrackingBranches {
+            repo_id: RepoId(1),
+            enabled: target,
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.repos[0].fetch_prune_deleted_remote_tracking_branches,
+        target
+    );
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SetFetchPruneDeletedRemoteTrackingBranches {
+            repo_id: RepoId(1),
+            enabled: target,
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.repos[0].fetch_prune_deleted_remote_tracking_branches,
+        target
+    );
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SetFetchPruneDeletedRemoteTrackingBranches {
+            repo_id: RepoId(999),
+            enabled: !target,
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.repos[0].fetch_prune_deleted_remote_tracking_branches,
+        target
+    );
 }
 
 #[test]

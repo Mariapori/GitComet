@@ -1,0 +1,597 @@
+use gitcomet_core::services::{GitBackend, PullMode, RemoteUrlKind};
+use gitcomet_git_gix::GixBackend;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+#[cfg(windows)]
+const NULL_DEVICE: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_DEVICE: &str = "/dev/null";
+
+fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    // Keep tests deterministic by isolating from host git config.
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_GLOBAL", NULL_DEVICE);
+    // Local bare remotes require file protocol to be permitted.
+    cmd.env("GIT_ALLOW_PROTOCOL", "file");
+    cmd
+}
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let status = git_command()
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .status()
+        .expect("git command to run");
+    assert!(status.success(), "git {:?} failed", args);
+}
+
+fn run_git_capture(repo: &Path, args: &[&str]) -> String {
+    let output = git_command()
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git command to run");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn run_git_status(repo: &Path, args: &[&str]) -> std::process::ExitStatus {
+    git_command()
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .status()
+        .expect("git command to run")
+}
+
+fn init_repo_with_user(repo: &Path) {
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+    run_git(repo, &["config", "core.autocrlf", "false"]);
+    run_git(repo, &["config", "core.eol", "lf"]);
+}
+
+#[test]
+fn remote_add_set_url_and_remove_round_trip() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let repo = root.join("repo");
+    let fetch_remote = root.join("fetch.git");
+    let push_remote = root.join("push.git");
+
+    fs::create_dir_all(&repo).expect("create repo dir");
+    fs::create_dir_all(&fetch_remote).expect("create fetch remote dir");
+    fs::create_dir_all(&push_remote).expect("create push remote dir");
+
+    run_git(&fetch_remote, &["init", "--bare"]);
+    run_git(&push_remote, &["init", "--bare"]);
+
+    init_repo_with_user(&repo);
+
+    fs::write(repo.join("seed.txt"), "seed\n").expect("write seed file");
+    run_git(&repo, &["add", "seed.txt"]);
+    run_git(
+        &repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "seed"],
+    );
+
+    let fetch_remote_str = fetch_remote.to_string_lossy().into_owned();
+    let push_remote_str = push_remote.to_string_lossy().into_owned();
+
+    let backend = GixBackend;
+    let opened = backend.open(&repo).expect("open repository");
+
+    let add_output = opened
+        .add_remote_with_output("origin", &fetch_remote_str)
+        .expect("add remote");
+    assert_eq!(add_output.exit_code, Some(0));
+
+    let remotes = backend
+        .open(&repo)
+        .expect("re-open repository after add")
+        .list_remotes()
+        .expect("list remotes after add");
+    assert_eq!(remotes.len(), 1);
+    assert_eq!(remotes[0].name, "origin");
+    assert_eq!(remotes[0].url.as_deref(), Some(fetch_remote_str.as_str()));
+
+    let fetch_set_output = backend
+        .open(&repo)
+        .expect("re-open repository before fetch url update")
+        .set_remote_url_with_output("origin", &push_remote_str, RemoteUrlKind::Fetch)
+        .expect("set fetch url");
+    assert_eq!(fetch_set_output.exit_code, Some(0));
+
+    let remotes_after_fetch = backend
+        .open(&repo)
+        .expect("re-open repository after fetch url update")
+        .list_remotes()
+        .expect("list remotes after fetch url update");
+    assert_eq!(remotes_after_fetch.len(), 1);
+    assert_eq!(
+        remotes_after_fetch[0].url.as_deref(),
+        Some(push_remote_str.as_str())
+    );
+
+    let push_set_output = backend
+        .open(&repo)
+        .expect("re-open repository before push url update")
+        .set_remote_url_with_output("origin", &fetch_remote_str, RemoteUrlKind::Push)
+        .expect("set push url");
+    assert_eq!(push_set_output.exit_code, Some(0));
+
+    let push_url = run_git_capture(&repo, &["config", "--get", "remote.origin.pushurl"])
+        .trim()
+        .to_string();
+    assert_eq!(push_url, fetch_remote_str);
+
+    let remove_output = backend
+        .open(&repo)
+        .expect("re-open repository before remove")
+        .remove_remote_with_output("origin")
+        .expect("remove remote");
+    assert_eq!(remove_output.exit_code, Some(0));
+
+    let remotes_after_remove = backend
+        .open(&repo)
+        .expect("re-open repository after remove")
+        .list_remotes()
+        .expect("list remotes after remove");
+    assert!(remotes_after_remove.is_empty());
+}
+
+#[test]
+fn push_with_output_sets_upstream_when_missing() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let remote_repo = root.join("remote.git");
+    let work_repo = root.join("work");
+    fs::create_dir_all(&remote_repo).expect("create remote repo dir");
+    fs::create_dir_all(&work_repo).expect("create work repo dir");
+
+    run_git(&remote_repo, &["init", "--bare"]);
+    init_repo_with_user(&work_repo);
+
+    let remote_str = remote_repo.to_string_lossy().into_owned();
+    run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
+
+    fs::write(work_repo.join("file.txt"), "hi\n").expect("write base file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    run_git(&work_repo, &["checkout", "-b", "feature"]);
+    fs::write(work_repo.join("feature.txt"), "feature\n").expect("write feature file");
+    run_git(&work_repo, &["add", "feature.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(&work_repo).expect("open work repo");
+
+    let output = opened.push_with_output().expect("push with output");
+    assert_eq!(output.exit_code, Some(0));
+
+    let upstream = run_git_capture(
+        &work_repo,
+        &[
+            "for-each-ref",
+            "--format=%(upstream:short)",
+            "refs/heads/feature",
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(upstream, "origin/feature");
+
+    let remote_head = run_git_capture(&work_repo, &["ls-remote", "--heads", "origin", "feature"]);
+    assert!(
+        !remote_head.trim().is_empty(),
+        "expected pushed feature branch on origin"
+    );
+}
+
+#[test]
+fn delete_remote_branch_with_output_deletes_remote_and_tracking_ref() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let remote_repo = root.join("remote.git");
+    let work_repo = root.join("work");
+    fs::create_dir_all(&remote_repo).expect("create remote repo dir");
+    fs::create_dir_all(&work_repo).expect("create work repo dir");
+
+    run_git(&remote_repo, &["init", "--bare"]);
+    init_repo_with_user(&work_repo);
+
+    let remote_str = remote_repo.to_string_lossy().into_owned();
+    run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
+
+    fs::write(work_repo.join("file.txt"), "base\n").expect("write base file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+    run_git(&work_repo, &["push", "-u", "origin", "HEAD"]);
+
+    run_git(&work_repo, &["checkout", "-b", "feature"]);
+    fs::write(work_repo.join("feature.txt"), "feature\n").expect("write feature file");
+    run_git(&work_repo, &["add", "feature.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+    run_git(&work_repo, &["push", "-u", "origin", "feature"]);
+
+    // Ensure remote-tracking refs are present before deletion.
+    run_git(&work_repo, &["fetch", "--all"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(&work_repo).expect("open work repo");
+    let output = opened
+        .delete_remote_branch_with_output("origin", "feature")
+        .expect("delete remote branch");
+    assert_eq!(output.exit_code, Some(0));
+
+    let remote_head = run_git_capture(&work_repo, &["ls-remote", "--heads", "origin", "feature"]);
+    assert!(
+        remote_head.trim().is_empty(),
+        "expected feature branch to be deleted from origin"
+    );
+
+    let tracking_ref_status = run_git_status(
+        &work_repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/feature",
+        ],
+    );
+    assert!(
+        !tracking_ref_status.success(),
+        "expected local tracking ref to be removed"
+    );
+}
+
+#[test]
+fn prune_merged_branches_with_output_reports_noop_when_nothing_to_prune() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let remote_repo = root.join("remote.git");
+    let work_repo = root.join("work");
+    fs::create_dir_all(&remote_repo).expect("create remote repo dir");
+    fs::create_dir_all(&work_repo).expect("create work repo dir");
+
+    run_git(&remote_repo, &["init", "--bare"]);
+    init_repo_with_user(&work_repo);
+
+    let remote_str = remote_repo.to_string_lossy().into_owned();
+    run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
+
+    fs::write(work_repo.join("file.txt"), "seed\n").expect("write seed file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "seed"],
+    );
+    run_git(&work_repo, &["push", "-u", "origin", "HEAD"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(&work_repo).expect("open work repo");
+    let output = opened
+        .prune_merged_branches_with_output()
+        .expect("prune merged branches");
+
+    assert_eq!(output.exit_code, Some(0));
+    assert!(
+        output.stdout.contains("No merged local branches to prune."),
+        "unexpected prune stdout: {}",
+        output.stdout
+    );
+}
+
+#[test]
+fn fetch_all_variants_without_prune_succeed() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let remote_repo = root.join("remote.git");
+    let work_repo = root.join("work");
+    fs::create_dir_all(&remote_repo).expect("create remote repo dir");
+    fs::create_dir_all(&work_repo).expect("create work repo dir");
+
+    run_git(&remote_repo, &["init", "--bare"]);
+    init_repo_with_user(&work_repo);
+
+    let remote_str = remote_repo.to_string_lossy().into_owned();
+    run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
+
+    fs::write(work_repo.join("file.txt"), "base\n").expect("write base file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+    run_git(&work_repo, &["push", "-u", "origin", "HEAD"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(&work_repo).expect("open work repo");
+    opened.fetch_all().expect("fetch all");
+    let output = opened
+        .fetch_all_with_output()
+        .expect("fetch all with output");
+    assert_eq!(output.exit_code, Some(0));
+}
+
+#[test]
+fn push_force_without_output_updates_remote_head_after_rewrite() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let remote_repo = root.join("remote.git");
+    let work_repo = root.join("work");
+    fs::create_dir_all(&remote_repo).expect("create remote repo dir");
+    fs::create_dir_all(&work_repo).expect("create work repo dir");
+
+    run_git(&remote_repo, &["init", "--bare", "-b", "main"]);
+    run_git(&work_repo, &["init", "-b", "main"]);
+    init_repo_with_user(&work_repo);
+
+    let remote_str = remote_repo.to_string_lossy().into_owned();
+    run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
+
+    fs::write(work_repo.join("file.txt"), "base\n").expect("write base file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+    run_git(&work_repo, &["push", "-u", "origin", "main"]);
+
+    fs::write(work_repo.join("file.txt"), "base\nnext\n").expect("write updated file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "next"],
+    );
+    run_git(&work_repo, &["push"]);
+
+    let remote_head_before = run_git_capture(&remote_repo, &["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_string();
+
+    run_git(&work_repo, &["reset", "--hard", "HEAD~1"]);
+    fs::write(work_repo.join("file.txt"), "base\nrewritten\n").expect("write rewritten file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "rewritten"],
+    );
+
+    let local_head = run_git_capture(&work_repo, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    let backend = GixBackend;
+    let opened = backend.open(&work_repo).expect("open work repo");
+    opened.push_force().expect("force push");
+
+    let remote_head_after = run_git_capture(&remote_repo, &["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_string();
+    assert_ne!(remote_head_before, remote_head_after);
+    assert_eq!(remote_head_after, local_head);
+}
+
+#[test]
+fn pull_non_output_supports_all_modes_when_upstream_exists() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let origin = root.join("origin.git");
+    let repo_a = root.join("repo-a");
+    let repo_b = root.join("repo-b");
+    fs::create_dir_all(&origin).expect("create origin dir");
+    fs::create_dir_all(&repo_a).expect("create repo-a dir");
+
+    run_git(&origin, &["init", "--bare", "-b", "main"]);
+
+    run_git(&repo_a, &["init", "-b", "main"]);
+    init_repo_with_user(&repo_a);
+    fs::write(repo_a.join("a.txt"), "one\n").expect("write initial file");
+    run_git(&repo_a, &["add", "a.txt"]);
+    run_git(
+        &repo_a,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+    run_git(
+        &repo_a,
+        &["remote", "add", "origin", origin.to_string_lossy().as_ref()],
+    );
+    run_git(&repo_a, &["push", "-u", "origin", "main"]);
+
+    run_git(
+        root,
+        &[
+            "clone",
+            origin.to_string_lossy().as_ref(),
+            repo_b.to_string_lossy().as_ref(),
+        ],
+    );
+    init_repo_with_user(&repo_b);
+
+    fs::write(repo_a.join("a.txt"), "one\ntwo\n").expect("write updated file");
+    run_git(&repo_a, &["add", "a.txt"]);
+    run_git(
+        &repo_a,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "second"],
+    );
+    run_git(&repo_a, &["push"]);
+
+    let backend = GixBackend;
+    let opened_b = backend.open(&repo_b).expect("open repo-b");
+    opened_b
+        .pull(PullMode::FastForwardIfPossible)
+        .expect("pull ff-if-possible");
+    opened_b.pull(PullMode::Merge).expect("pull merge");
+    opened_b
+        .pull(PullMode::FastForwardOnly)
+        .expect("pull ff-only");
+    opened_b.pull(PullMode::Rebase).expect("pull rebase");
+    opened_b.pull(PullMode::Default).expect("pull default");
+}
+
+#[test]
+fn push_without_origin_uses_first_remote_name_for_upstream() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let remote_repo = root.join("backup.git");
+    let work_repo = root.join("work");
+    fs::create_dir_all(&remote_repo).expect("create remote repo dir");
+    fs::create_dir_all(&work_repo).expect("create work repo dir");
+
+    run_git(&remote_repo, &["init", "--bare"]);
+    init_repo_with_user(&work_repo);
+
+    let remote_str = remote_repo.to_string_lossy().into_owned();
+    run_git(&work_repo, &["remote", "add", "backup", &remote_str]);
+
+    fs::write(work_repo.join("file.txt"), "base\n").expect("write base file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    run_git(&work_repo, &["checkout", "-b", "feature"]);
+    fs::write(work_repo.join("feature.txt"), "feature\n").expect("write feature file");
+    run_git(&work_repo, &["add", "feature.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(&work_repo).expect("open work repo");
+    opened.push().expect("push branch");
+
+    let upstream = run_git_capture(
+        &work_repo,
+        &[
+            "for-each-ref",
+            "--format=%(upstream:short)",
+            "refs/heads/feature",
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(upstream, "backup/feature");
+}
+
+#[test]
+fn pull_without_remotes_on_local_branch_returns_error() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let repo = dir.path();
+    init_repo_with_user(repo);
+
+    fs::write(repo.join("a.txt"), "one\n").expect("write file");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).expect("open repository");
+    assert!(opened.pull(PullMode::Default).is_err());
+}
+
+#[test]
+fn pull_on_detached_head_returns_error() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let repo = dir.path();
+    init_repo_with_user(repo);
+
+    fs::write(repo.join("a.txt"), "one\n").expect("write file");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+    run_git(repo, &["checkout", "--detach", "HEAD"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).expect("open repository");
+    assert!(opened.pull(PullMode::Default).is_err());
+}
+
+#[test]
+fn pull_branch_with_output_merges_named_remote_branch() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let remote_repo = root.join("remote.git");
+    let work_repo = root.join("work");
+    fs::create_dir_all(&remote_repo).expect("create remote repo dir");
+    fs::create_dir_all(&work_repo).expect("create work repo dir");
+
+    run_git(&remote_repo, &["init", "--bare", "-b", "main"]);
+    run_git(&work_repo, &["init", "-b", "main"]);
+    init_repo_with_user(&work_repo);
+
+    let remote_str = remote_repo.to_string_lossy().into_owned();
+    run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
+
+    fs::write(work_repo.join("file.txt"), "base\n").expect("write base file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+    run_git(&work_repo, &["push", "-u", "origin", "main"]);
+
+    run_git(&work_repo, &["checkout", "-b", "feature"]);
+    fs::write(work_repo.join("feature.txt"), "feature\n").expect("write feature file");
+    run_git(&work_repo, &["add", "feature.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+    run_git(&work_repo, &["push", "-u", "origin", "feature"]);
+    run_git(&work_repo, &["checkout", "main"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(&work_repo).expect("open work repo");
+    let output = opened
+        .pull_branch_with_output("origin", "feature")
+        .expect("pull branch with output");
+    assert_eq!(output.exit_code, Some(0));
+
+    let merged = run_git_capture(&work_repo, &["show-ref", "--verify", "refs/heads/main"]);
+    assert!(
+        !merged.trim().is_empty(),
+        "expected main branch to remain valid"
+    );
+}

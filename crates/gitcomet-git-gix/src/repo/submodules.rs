@@ -128,3 +128,62 @@ fn parse_git_submodule_status(output: &str) -> Vec<Submodule> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_git_submodule_status;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_git_submodule_status_parses_status_sha_and_path() {
+        let parsed = parse_git_submodule_status(
+            r#" 1111111111111111111111111111111111111111 libs/a (heads/main)
+-2222222222222222222222222222222222222222 libs/b
++3333333333333333333333333333333333333333 libs/c
+U4444444444444444444444444444444444444444 libs/d
+"#,
+        );
+
+        assert_eq!(parsed.len(), 4);
+        assert_eq!(parsed[0].status, ' ');
+        assert_eq!(
+            parsed[0].head.as_ref(),
+            "1111111111111111111111111111111111111111"
+        );
+        assert_eq!(parsed[0].path, PathBuf::from("libs/a"));
+
+        assert_eq!(parsed[1].status, '-');
+        assert_eq!(parsed[1].path, PathBuf::from("libs/b"));
+
+        assert_eq!(parsed[2].status, '+');
+        assert_eq!(parsed[2].path, PathBuf::from("libs/c"));
+
+        assert_eq!(parsed[3].status, 'U');
+        assert_eq!(parsed[3].path, PathBuf::from("libs/d"));
+    }
+
+    #[test]
+    fn parse_git_submodule_status_ignores_blank_and_malformed_lines() {
+        let parsed = parse_git_submodule_status(
+            r#"
+not-a-real-line
+ 5555555555555555555555555555555555555555 libs/ok
+ +missing-path
+"#,
+        );
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].status, ' ');
+        assert_eq!(
+            parsed[0].head.as_ref(),
+            "5555555555555555555555555555555555555555"
+        );
+        assert_eq!(parsed[0].path, PathBuf::from("libs/ok"));
+    }
+
+    #[test]
+    fn parse_git_submodule_status_ignores_lines_without_sha() {
+        let parsed = parse_git_submodule_status("-\n");
+        assert!(parsed.is_empty());
+    }
+}

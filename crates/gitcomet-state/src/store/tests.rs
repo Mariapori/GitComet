@@ -117,6 +117,16 @@ impl GitRepository for DummyRepo {
     }
 }
 
+struct FailingBackend;
+
+impl GitBackend for FailingBackend {
+    fn open(&self, _path: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
+        Err(Error::new(ErrorKind::Unsupported(
+            "store test backend open failure",
+        )))
+    }
+}
+
 fn run_git(repo: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
@@ -167,6 +177,90 @@ fn require_git_shell_for_store_tests() -> bool {
         }
     }
     true
+}
+
+fn wait_for_state_changed(event_rx: &smol::channel::Receiver<StoreEvent>) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match event_rx.try_recv() {
+            Ok(StoreEvent::StateChanged) => return,
+            Err(smol::channel::TryRecvError::Empty) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for StoreEvent::StateChanged"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(smol::channel::TryRecvError::Closed) => {
+                panic!("store event channel closed unexpectedly")
+            }
+        }
+    }
+}
+
+#[test]
+fn app_store_clone_dispatches_restore_and_close_paths() {
+    let backend: Arc<dyn GitBackend> = Arc::new(FailingBackend);
+    let (store, event_rx) = AppStore::new(backend);
+    let cloned = store.clone();
+
+    cloned.dispatch(Msg::RestoreSession {
+        open_repos: Vec::new(),
+        active_repo: None,
+    });
+    wait_for_state_changed(&event_rx);
+
+    store.dispatch(Msg::CloseRepo {
+        repo_id: RepoId(999),
+    });
+    wait_for_state_changed(&event_rx);
+
+    let snapshot = store.snapshot();
+    assert!(snapshot.repos.is_empty());
+    assert_eq!(snapshot.active_repo, None);
+}
+
+#[test]
+fn app_store_open_repo_effect_propagates_open_error_into_state() {
+    let backend: Arc<dyn GitBackend> = Arc::new(FailingBackend);
+    let (store, event_rx) = AppStore::new(backend);
+
+    let base = std::env::temp_dir().join(format!(
+        "gitcomet-store-open-repo-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&base).expect("temporary repo path should be creatable");
+    let expected_workdir = base.canonicalize().unwrap_or(base.clone());
+
+    store.dispatch(Msg::OpenRepo(base));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let snapshot = store.snapshot();
+        if let Some(repo) = snapshot.repos.first()
+            && matches!(repo.open, Loadable::Error(_))
+        {
+            assert_eq!(repo.spec.workdir, expected_workdir);
+            assert_eq!(snapshot.active_repo, Some(repo.id));
+            let error = repo.last_error.as_deref().unwrap_or_default();
+            assert!(
+                error.contains("store test backend open failure"),
+                "unexpected open error: {error}"
+            );
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for repo open error in store state"
+        );
+        let _ = event_rx.try_recv();
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 mod actions_emit_effects;

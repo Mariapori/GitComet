@@ -433,13 +433,29 @@ pub(super) fn resolved_output_marker_for_line(
         .flatten()
 }
 
+pub(super) fn first_output_marker_line_for_conflict(
+    markers: &[Option<ResolvedOutputConflictMarker>],
+    conflict_ix: usize,
+) -> Option<usize> {
+    markers.iter().enumerate().find_map(|(line_ix, marker)| {
+        marker
+            .as_ref()
+            .and_then(|m| (m.conflict_ix == conflict_ix && m.is_start).then_some(line_ix))
+    })
+}
+
 pub(super) fn conflict_marker_nav_entries_from_markers(
     markers: &[Option<ResolvedOutputConflictMarker>],
 ) -> Vec<usize> {
+    let mut seen_conflicts = std::collections::HashSet::new();
     markers
         .iter()
         .enumerate()
-        .filter_map(|(line_ix, marker)| marker.as_ref().and_then(|m| m.is_start.then_some(line_ix)))
+        .filter_map(|(line_ix, marker)| {
+            marker.as_ref().and_then(|m| {
+                (m.is_start && seen_conflicts.insert(m.conflict_ix)).then_some(line_ix)
+            })
+        })
         .collect()
 }
 

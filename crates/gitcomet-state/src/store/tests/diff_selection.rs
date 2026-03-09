@@ -469,3 +469,271 @@ fn select_diff_does_not_bump_unrelated_revs() {
     assert_eq!(state.repos[0].status_rev, status_before);
     assert_eq!(state.repos[0].log_rev, log_before);
 }
+
+#[test]
+fn select_and_clear_diff_are_noops_for_unknown_repo() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    let target = DiffTarget::WorkingTree {
+        path: PathBuf::from("src/lib.rs"),
+        area: DiffArea::Unstaged,
+    };
+    let select = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SelectDiff {
+            repo_id: RepoId(999),
+            target,
+        },
+    );
+    let clear = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ClearDiffSelection {
+            repo_id: RepoId(999),
+        },
+    );
+
+    assert!(select.is_empty());
+    assert!(clear.is_empty());
+    assert!(state.repos.is_empty());
+}
+
+#[test]
+fn apply_worktree_patch_emits_effect() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(2);
+    let mut state = AppState::default();
+    state.repos.push(RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(RepoId(1));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ApplyWorktreePatch {
+            repo_id: RepoId(1),
+            patch: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            reverse: false,
+        },
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ApplyWorktreePatch {
+            repo_id: RepoId(1),
+            reverse: false,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn diff_loaded_ok_sets_ready_when_target_matches() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let mut repo_state = RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    );
+    let target = DiffTarget::WorkingTree {
+        path: PathBuf::from("src/lib.rs"),
+        area: DiffArea::Unstaged,
+    };
+    repo_state.diff_target = Some(target.clone());
+    repo_state.diff = Loadable::Loading;
+    state.repos.push(repo_state);
+    state.active_repo = Some(RepoId(1));
+
+    let diff = gitcomet_core::domain::Diff {
+        target: target.clone(),
+        lines: vec![],
+    };
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DiffLoaded {
+            repo_id: RepoId(1),
+            target,
+            result: Ok(diff),
+        },
+    );
+
+    let repo_state = &state.repos[0];
+    assert!(matches!(repo_state.diff, Loadable::Ready(_)));
+    assert!(repo_state.diagnostics.is_empty());
+}
+
+#[test]
+fn diff_file_loaded_and_image_loaded_cover_success_and_error_paths() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let mut repo_state = RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    );
+    let target = DiffTarget::WorkingTree {
+        path: PathBuf::from("img.png"),
+        area: DiffArea::Unstaged,
+    };
+    repo_state.diff_target = Some(target.clone());
+    repo_state.diff_file = Loadable::Loading;
+    repo_state.diff_file_image = Loadable::Loading;
+    state.repos.push(repo_state);
+    state.active_repo = Some(RepoId(1));
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DiffFileLoaded {
+            repo_id: RepoId(1),
+            target: target.clone(),
+            result: Ok(Some(gitcomet_core::domain::FileDiffText {
+                path: PathBuf::from("img.png"),
+                old: Some("old".to_string()),
+                new: Some("new".to_string()),
+            })),
+        },
+    );
+    assert!(matches!(state.repos[0].diff_file, Loadable::Ready(_)));
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DiffFileImageLoaded {
+            repo_id: RepoId(1),
+            target: target.clone(),
+            result: Ok(Some(gitcomet_core::domain::FileDiffImage {
+                path: PathBuf::from("img.png"),
+                old: Some(vec![0x01]),
+                new: Some(vec![0x02]),
+            })),
+        },
+    );
+    assert!(matches!(state.repos[0].diff_file_image, Loadable::Ready(_)));
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DiffFileLoaded {
+            repo_id: RepoId(1),
+            target: target.clone(),
+            result: Err(Error::new(ErrorKind::Backend(
+                "text side-by-side failed".to_string(),
+            ))),
+        },
+    );
+    assert!(matches!(state.repos[0].diff_file, Loadable::Error(_)));
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DiffFileImageLoaded {
+            repo_id: RepoId(1),
+            target,
+            result: Err(Error::new(ErrorKind::Backend(
+                "image preview failed".to_string(),
+            ))),
+        },
+    );
+    assert!(matches!(state.repos[0].diff_file_image, Loadable::Error(_)));
+    assert!(
+        state.repos[0]
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("text side-by-side failed"))
+    );
+    assert!(
+        state.repos[0]
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("image preview failed"))
+    );
+}
+
+#[test]
+fn diff_results_are_ignored_for_non_matching_target() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let mut repo_state = RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    );
+    let selected = DiffTarget::WorkingTree {
+        path: PathBuf::from("selected.txt"),
+        area: DiffArea::Unstaged,
+    };
+    let other = DiffTarget::WorkingTree {
+        path: PathBuf::from("other.txt"),
+        area: DiffArea::Unstaged,
+    };
+    repo_state.diff_target = Some(selected.clone());
+    repo_state.diff = Loadable::Loading;
+    repo_state.diff_file = Loadable::Loading;
+    repo_state.diff_file_image = Loadable::Loading;
+    state.repos.push(repo_state);
+    state.active_repo = Some(RepoId(1));
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DiffLoaded {
+            repo_id: RepoId(1),
+            target: other.clone(),
+            result: Ok(gitcomet_core::domain::Diff {
+                target: other.clone(),
+                lines: vec![],
+            }),
+        },
+    );
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DiffFileLoaded {
+            repo_id: RepoId(1),
+            target: other.clone(),
+            result: Ok(None),
+        },
+    );
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DiffFileImageLoaded {
+            repo_id: RepoId(1),
+            target: other,
+            result: Ok(None),
+        },
+    );
+
+    let repo_state = &state.repos[0];
+    assert!(repo_state.diff.is_loading());
+    assert!(repo_state.diff_file.is_loading());
+    assert!(repo_state.diff_file_image.is_loading());
+    assert_eq!(repo_state.diff_target, Some(selected));
+}

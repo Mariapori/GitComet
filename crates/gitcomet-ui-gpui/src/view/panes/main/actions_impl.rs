@@ -250,7 +250,67 @@ impl MainPaneView {
         self.conflict_fallback_nav_entries()
     }
 
-    pub(in crate::view) fn conflict_jump_prev(&mut self) {
+    pub(super) fn conflict_resolver_visible_ix_for_conflict(
+        &self,
+        conflict_ix: usize,
+    ) -> Option<usize> {
+        match self.conflict_resolver.view_mode {
+            ConflictResolverViewMode::ThreeWay => conflict_resolver::visible_index_for_conflict(
+                &self.conflict_resolver.three_way_visible_map,
+                &self.conflict_resolver.three_way_conflict_ranges,
+                conflict_ix,
+            ),
+            ConflictResolverViewMode::TwoWayDiff => {
+                self.conflict_resolver_two_way_visible_ix_for_conflict(conflict_ix)
+            }
+        }
+    }
+
+    pub(super) fn conflict_resolver_output_line_for_conflict(
+        &self,
+        conflict_ix: usize,
+        output_text: &str,
+    ) -> Option<usize> {
+        first_output_marker_line_for_conflict(
+            &self.conflict_resolver.resolved_output_conflict_markers,
+            conflict_ix,
+        )
+        .or_else(|| {
+            output_line_range_for_conflict_block_in_text(
+                &self.conflict_resolver.marker_segments,
+                output_text,
+                conflict_ix,
+            )
+            .map(|range| range.start)
+        })
+    }
+
+    pub(super) fn conflict_resolver_scroll_all_views_to_conflict(
+        &mut self,
+        conflict_ix: usize,
+        input_visible_hint: Option<usize>,
+        output_line_hint: Option<usize>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if let Some(target) = input_visible_hint
+            .or_else(|| self.conflict_resolver_visible_ix_for_conflict(conflict_ix))
+        {
+            self.conflict_resolver_diff_scroll
+                .scroll_to_item_strict(target, gpui::ScrollStrategy::Center);
+        }
+
+        let output_text = self
+            .conflict_resolver_input
+            .read_with(cx, |input, _| input.text().to_string());
+        let output_line_count = output_text.split('\n').count().max(1);
+        if let Some(target_line) = output_line_hint
+            .or_else(|| self.conflict_resolver_output_line_for_conflict(conflict_ix, &output_text))
+        {
+            self.conflict_resolver_scroll_resolved_output_to_line(target_line, output_line_count);
+        }
+    }
+
+    pub(in crate::view) fn conflict_jump_prev(&mut self, cx: &mut gpui::Context<Self>) {
         let marker_entries = self.conflict_marker_nav_entries();
         let use_marker_nav = !marker_entries.is_empty();
         let entries = if use_marker_nav {
@@ -268,10 +328,6 @@ impl MainPaneView {
         };
 
         if use_marker_nav {
-            self.conflict_resolver_scroll_resolved_output_to_line(
-                target,
-                self.conflict_resolved_preview_lines.len(),
-            );
             if let Some(marker) = self
                 .conflict_resolver
                 .resolved_output_conflict_markers
@@ -279,34 +335,48 @@ impl MainPaneView {
                 .copied()
                 .flatten()
             {
-                self.conflict_resolver.active_conflict = marker.conflict_ix;
+                let conflict_ix = marker.conflict_ix;
+                self.conflict_resolver.active_conflict = conflict_ix;
+                self.conflict_resolver_scroll_all_views_to_conflict(
+                    conflict_ix,
+                    None,
+                    Some(target),
+                    cx,
+                );
+            } else {
+                self.conflict_resolver_scroll_resolved_output_to_line(
+                    target,
+                    self.conflict_resolved_preview_lines.len().max(1),
+                );
             }
         } else {
-            match self.conflict_resolver.view_mode {
+            let conflict_ix = match self.conflict_resolver.view_mode {
                 ConflictResolverViewMode::ThreeWay => {
-                    // target is now a visible index; scroll directly.
-                    self.conflict_resolver_diff_scroll
-                        .scroll_to_item_strict(target, gpui::ScrollStrategy::Center);
-                    // Map visible index back to conflict range index.
-                    if let Some(range_ix) = self.conflict_resolver_range_ix_for_visible(target) {
-                        self.conflict_resolver.active_conflict = range_ix;
-                    }
+                    self.conflict_resolver_range_ix_for_visible(target)
                 }
                 ConflictResolverViewMode::TwoWayDiff => {
-                    self.conflict_resolver_diff_scroll
-                        .scroll_to_item_strict(target, gpui::ScrollStrategy::Center);
-                    if let Some(conflict_ix) =
-                        self.conflict_resolver_two_way_conflict_ix_for_visible(target)
-                    {
-                        self.conflict_resolver.active_conflict = conflict_ix;
-                    }
+                    self.conflict_resolver_two_way_conflict_ix_for_visible(target)
                 }
+            };
+
+            if let Some(conflict_ix) = conflict_ix {
+                self.conflict_resolver.active_conflict = conflict_ix;
+                self.conflict_resolver_scroll_all_views_to_conflict(
+                    conflict_ix,
+                    Some(target),
+                    None,
+                    cx,
+                );
+            } else {
+                // Fallback: keep input pane navigation even if conflict mapping is unavailable.
+                self.conflict_resolver_diff_scroll
+                    .scroll_to_item_strict(target, gpui::ScrollStrategy::Center);
             }
         }
         self.conflict_resolver.nav_anchor = Some(target);
     }
 
-    pub(in crate::view) fn conflict_jump_next(&mut self) {
+    pub(in crate::view) fn conflict_jump_next(&mut self, cx: &mut gpui::Context<Self>) {
         let marker_entries = self.conflict_marker_nav_entries();
         let use_marker_nav = !marker_entries.is_empty();
         let entries = if use_marker_nav {
@@ -324,10 +394,6 @@ impl MainPaneView {
         };
 
         if use_marker_nav {
-            self.conflict_resolver_scroll_resolved_output_to_line(
-                target,
-                self.conflict_resolved_preview_lines.len(),
-            );
             if let Some(marker) = self
                 .conflict_resolver
                 .resolved_output_conflict_markers
@@ -335,28 +401,42 @@ impl MainPaneView {
                 .copied()
                 .flatten()
             {
-                self.conflict_resolver.active_conflict = marker.conflict_ix;
+                let conflict_ix = marker.conflict_ix;
+                self.conflict_resolver.active_conflict = conflict_ix;
+                self.conflict_resolver_scroll_all_views_to_conflict(
+                    conflict_ix,
+                    None,
+                    Some(target),
+                    cx,
+                );
+            } else {
+                self.conflict_resolver_scroll_resolved_output_to_line(
+                    target,
+                    self.conflict_resolved_preview_lines.len().max(1),
+                );
             }
         } else {
-            match self.conflict_resolver.view_mode {
+            let conflict_ix = match self.conflict_resolver.view_mode {
                 ConflictResolverViewMode::ThreeWay => {
-                    // target is now a visible index; scroll directly.
-                    self.conflict_resolver_diff_scroll
-                        .scroll_to_item_strict(target, gpui::ScrollStrategy::Center);
-                    // Map visible index back to conflict range index.
-                    if let Some(range_ix) = self.conflict_resolver_range_ix_for_visible(target) {
-                        self.conflict_resolver.active_conflict = range_ix;
-                    }
+                    self.conflict_resolver_range_ix_for_visible(target)
                 }
                 ConflictResolverViewMode::TwoWayDiff => {
-                    self.conflict_resolver_diff_scroll
-                        .scroll_to_item_strict(target, gpui::ScrollStrategy::Center);
-                    if let Some(conflict_ix) =
-                        self.conflict_resolver_two_way_conflict_ix_for_visible(target)
-                    {
-                        self.conflict_resolver.active_conflict = conflict_ix;
-                    }
+                    self.conflict_resolver_two_way_conflict_ix_for_visible(target)
                 }
+            };
+
+            if let Some(conflict_ix) = conflict_ix {
+                self.conflict_resolver.active_conflict = conflict_ix;
+                self.conflict_resolver_scroll_all_views_to_conflict(
+                    conflict_ix,
+                    Some(target),
+                    None,
+                    cx,
+                );
+            } else {
+                // Fallback: keep input pane navigation even if conflict mapping is unavailable.
+                self.conflict_resolver_diff_scroll
+                    .scroll_to_item_strict(target, gpui::ScrollStrategy::Center);
             }
         }
         self.conflict_resolver.nav_anchor = Some(target);

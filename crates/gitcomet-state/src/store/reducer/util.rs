@@ -739,3 +739,593 @@ impl IfEmptyElse for String {
         if self.trim().is_empty() { f() } else { self }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{AppNotificationKind, DiagnosticKind};
+    use crate::msg::RepoCommandKind;
+    use gitcomet_core::domain::{CommitId, DiffArea, DiffTarget, RepoSpec};
+    use gitcomet_core::services::{PullMode, RemoteUrlKind, ResetMode};
+    use std::path::Path;
+
+    fn repo_state(id: u64) -> RepoState {
+        RepoState::new_opening(
+            RepoId(id),
+            RepoSpec {
+                workdir: PathBuf::from("/tmp/gitcomet-state-util-tests"),
+            },
+        )
+    }
+
+    fn command_output(command: &str, stdout: &str, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            command: command.to_string(),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            exit_code: Some(0),
+        }
+    }
+
+    fn dummy_log_entry(ix: usize) -> CommandLogEntry {
+        CommandLogEntry {
+            time: SystemTime::UNIX_EPOCH,
+            ok: true,
+            command: format!("cmd-{ix}"),
+            summary: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn diff_reload_effects_cover_image_svg_and_non_file_targets() {
+        let repo_id = RepoId(7);
+        let png = DiffTarget::WorkingTree {
+            path: PathBuf::from("img.PNG"),
+            area: DiffArea::Unstaged,
+        };
+        let png_effects = diff_reload_effects(repo_id, png.clone());
+        assert!(diff_target_wants_image_preview(&png));
+        assert!(!diff_target_is_svg(&png));
+        assert_eq!(png_effects.len(), 2);
+        assert!(matches!(png_effects[0], Effect::LoadDiff { .. }));
+        assert!(matches!(png_effects[1], Effect::LoadDiffFileImage { .. }));
+
+        let svg = DiffTarget::WorkingTree {
+            path: PathBuf::from("diagram.svg"),
+            area: DiffArea::Unstaged,
+        };
+        let svg_effects = diff_reload_effects(repo_id, svg.clone());
+        assert!(diff_target_wants_image_preview(&svg));
+        assert!(diff_target_is_svg(&svg));
+        assert_eq!(svg_effects.len(), 3);
+        assert!(matches!(svg_effects[2], Effect::LoadDiffFile { .. }));
+
+        let text_no_ext = DiffTarget::WorkingTree {
+            path: PathBuf::from("README"),
+            area: DiffArea::Unstaged,
+        };
+        assert!(!diff_target_wants_image_preview(&text_no_ext));
+        assert_eq!(diff_reload_effects(repo_id, text_no_ext).len(), 2);
+
+        let commit_without_path = DiffTarget::Commit {
+            commit_id: CommitId("abc123".into()),
+            path: None,
+        };
+        assert!(!diff_target_wants_image_preview(&commit_without_path));
+        assert!(!diff_target_is_svg(&commit_without_path));
+        assert_eq!(diff_reload_effects(repo_id, commit_without_path).len(), 1);
+    }
+
+    #[test]
+    fn refresh_effects_request_expected_loads_and_reset_log_loading_more() {
+        let mut primary = repo_state(1);
+        primary.set_log_loading_more(true);
+        let primary_effects = refresh_primary_effects(&mut primary);
+        assert_eq!(primary_effects.len(), 6);
+        assert!(!primary.log_loading_more);
+        assert!(matches!(primary_effects[0], Effect::LoadHeadBranch { .. }));
+        assert!(matches!(
+            primary_effects[5],
+            Effect::LoadLog {
+                limit: DEFAULT_LOG_PAGE_SIZE,
+                ..
+            }
+        ));
+
+        let mut full = repo_state(2);
+        full.set_log_loading_more(true);
+        let full_effects = refresh_full_effects(&mut full);
+        assert_eq!(full_effects.len(), 12);
+        assert!(!full.log_loading_more);
+        assert!(
+            full_effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::LoadRemoteTags { .. }))
+        );
+        assert!(
+            full_effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::LoadMergeCommitMessage { .. }))
+        );
+    }
+
+    #[test]
+    fn dedup_and_normalize_path_cover_duplicate_and_relative_branches() {
+        let deduped = dedup_paths_in_order(vec![
+            PathBuf::from("a"),
+            PathBuf::from("b"),
+            PathBuf::from("a"),
+        ]);
+        assert_eq!(deduped, vec![PathBuf::from("a"), PathBuf::from("b")]);
+
+        let normalized = normalize_repo_path(PathBuf::from("."));
+        assert!(normalized.is_absolute());
+    }
+
+    #[test]
+    fn push_notification_and_diagnostic_cap_old_entries() {
+        let mut state = AppState::default();
+        for ix in 0..205 {
+            push_notification(
+                &mut state,
+                AppNotificationKind::Info,
+                format!("notification-{ix}"),
+            );
+        }
+        assert_eq!(state.notifications.len(), 200);
+        assert_eq!(state.notifications[0].message, "notification-5");
+
+        let mut repo = repo_state(3);
+        for ix in 0..205 {
+            push_diagnostic(&mut repo, DiagnosticKind::Info, format!("diagnostic-{ix}"));
+        }
+        assert_eq!(repo.diagnostics.len(), 200);
+        assert_eq!(repo.diagnostics[0].message, "diagnostic-5");
+    }
+
+    #[test]
+    fn command_and_action_logs_use_expected_stderr_and_trim_history() {
+        let mut repo = repo_state(4);
+        repo.command_log = (0..200).map(dummy_log_entry).collect();
+        push_command_log(
+            &mut repo,
+            true,
+            &RepoCommandKind::FetchAll,
+            &command_output("git fetch", "", "stderr from git"),
+            None,
+        );
+        assert_eq!(repo.command_log.len(), 200);
+        assert_eq!(repo.command_log[0].command, "cmd-1");
+        assert_eq!(
+            repo.command_log
+                .last()
+                .expect("last command log entry")
+                .stderr,
+            "stderr from git"
+        );
+
+        repo.command_log = (0..200).map(dummy_log_entry).collect();
+        push_action_log(
+            &mut repo,
+            false,
+            "manual action".to_string(),
+            "action failed".to_string(),
+            Some(&Error::new(ErrorKind::Backend(
+                "backend failure".to_string(),
+            ))),
+        );
+        assert_eq!(repo.command_log.len(), 200);
+        assert_eq!(repo.command_log[0].command, "cmd-1");
+    }
+
+    #[test]
+    fn conflict_autosolve_summary_covers_mode_and_detail_variants() {
+        let history_summary = conflict_autosolve_telemetry_summary(
+            ConflictAutosolveMode::History,
+            Some(Path::new("conflict.txt")),
+            6,
+            3,
+            4,
+            1,
+            ConflictAutosolveStats {
+                history: 2,
+                ..ConflictAutosolveStats::default()
+            },
+        );
+        assert!(history_summary.contains("(history)"));
+        assert!(history_summary.contains("history=2"));
+        assert!(history_summary.contains("in conflict.txt"));
+
+        let safe_summary = conflict_autosolve_telemetry_summary(
+            ConflictAutosolveMode::Safe,
+            None,
+            1,
+            1,
+            1,
+            1,
+            ConflictAutosolveStats::default(),
+        );
+        assert!(safe_summary.contains("(safe)"));
+        assert!(safe_summary.contains("details=none"));
+    }
+
+    #[test]
+    fn summarize_command_failure_covers_error_labels() {
+        let failing_cases = vec![
+            (RepoCommandKind::FetchAll, "Fetch"),
+            (
+                RepoCommandKind::PruneMergedBranches,
+                "Prune merged branches",
+            ),
+            (RepoCommandKind::PruneLocalTags, "Prune local tags"),
+            (
+                RepoCommandKind::Pull {
+                    mode: PullMode::Default,
+                },
+                "Pull",
+            ),
+            (
+                RepoCommandKind::PullBranch {
+                    remote: "origin".into(),
+                    branch: "main".into(),
+                },
+                "Pull",
+            ),
+            (
+                RepoCommandKind::MergeRef {
+                    reference: "feature".into(),
+                },
+                "Merge",
+            ),
+            (RepoCommandKind::Push, "Push"),
+            (RepoCommandKind::ForcePush, "Force push"),
+            (
+                RepoCommandKind::PushSetUpstream {
+                    remote: "origin".into(),
+                    branch: "main".into(),
+                },
+                "Push",
+            ),
+            (
+                RepoCommandKind::DeleteRemoteBranch {
+                    remote: "origin".into(),
+                    branch: "old".into(),
+                },
+                "Delete remote branch",
+            ),
+            (
+                RepoCommandKind::PushTag {
+                    remote: "origin".into(),
+                    name: "v1".into(),
+                },
+                "Push tag",
+            ),
+            (
+                RepoCommandKind::DeleteRemoteTag {
+                    remote: "origin".into(),
+                    name: "v1".into(),
+                },
+                "Delete remote tag",
+            ),
+            (
+                RepoCommandKind::Reset {
+                    mode: ResetMode::Hard,
+                    target: "HEAD~1".into(),
+                },
+                "Reset",
+            ),
+            (
+                RepoCommandKind::Rebase {
+                    onto: "main".into(),
+                },
+                "Rebase",
+            ),
+            (RepoCommandKind::RebaseContinue, "Rebase"),
+            (RepoCommandKind::RebaseAbort, "Rebase"),
+            (RepoCommandKind::MergeAbort, "Merge"),
+            (
+                RepoCommandKind::CreateTag {
+                    name: "v2".into(),
+                    target: "HEAD".into(),
+                },
+                "Tag",
+            ),
+            (RepoCommandKind::DeleteTag { name: "v2".into() }, "Tag"),
+            (
+                RepoCommandKind::AddRemote {
+                    name: "origin".into(),
+                    url: "https://example.com/repo.git".into(),
+                },
+                "Remote",
+            ),
+            (
+                RepoCommandKind::RemoveRemote {
+                    name: "origin".into(),
+                },
+                "Remote",
+            ),
+            (
+                RepoCommandKind::SetRemoteUrl {
+                    name: "origin".into(),
+                    url: "https://example.com/repo.git".into(),
+                    kind: RemoteUrlKind::Fetch,
+                },
+                "Remote",
+            ),
+        ];
+
+        for (command, label) in failing_cases {
+            let (rendered_command, summary) =
+                summarize_command(&command, &CommandOutput::default(), false, None);
+            assert_eq!(rendered_command, label);
+            assert_eq!(summary, format!("{label} failed"));
+        }
+    }
+
+    #[test]
+    fn summarize_command_success_covers_status_variants() {
+        let (_, fetch_summary) = summarize_command(
+            &RepoCommandKind::FetchAll,
+            &command_output("git fetch", "synced", ""),
+            true,
+            None,
+        );
+        assert_eq!(fetch_summary, "Fetch: Synchronized");
+
+        let (_, pull_up_to_date) = summarize_command(
+            &RepoCommandKind::Pull {
+                mode: PullMode::Default,
+            },
+            &command_output("git pull", "Already up to date", ""),
+            true,
+            None,
+        );
+        assert_eq!(pull_up_to_date, "Pull: Already up to date");
+
+        let (_, pull_fast_forward) = summarize_command(
+            &RepoCommandKind::Pull {
+                mode: PullMode::Default,
+            },
+            &command_output("git pull", "Updating abc..def", ""),
+            true,
+            None,
+        );
+        assert_eq!(pull_fast_forward, "Pull: Fast-forwarded");
+
+        let (_, pull_merged) = summarize_command(
+            &RepoCommandKind::Pull {
+                mode: PullMode::Default,
+            },
+            &command_output("git pull", "Merge branch 'feature'", ""),
+            true,
+            None,
+        );
+        assert_eq!(pull_merged, "Pull: Merged");
+
+        let (_, pull_rebased) = summarize_command(
+            &RepoCommandKind::Pull {
+                mode: PullMode::Default,
+            },
+            &command_output(
+                "git pull",
+                "Successfully rebased and updated refs/heads/main.",
+                "",
+            ),
+            true,
+            None,
+        );
+        assert_eq!(pull_rebased, "Pull: Rebasing complete");
+
+        let (_, pull_branch_summary) = summarize_command(
+            &RepoCommandKind::PullBranch {
+                remote: "origin".into(),
+                branch: "main".into(),
+            },
+            &command_output("git pull origin main", "Updating abc..def", ""),
+            true,
+            None,
+        );
+        assert_eq!(pull_branch_summary, "Pull origin/main: Fast-forwarded");
+
+        let (_, merge_ref_summary) = summarize_command(
+            &RepoCommandKind::MergeRef {
+                reference: "feature".into(),
+            },
+            &command_output("git merge feature", "Fast-forward", ""),
+            true,
+            None,
+        );
+        assert_eq!(merge_ref_summary, "Merge feature: Fast-forwarded");
+
+        let (_, push_uptodate) = summarize_command(
+            &RepoCommandKind::Push,
+            &command_output("git push", "", "Everything up-to-date"),
+            true,
+            None,
+        );
+        assert_eq!(push_uptodate, "Push: Everything up-to-date");
+
+        let (_, force_push_uptodate) = summarize_command(
+            &RepoCommandKind::ForcePush,
+            &command_output("git push --force", "", "Everything up-to-date"),
+            true,
+            None,
+        );
+        assert_eq!(force_push_uptodate, "Force push: Everything up-to-date");
+
+        let (_, push_upstream_uptodate) = summarize_command(
+            &RepoCommandKind::PushSetUpstream {
+                remote: "origin".into(),
+                branch: "main".into(),
+            },
+            &command_output("git push -u origin main", "", "Everything up-to-date"),
+            true,
+            None,
+        );
+        assert_eq!(
+            push_upstream_uptodate,
+            "Push -u origin/main: Everything up-to-date"
+        );
+
+        let (_, push_tag_uptodate) = summarize_command(
+            &RepoCommandKind::PushTag {
+                remote: "origin".into(),
+                name: "v1".into(),
+            },
+            &command_output("git push origin v1", "", "Everything up-to-date"),
+            true,
+            None,
+        );
+        assert_eq!(push_tag_uptodate, "Tag v1 → origin: Already up-to-date");
+
+        let (_, reset_soft) = summarize_command(
+            &RepoCommandKind::Reset {
+                mode: ResetMode::Soft,
+                target: "HEAD~1".into(),
+            },
+            &command_output("git reset --soft HEAD~1", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(reset_soft, "Reset (--soft) HEAD~1: Completed");
+
+        let (_, reset_mixed) = summarize_command(
+            &RepoCommandKind::Reset {
+                mode: ResetMode::Mixed,
+                target: "HEAD~1".into(),
+            },
+            &command_output("git reset --mixed HEAD~1", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(reset_mixed, "Reset (--mixed) HEAD~1: Completed");
+
+        let (_, reset_hard) = summarize_command(
+            &RepoCommandKind::Reset {
+                mode: ResetMode::Hard,
+                target: "HEAD~1".into(),
+            },
+            &command_output("git reset --hard HEAD~1", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(reset_hard, "Reset (--hard) HEAD~1: Completed");
+
+        let (_, rebase_summary) = summarize_command(
+            &RepoCommandKind::Rebase {
+                onto: "origin/main".into(),
+            },
+            &command_output("git rebase origin/main", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(rebase_summary, "Rebase onto origin/main: Completed");
+
+        let (_, rebase_continue_summary) = summarize_command(
+            &RepoCommandKind::RebaseContinue,
+            &command_output("git rebase --continue", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(rebase_continue_summary, "Rebase: Continued");
+
+        let (_, rebase_abort_summary) = summarize_command(
+            &RepoCommandKind::RebaseAbort,
+            &command_output("git rebase --abort", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(rebase_abort_summary, "Rebase: Aborted");
+
+        let (_, merge_abort_summary) = summarize_command(
+            &RepoCommandKind::MergeAbort,
+            &command_output("git merge --abort", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(merge_abort_summary, "Merge: Aborted");
+
+        let (_, create_tag_summary) = summarize_command(
+            &RepoCommandKind::CreateTag {
+                name: "v2".into(),
+                target: "HEAD".into(),
+            },
+            &command_output("git tag v2 HEAD", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(create_tag_summary, "Tag v2 → HEAD: Created");
+
+        let (_, delete_tag_summary) = summarize_command(
+            &RepoCommandKind::DeleteTag { name: "v2".into() },
+            &command_output("git tag -d v2", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(delete_tag_summary, "Tag v2: Deleted");
+
+        let (_, add_remote_summary) = summarize_command(
+            &RepoCommandKind::AddRemote {
+                name: "origin".into(),
+                url: "https://example.com/repo.git".into(),
+            },
+            &command_output("git remote add origin ...", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(add_remote_summary, "Remote origin: Added");
+
+        let (_, remove_remote_summary) = summarize_command(
+            &RepoCommandKind::RemoveRemote {
+                name: "origin".into(),
+            },
+            &command_output("git remote remove origin", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(remove_remote_summary, "Remote origin: Removed");
+
+        let (_, set_remote_url_summary) = summarize_command(
+            &RepoCommandKind::SetRemoteUrl {
+                name: "origin".into(),
+                url: "https://example.com/repo.git".into(),
+                kind: RemoteUrlKind::Push,
+            },
+            &command_output("git remote set-url --push origin ...", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(set_remote_url_summary, "Remote origin (push): URL updated");
+    }
+
+    #[test]
+    fn error_format_helpers_cover_non_git_and_failed_suffix_cases() {
+        let backend_error = Error::new(ErrorKind::Backend(
+            "git fetch --all failed: fatal: network down".to_string(),
+        ));
+        let formatted = format_failure_summary("Fetch", &backend_error);
+        assert!(formatted.contains("Fetch failed"));
+        assert!(formatted.contains("git fetch --all"));
+        assert!(formatted.contains("fatal: network down"));
+
+        let io_error = Error::new(ErrorKind::Io(io::ErrorKind::Other));
+        assert!(format_error_for_user(&io_error).contains("Io"));
+        assert!(try_format_git_backend_error(&io_error).is_none());
+        assert!(try_format_git_backend_error_message("curl failed: timeout").is_none());
+        assert_eq!(
+            parse_failed_command_message("git status failed"),
+            Some(("git status".to_string(), None))
+        );
+
+        let rendered = render_command_and_output("git status", Some(""));
+        assert!(rendered.contains("    git status"));
+        assert!(!rendered.contains("\n\n    "));
+
+        assert_eq!(
+            "value".to_string().if_empty_else(|| "fallback".to_string()),
+            "value"
+        );
+    }
+}

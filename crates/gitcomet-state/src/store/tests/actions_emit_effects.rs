@@ -1240,3 +1240,1068 @@ fn pull_push_do_not_bump_unrelated_revs() {
     assert_eq!(state.repos[0].log_rev, log_before);
     assert_eq!(state.repos[0].selected_commit_rev, selected_before);
 }
+
+#[test]
+fn additional_routing_messages_emit_effects_and_update_counters() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(repo_id);
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ApplyWorktreePatch {
+            repo_id,
+            patch: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            reverse: true,
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ApplyWorktreePatch {
+            repo_id: RepoId(1),
+            reverse: true,
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CheckoutRemoteBranch {
+            repo_id,
+            remote: "origin".to_string(),
+            branch: "feature".to_string(),
+            local_branch: "feature".to_string(),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CheckoutRemoteBranch {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CherryPickCommit {
+            repo_id,
+            commit_id: CommitId("deadbeef".to_string()),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CherryPickCommit {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CreateBranchAndCheckout {
+            repo_id,
+            name: "feature/new".to_string(),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CreateBranchAndCheckout {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::StagePaths {
+            repo_id,
+            paths: vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::StagePaths {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::UnstagePaths {
+            repo_id,
+            paths: vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::UnstagePaths {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::DiscardWorktreeChangesPaths {
+            repo_id,
+            paths: vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::DiscardWorktreeChangesPaths {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    assert_eq!(
+        state.repos[0].local_actions_in_flight, 6,
+        "expected begin_local_action for all routed local-action messages"
+    );
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ExportPatch {
+            repo_id,
+            commit_id: CommitId("cafebabe".to_string()),
+            dest: PathBuf::from("out.patch"),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ExportPatch {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ApplyPatch {
+            repo_id,
+            patch: PathBuf::from("input.patch"),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ApplyPatch {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::AddWorktree {
+            repo_id,
+            path: PathBuf::from("/tmp/worktree"),
+            reference: Some("main".to_string()),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::AddWorktree {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+    assert_eq!(state.repos[0].worktrees_in_flight, 1);
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RemoveWorktree {
+            repo_id,
+            path: PathBuf::from("nested/worktree"),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::RemoveWorktree {
+            repo_id: RepoId(1),
+            path
+        }] if path == &PathBuf::from("/tmp/repo/nested/worktree")
+    ));
+    assert_eq!(state.repos[0].worktrees_in_flight, 2);
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SaveWorktreeFile {
+            repo_id,
+            path: PathBuf::from("src/lib.rs"),
+            contents: "fn main() {}".to_string(),
+            stage: true,
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SaveWorktreeFile {
+            repo_id: RepoId(1),
+            stage: true,
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RebaseContinue { repo_id },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::RebaseContinue { repo_id: RepoId(1) }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RebaseAbort { repo_id },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::RebaseAbort { repo_id: RepoId(1) }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::MergeAbort { repo_id },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::MergeAbort { repo_id: RepoId(1) }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::AddRemote {
+            repo_id,
+            name: "origin".to_string(),
+            url: "https://example.com/repo.git".to_string(),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::AddRemote {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RemoveRemote {
+            repo_id,
+            name: "origin".to_string(),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::RemoveRemote {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SetRemoteUrl {
+            repo_id,
+            name: "origin".to_string(),
+            url: "https://example.com/alt.git".to_string(),
+            kind: gitcomet_core::services::RemoteUrlKind::Push,
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SetRemoteUrl {
+            repo_id: RepoId(1),
+            kind: gitcomet_core::services::RemoteUrlKind::Push,
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CheckoutConflictSide {
+            repo_id,
+            path: PathBuf::from("conflicted.txt"),
+            side: gitcomet_core::services::ConflictSide::Theirs,
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CheckoutConflictSide {
+            repo_id: RepoId(1),
+            side: gitcomet_core::services::ConflictSide::Theirs,
+            ..
+        }]
+    ));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::LaunchMergetool {
+            repo_id,
+            path: PathBuf::from("conflicted.txt"),
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::LaunchMergetool {
+            repo_id: RepoId(1),
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn repo_command_finished_error_summaries_cover_additional_labels() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(repo_id);
+
+    let cases: Vec<(RepoCommandKind, &str)> = vec![
+        (
+            RepoCommandKind::AddRemote {
+                name: "origin".to_string(),
+                url: "https://example.com/repo.git".to_string(),
+            },
+            "Remote",
+        ),
+        (
+            RepoCommandKind::RemoveRemote {
+                name: "origin".to_string(),
+            },
+            "Remote",
+        ),
+        (
+            RepoCommandKind::SetRemoteUrl {
+                name: "origin".to_string(),
+                url: "https://example.com/push.git".to_string(),
+                kind: gitcomet_core::services::RemoteUrlKind::Push,
+            },
+            "Remote",
+        ),
+        (
+            RepoCommandKind::CheckoutConflict {
+                path: PathBuf::from("conflicted.txt"),
+                side: gitcomet_core::services::ConflictSide::Ours,
+            },
+            "Checkout ours",
+        ),
+        (
+            RepoCommandKind::CheckoutConflict {
+                path: PathBuf::from("conflicted.txt"),
+                side: gitcomet_core::services::ConflictSide::Theirs,
+            },
+            "Checkout theirs",
+        ),
+        (
+            RepoCommandKind::AcceptConflictDeletion {
+                path: PathBuf::from("conflicted.txt"),
+            },
+            "Accept deletion",
+        ),
+        (
+            RepoCommandKind::CheckoutConflictBase {
+                path: PathBuf::from("conflicted.txt"),
+            },
+            "Checkout base",
+        ),
+        (
+            RepoCommandKind::LaunchMergetool {
+                path: PathBuf::from("conflicted.txt"),
+            },
+            "Mergetool",
+        ),
+        (
+            RepoCommandKind::SaveWorktreeFile {
+                path: PathBuf::from("a.txt"),
+                stage: false,
+            },
+            "Save file",
+        ),
+        (
+            RepoCommandKind::ExportPatch {
+                commit_id: CommitId("deadbeef".to_string()),
+                dest: PathBuf::from("out.patch"),
+            },
+            "Patch",
+        ),
+        (
+            RepoCommandKind::ApplyPatch {
+                patch: PathBuf::from("in.patch"),
+            },
+            "Patch",
+        ),
+        (
+            RepoCommandKind::AddWorktree {
+                path: PathBuf::from("/tmp/worktree"),
+                reference: None,
+            },
+            "Worktree",
+        ),
+        (
+            RepoCommandKind::RemoveWorktree {
+                path: PathBuf::from("/tmp/worktree"),
+            },
+            "Worktree",
+        ),
+        (
+            RepoCommandKind::AddSubmodule {
+                url: "https://example.com/sub.git".to_string(),
+                path: PathBuf::from("mods/sub"),
+            },
+            "Submodule",
+        ),
+        (RepoCommandKind::UpdateSubmodules, "Submodule"),
+        (
+            RepoCommandKind::RemoveSubmodule {
+                path: PathBuf::from("mods/sub"),
+            },
+            "Submodule",
+        ),
+        (RepoCommandKind::StageHunk, "Hunk"),
+        (RepoCommandKind::UnstageHunk, "Hunk"),
+        (
+            RepoCommandKind::ApplyWorktreePatch { reverse: true },
+            "Discard",
+        ),
+        (
+            RepoCommandKind::ApplyWorktreePatch { reverse: false },
+            "Patch",
+        ),
+    ];
+
+    for (command, label) in cases {
+        reduce(
+            &mut repos,
+            &id_alloc,
+            &mut state,
+            Msg::RepoCommandFinished {
+                repo_id,
+                command,
+                result: Err(Error::new(ErrorKind::Backend("boom".to_string()))),
+            },
+        );
+
+        let summary = state.repos[0]
+            .command_log
+            .last()
+            .expect("command log entry")
+            .summary
+            .clone();
+        assert!(
+            summary.starts_with(&format!("{label} failed:")),
+            "unexpected summary for label {label}: {summary}"
+        );
+    }
+}
+
+#[test]
+fn repo_command_finished_success_summaries_cover_additional_commands() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(repo_id);
+
+    let cases: Vec<(RepoCommandKind, &str)> = vec![
+        (
+            RepoCommandKind::SaveWorktreeFile {
+                path: PathBuf::from("a.txt"),
+                stage: true,
+            },
+            "Saved and staged → a.txt",
+        ),
+        (
+            RepoCommandKind::SaveWorktreeFile {
+                path: PathBuf::from("a.txt"),
+                stage: false,
+            },
+            "Saved → a.txt",
+        ),
+        (
+            RepoCommandKind::ExportPatch {
+                commit_id: CommitId("deadbeef".to_string()),
+                dest: PathBuf::from("out.patch"),
+            },
+            "Patch exported → out.patch",
+        ),
+        (
+            RepoCommandKind::ApplyPatch {
+                patch: PathBuf::from("in.patch"),
+            },
+            "Patch applied → in.patch",
+        ),
+        (
+            RepoCommandKind::AddWorktree {
+                path: PathBuf::from("../wt"),
+                reference: Some("main".to_string()),
+            },
+            "Worktree added → ../wt (main)",
+        ),
+        (
+            RepoCommandKind::AddWorktree {
+                path: PathBuf::from("../wt"),
+                reference: None,
+            },
+            "Worktree added → ../wt",
+        ),
+        (
+            RepoCommandKind::RemoveWorktree {
+                path: PathBuf::from("../wt"),
+            },
+            "Worktree removed → ../wt",
+        ),
+        (
+            RepoCommandKind::AddSubmodule {
+                url: "https://example.com/sub.git".to_string(),
+                path: PathBuf::from("mods/sub"),
+            },
+            "Submodule added → mods/sub",
+        ),
+        (RepoCommandKind::UpdateSubmodules, "Submodules: Updated"),
+        (
+            RepoCommandKind::RemoveSubmodule {
+                path: PathBuf::from("mods/sub"),
+            },
+            "Submodule removed → mods/sub",
+        ),
+        (RepoCommandKind::StageHunk, "Hunk staged"),
+        (RepoCommandKind::UnstageHunk, "Hunk unstaged"),
+        (
+            RepoCommandKind::ApplyWorktreePatch { reverse: true },
+            "Changes discarded",
+        ),
+        (
+            RepoCommandKind::ApplyWorktreePatch { reverse: false },
+            "Patch applied",
+        ),
+    ];
+
+    for (command, expected_summary) in cases {
+        reduce(
+            &mut repos,
+            &id_alloc,
+            &mut state,
+            Msg::RepoCommandFinished {
+                repo_id,
+                command,
+                result: Ok(CommandOutput::empty_success("git command")),
+            },
+        );
+
+        let summary = state.repos[0]
+            .command_log
+            .last()
+            .expect("command log entry")
+            .summary
+            .clone();
+        assert_eq!(summary, expected_summary);
+    }
+}
+
+#[test]
+fn apply_worktree_patch_command_finished_reloads_png_diff_preview() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    let mut repo_state = RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    );
+    let target = DiffTarget::WorkingTree {
+        path: PathBuf::from("image.png"),
+        area: DiffArea::Unstaged,
+    };
+    repo_state.diff_target = Some(target.clone());
+    repo_state.diff = Loadable::NotLoaded;
+    repo_state.diff_file = Loadable::NotLoaded;
+    repo_state.diff_file_image = Loadable::NotLoaded;
+    state.repos.push(repo_state);
+    state.active_repo = Some(repo_id);
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::ApplyWorktreePatch { reverse: true },
+            result: Ok(CommandOutput::empty_success("git apply -R")),
+        },
+    );
+
+    let repo_state = state.repos.first().expect("repo");
+    assert!(repo_state.diff.is_loading());
+    assert!(matches!(repo_state.diff_file, Loadable::NotLoaded));
+    assert!(repo_state.diff_file_image.is_loading());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::LoadDiff {
+            repo_id: RepoId(1),
+            target: diff_target
+        } if diff_target == &target
+    )));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::LoadDiffFileImage {
+            repo_id: RepoId(1),
+            target: diff_target
+        } if diff_target == &target
+    )));
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::LoadDiffFile { .. })),
+        "png reload should request image preview only"
+    );
+}
+
+#[test]
+fn checkout_branch_and_submodule_messages_emit_effects() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    state.repos.push(RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(RepoId(1));
+
+    let checkout = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CheckoutBranch {
+            repo_id: RepoId(1),
+            name: "feature/x".to_string(),
+        },
+    );
+    assert!(matches!(
+        checkout.as_slice(),
+        [Effect::CheckoutBranch {
+            repo_id: RepoId(1),
+            name
+        }] if name == "feature/x"
+    ));
+
+    let add_submodule = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::AddSubmodule {
+            repo_id: RepoId(1),
+            url: "https://example.com/sub.git".to_string(),
+            path: PathBuf::from("mods/sub"),
+        },
+    );
+    assert!(matches!(
+        add_submodule.as_slice(),
+        [Effect::AddSubmodule {
+            repo_id: RepoId(1),
+            path,
+            ..
+        }] if path == &PathBuf::from("mods/sub")
+    ));
+
+    let update_submodules = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::UpdateSubmodules { repo_id: RepoId(1) },
+    );
+    assert!(matches!(
+        update_submodules.as_slice(),
+        [Effect::UpdateSubmodules { repo_id: RepoId(1) }]
+    ));
+
+    let remove_submodule = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RemoveSubmodule {
+            repo_id: RepoId(1),
+            path: PathBuf::from("mods/sub"),
+        },
+    );
+    assert!(matches!(
+        remove_submodule.as_slice(),
+        [Effect::RemoveSubmodule {
+            repo_id: RepoId(1),
+            path
+        }] if path == &PathBuf::from("mods/sub")
+    ));
+}
+
+#[test]
+fn pull_branch_and_push_variants_mark_in_flight_when_repo_is_opened() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    repos.insert(repo_id, Arc::new(DummyRepo::new("/tmp/repo")));
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+
+    let pull_branch = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::PullBranch {
+            repo_id,
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+        },
+    );
+    assert!(matches!(
+        pull_branch.as_slice(),
+        [Effect::PullBranch {
+            repo_id: RepoId(1),
+            remote,
+            branch
+        }] if remote == "origin" && branch == "main"
+    ));
+    assert_eq!(state.repos[0].pull_in_flight, 1);
+
+    let force_push = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ForcePush { repo_id },
+    );
+    assert!(matches!(
+        force_push.as_slice(),
+        [Effect::ForcePush { repo_id: RepoId(1) }]
+    ));
+    assert_eq!(state.repos[0].push_in_flight, 1);
+
+    let push_set_upstream = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::PushSetUpstream {
+            repo_id,
+            remote: "origin".to_string(),
+            branch: "feature/xyz".to_string(),
+        },
+    );
+    assert!(matches!(
+        push_set_upstream.as_slice(),
+        [Effect::PushSetUpstream {
+            repo_id: RepoId(1),
+            remote,
+            branch
+        }] if remote == "origin" && branch == "feature/xyz"
+    ));
+    assert_eq!(state.repos[0].push_in_flight, 2);
+}
+
+#[test]
+fn commit_and_amend_finished_cover_success_error_and_unknown_repo_paths() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    state.repos.push(RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    {
+        let repo = &mut state.repos[0];
+        repo.local_actions_in_flight = 1;
+        repo.commit_in_flight = 1;
+        repo.diff_target = Some(DiffTarget::WorkingTree {
+            path: PathBuf::from("a.txt"),
+            area: DiffArea::Unstaged,
+        });
+        repo.diff = Loadable::Loading;
+        repo.diff_file = Loadable::Loading;
+        repo.diff_file_image = Loadable::Loading;
+    }
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CommitFinished {
+            repo_id,
+            result: Ok(()),
+        },
+    );
+    assert!(!effects.is_empty());
+    let repo = &state.repos[0];
+    assert_eq!(repo.local_actions_in_flight, 0);
+    assert_eq!(repo.commit_in_flight, 0);
+    assert!(repo.last_error.is_none());
+    assert!(repo.diff_target.is_none());
+    assert!(matches!(repo.diff, Loadable::NotLoaded));
+    assert!(matches!(repo.diff_file, Loadable::NotLoaded));
+    assert!(matches!(repo.diff_file_image, Loadable::NotLoaded));
+    assert_eq!(
+        repo.command_log.last().map(|entry| entry.summary.as_str()),
+        Some("Commit: Completed")
+    );
+
+    state.repos[0].local_actions_in_flight = 1;
+    state.repos[0].commit_in_flight = 1;
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CommitFinished {
+            repo_id,
+            result: Err(Error::new(ErrorKind::Backend("commit boom".to_string()))),
+        },
+    );
+    assert!(
+        state.repos[0]
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("Commit failed:")
+    );
+
+    state.repos[0].local_actions_in_flight = 1;
+    state.repos[0].commit_in_flight = 1;
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CommitAmendFinished {
+            repo_id,
+            result: Ok(()),
+        },
+    );
+    assert_eq!(
+        state.repos[0]
+            .command_log
+            .last()
+            .map(|entry| entry.summary.as_str()),
+        Some("Amend: Completed")
+    );
+    state.repos[0].local_actions_in_flight = 1;
+    state.repos[0].commit_in_flight = 1;
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CommitAmendFinished {
+            repo_id,
+            result: Err(Error::new(ErrorKind::Backend("amend boom".to_string()))),
+        },
+    );
+    assert!(
+        state.repos[0]
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("Amend failed:")
+    );
+
+    let missing_commit = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CommitFinished {
+            repo_id: RepoId(999),
+            result: Ok(()),
+        },
+    );
+    assert!(missing_commit.is_empty());
+    let missing_amend = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::CommitAmendFinished {
+            repo_id: RepoId(999),
+            result: Ok(()),
+        },
+    );
+    assert!(missing_amend.is_empty());
+}
+
+#[test]
+fn repo_command_finished_reset_clears_diff_state_and_unknown_repo_is_noop() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    let mut repo_state = RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    );
+    repo_state.diff_target = Some(DiffTarget::WorkingTree {
+        path: PathBuf::from("a.txt"),
+        area: DiffArea::Staged,
+    });
+    repo_state.diff = Loadable::Loading;
+    repo_state.diff_file = Loadable::Loading;
+    repo_state.diff_file_image = Loadable::Loading;
+    state.repos.push(repo_state);
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::Reset {
+                mode: gitcomet_core::services::ResetMode::Mixed,
+                target: "HEAD~1".to_string(),
+            },
+            result: Ok(CommandOutput::empty_success("git reset --mixed HEAD~1")),
+        },
+    );
+    assert!(!effects.is_empty());
+    let repo = &state.repos[0];
+    assert!(repo.diff_target.is_none());
+    assert!(matches!(repo.diff, Loadable::NotLoaded));
+    assert!(matches!(repo.diff_file, Loadable::NotLoaded));
+    assert!(matches!(repo.diff_file_image, Loadable::NotLoaded));
+
+    let no_repo_effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id: RepoId(999),
+            command: RepoCommandKind::Reset {
+                mode: gitcomet_core::services::ResetMode::Hard,
+                target: "HEAD".to_string(),
+            },
+            result: Ok(CommandOutput::empty_success("git reset --hard HEAD")),
+        },
+    );
+    assert!(no_repo_effects.is_empty());
+}
+
+#[test]
+fn stage_hunk_command_finished_reloads_commit_png_image_preview_only() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let repo_id = RepoId(1);
+    let target = DiffTarget::Commit {
+        commit_id: CommitId("abc123".to_string()),
+        path: Some(PathBuf::from("assets/icon.png")),
+    };
+    let mut repo_state = RepoState::new_opening(
+        repo_id,
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    );
+    repo_state.diff_target = Some(target.clone());
+    state.repos.push(repo_state);
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::StageHunk,
+            result: Ok(CommandOutput::empty_success("git apply --cached")),
+        },
+    );
+
+    let repo = state.repos.first().expect("repo");
+    assert!(repo.diff.is_loading());
+    assert!(matches!(repo.diff_file, Loadable::NotLoaded));
+    assert!(repo.diff_file_image.is_loading());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::LoadDiff {
+            repo_id: RepoId(1),
+            target: diff_target
+        } if diff_target == &target
+    )));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::LoadDiffFileImage {
+            repo_id: RepoId(1),
+            target: diff_target
+        } if diff_target == &target
+    )));
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::LoadDiffFile { .. })),
+        "png reload should not request text diff"
+    );
+}

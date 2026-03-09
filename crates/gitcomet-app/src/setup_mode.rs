@@ -850,6 +850,7 @@ pub fn run_uninstall(dry_run: bool, local: bool) -> Result<UninstallResult, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn count_occurrences(haystack: &str, needle: &str) -> usize {
         haystack.match_indices(needle).count()
@@ -1218,5 +1219,148 @@ mod tests {
                 guard_actual: vec!["meld".to_string()],
             }
         );
+    }
+
+    fn temp_file_scope() -> (tempfile::TempDir, String, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config");
+        let scope = format!("--file={}", config_path.display());
+        (dir, scope, config_path)
+    }
+
+    #[test]
+    fn collect_uninstall_snapshot_keys_includes_guard_keys_once() {
+        let entries = vec![
+            UninstallEntry {
+                key: "primary.key",
+                expected_value: None,
+                guard: Some(UninstallGuard {
+                    key: "guard.key",
+                    expected_value: "expected",
+                }),
+            },
+            UninstallEntry {
+                key: "guard.key",
+                expected_value: None,
+                guard: None,
+            },
+        ];
+
+        let keys = collect_uninstall_snapshot_keys(&entries);
+        assert_eq!(keys, vec!["primary.key", "guard.key"]);
+    }
+
+    #[test]
+    fn git_config_helpers_cover_missing_and_error_paths() {
+        let (_dir, scope, _) = temp_file_scope();
+        let missing = read_git_config_values(&scope, "gitcomet.coverage.missing").unwrap();
+        assert!(missing.is_empty());
+
+        let err = read_git_config_values("--not-a-valid-scope", "gitcomet.coverage")
+            .expect_err("invalid scope should fail");
+        assert!(err.contains("failed"));
+
+        let set_err = set_single_config_value("--not-a-valid-scope", "foo.bar", "value")
+            .expect_err("invalid scope should fail");
+        assert!(set_err.contains("failed"));
+
+        let add_err = add_config_value("--not-a-valid-scope", "foo.bar", "value")
+            .expect_err("invalid scope should fail");
+        assert!(add_err.contains("failed"));
+    }
+
+    #[test]
+    fn write_config_values_supports_empty_and_multi_value_sequences() {
+        let (_dir, scope, _) = temp_file_scope();
+        write_config_values(&scope, "foo.multi", &[]).unwrap();
+        assert!(
+            read_git_config_values(&scope, "foo.multi")
+                .unwrap()
+                .is_empty()
+        );
+
+        let values = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        write_config_values(&scope, "foo.multi", &values).unwrap();
+        assert_eq!(read_git_config_values(&scope, "foo.multi").unwrap(), values);
+    }
+
+    #[test]
+    fn maybe_capture_backup_skips_when_current_value_matches_setup_default() {
+        let (_dir, scope, _) = temp_file_scope();
+        set_single_config_value(&scope, "merge.tool", "gitcomet").unwrap();
+        let entry = BackupEntry {
+            key: "merge.tool",
+            expected_setup_value: "gitcomet",
+            backup_key: "gitcomet.backup.merge-tool",
+        };
+        maybe_capture_backup_for_entry(&scope, &entry).unwrap();
+        assert!(
+            read_git_config_values(&scope, entry.backup_key)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unset_and_apply_paths_report_git_failures() {
+        let (_dir, scope, config_path) = temp_file_scope();
+        set_single_config_value(&scope, "foo.readonly", "value").unwrap();
+
+        #[cfg(not(windows))]
+        {
+            let config_dir = config_path
+                .parent()
+                .expect("config file has parent")
+                .to_path_buf();
+            let mut dir_perms = fs::metadata(&config_dir)
+                .expect("config dir metadata")
+                .permissions();
+            dir_perms.set_readonly(true);
+            fs::set_permissions(&config_dir, dir_perms).expect("set readonly config dir");
+
+            let unset_result = unset_all_config_values(&scope, "foo.readonly");
+
+            let mut restore_perms = fs::metadata(&config_dir)
+                .expect("config dir metadata for restore")
+                .permissions();
+            restore_perms.set_readonly(false);
+            fs::set_permissions(&config_dir, restore_perms)
+                .expect("restore config dir permissions");
+
+            let unset_err = unset_result.expect_err("readonly config dir should fail to unset");
+            assert!(unset_err.contains("--unset-all"));
+        }
+
+        #[cfg(windows)]
+        {
+            let unset_err = unset_all_config_values("--not-a-valid-scope", "foo.readonly")
+                .expect_err("invalid scope should fail");
+            assert!(unset_err.contains("failed"));
+        }
+
+        let uninstall_err = apply_uninstall_plan(
+            &[UninstallPlanItem {
+                key: "foo.readonly",
+                decision: UninstallDecision::Unset,
+            }],
+            "--not-a-valid-scope",
+        )
+        .expect_err("invalid scope should fail");
+        assert!(uninstall_err.contains("--unset-all foo.readonly failed"));
+
+        let apply_err = apply_config(
+            &[ConfigEntry {
+                key: "foo.readonly",
+                value: "value".to_string(),
+            }],
+            "--not-a-valid-scope",
+        )
+        .expect_err("invalid scope should fail");
+        assert!(apply_err.contains("git config foo.readonly value failed"));
+    }
+
+    #[test]
+    fn format_values_empty_returns_unset_marker() {
+        assert_eq!(format_values(&[]), "<unset>");
     }
 }

@@ -2,9 +2,9 @@ use super::{
     ClearDiffSelectionAction, ResolvedOutputConflictMarker, apply_conflict_choice_provenance_hints,
     apply_three_way_empty_base_provenance_hints, build_resolved_output_conflict_markers,
     clear_diff_selection_action, conflict_marker_nav_entries_from_markers,
-    conflict_resolver_output_context_line, focused_mergetool_save_exit_code,
-    output_line_range_for_conflict_block_in_text, parse_conflict_canvas_rows_env,
-    replace_output_lines_in_range, resolved_output_marker_for_line,
+    conflict_resolver_output_context_line, first_output_marker_line_for_conflict,
+    focused_mergetool_save_exit_code, output_line_range_for_conflict_block_in_text,
+    parse_conflict_canvas_rows_env, replace_output_lines_in_range, resolved_output_marker_for_line,
     resolved_output_markers_for_text, split_target_conflict_block_into_subchunks,
 };
 use crate::view::GitCometViewMode;
@@ -310,6 +310,93 @@ fn conflict_marker_nav_entries_include_only_marker_starts() {
         conflict_marker_nav_entries_from_markers(&markers),
         vec![1, 3]
     );
+}
+
+#[test]
+fn conflict_marker_nav_entries_dedup_conflicts_with_multiple_start_ranges() {
+    let markers = vec![
+        None,
+        Some(ResolvedOutputConflictMarker {
+            conflict_ix: 0,
+            range_start: 1,
+            range_end: 3,
+            is_start: true,
+            is_end: false,
+            unresolved: true,
+        }),
+        Some(ResolvedOutputConflictMarker {
+            conflict_ix: 0,
+            range_start: 1,
+            range_end: 3,
+            is_start: false,
+            is_end: true,
+            unresolved: true,
+        }),
+        None,
+        Some(ResolvedOutputConflictMarker {
+            conflict_ix: 0,
+            range_start: 4,
+            range_end: 5,
+            is_start: true,
+            is_end: true,
+            unresolved: true,
+        }),
+        Some(ResolvedOutputConflictMarker {
+            conflict_ix: 1,
+            range_start: 5,
+            range_end: 6,
+            is_start: true,
+            is_end: true,
+            unresolved: false,
+        }),
+    ];
+    assert_eq!(
+        conflict_marker_nav_entries_from_markers(&markers),
+        vec![1, 5]
+    );
+}
+
+#[test]
+fn first_output_marker_line_for_conflict_returns_first_start() {
+    let markers = vec![
+        None,
+        Some(ResolvedOutputConflictMarker {
+            conflict_ix: 0,
+            range_start: 1,
+            range_end: 3,
+            is_start: true,
+            is_end: false,
+            unresolved: true,
+        }),
+        Some(ResolvedOutputConflictMarker {
+            conflict_ix: 0,
+            range_start: 1,
+            range_end: 3,
+            is_start: false,
+            is_end: true,
+            unresolved: true,
+        }),
+        Some(ResolvedOutputConflictMarker {
+            conflict_ix: 0,
+            range_start: 3,
+            range_end: 4,
+            is_start: true,
+            is_end: true,
+            unresolved: true,
+        }),
+        Some(ResolvedOutputConflictMarker {
+            conflict_ix: 1,
+            range_start: 4,
+            range_end: 5,
+            is_start: true,
+            is_end: true,
+            unresolved: false,
+        }),
+    ];
+
+    assert_eq!(first_output_marker_line_for_conflict(&markers, 0), Some(1));
+    assert_eq!(first_output_marker_line_for_conflict(&markers, 1), Some(4));
+    assert_eq!(first_output_marker_line_for_conflict(&markers, 2), None);
 }
 
 #[test]

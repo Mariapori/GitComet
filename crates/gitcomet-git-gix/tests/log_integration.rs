@@ -1,7 +1,9 @@
+use gitcomet_core::domain::{CommitId, FileStatusKind};
 use gitcomet_core::services::GitBackend;
 use gitcomet_git_gix::GixBackend;
 use std::path::Path;
 use std::process::Command;
+#[cfg(windows)]
 use std::sync::OnceLock;
 
 #[cfg(windows)]
@@ -24,6 +26,24 @@ fn run_git(repo: &Path, args: &[&str]) {
         .status()
         .expect("git command to run");
     assert!(status.success(), "git {:?} failed", args);
+}
+
+fn git_stdout(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
+        .env("GIT_CONFIG_SYSTEM", NULL_DEVICE)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .env("EDITOR", "true")
+        .env("VISUAL", "true")
+        .output()
+        .expect("git command to run");
+    assert!(output.status.success(), "git {:?} failed", args);
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
 #[cfg(windows)]
@@ -283,4 +303,245 @@ fn detached_head_reports_head_as_current_branch() {
     let backend = GixBackend;
     let opened = backend.open(repo).unwrap();
     assert_eq!(opened.current_branch().unwrap(), "HEAD");
+}
+
+#[test]
+fn log_head_page_limit_sets_next_cursor_and_supports_pagination() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    run_git(repo, &["add", "a.txt"]);
+    run_git(repo, &["-c", "commit.gpgsign=false", "commit", "-m", "A"]);
+
+    std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+    run_git(repo, &["add", "a.txt"]);
+    run_git(repo, &["-c", "commit.gpgsign=false", "commit", "-m", "B"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    let first = opened.log_head_page(1, None).unwrap();
+    assert_eq!(first.commits.len(), 1);
+    let first_id = first.commits[0].id.0.clone();
+    let cursor = first.next_cursor.as_ref().expect("next cursor");
+
+    let second = opened.log_head_page(10, Some(cursor)).unwrap();
+    assert!(!second.commits.is_empty());
+    assert!(
+        second.commits.iter().all(|c| c.id.0 != first_id),
+        "paginated page should skip last-seen commit"
+    );
+}
+
+#[test]
+fn log_file_page_follows_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    std::fs::create_dir_all(repo.join("docs")).unwrap();
+    std::fs::write(repo.join("docs/old name.txt"), "line 1\n").unwrap();
+    run_git(repo, &["add", "docs/old name.txt"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "add history file",
+        ],
+    );
+
+    run_git(repo, &["mv", "docs/old name.txt", "docs/new name.txt"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "rename history file",
+        ],
+    );
+
+    std::fs::write(repo.join("docs/new name.txt"), "line 1\nline 2\n").unwrap();
+    run_git(repo, &["add", "docs/new name.txt"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "update history file",
+        ],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    let page = opened
+        .log_file_page(Path::new("docs/new name.txt"), 10, None)
+        .unwrap();
+    let summaries: Vec<&str> = page.commits.iter().map(|c| c.summary.as_str()).collect();
+
+    assert_eq!(
+        summaries,
+        vec![
+            "update history file",
+            "rename history file",
+            "add history file"
+        ]
+    );
+}
+
+#[test]
+fn commit_details_reports_merge_parents_and_file_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+    run_git(repo, &["add", "base.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    run_git(repo, &["checkout", "-b", "feature"]);
+    std::fs::write(repo.join("feature.txt"), "feature\n").unwrap();
+    run_git(repo, &["add", "feature.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+
+    run_git(repo, &["checkout", "main"]);
+    std::fs::write(repo.join("main.txt"), "main\n").unwrap();
+    run_git(repo, &["add", "main.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "main"],
+    );
+    run_git(
+        repo,
+        &["merge", "--no-ff", "feature", "-m", "merge feature branch"],
+    );
+
+    let merge_id = git_stdout(repo, &["rev-parse", "HEAD"]);
+    let feature_id = git_stdout(repo, &["rev-parse", "feature"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+    let merge_details = opened
+        .commit_details(&CommitId(merge_id.clone()))
+        .expect("commit details");
+    let feature_details = opened
+        .commit_details(&CommitId(feature_id))
+        .expect("feature commit details");
+
+    assert_eq!(merge_details.id, CommitId(merge_id));
+    assert_eq!(merge_details.message, "merge feature branch");
+    assert!(
+        !merge_details.committed_at.is_empty(),
+        "expected committed_at to be set"
+    );
+    assert_eq!(merge_details.parent_ids.len(), 2);
+    assert!(
+        feature_details.files.iter().any(|f| {
+            f.path == std::path::PathBuf::from("feature.txt") && f.kind == FileStatusKind::Added
+        }),
+        "expected feature commit details to include feature file"
+    );
+}
+
+#[test]
+fn reflog_head_returns_recent_entries_with_indices() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    run_git(repo, &["add", "a.txt"]);
+    run_git(repo, &["-c", "commit.gpgsign=false", "commit", "-m", "A"]);
+
+    std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+    run_git(repo, &["add", "a.txt"]);
+    run_git(repo, &["-c", "commit.gpgsign=false", "commit", "-m", "B"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+    let reflog = opened.reflog_head(2).unwrap();
+
+    assert_eq!(reflog.len(), 2);
+    assert!(reflog[0].selector.starts_with("HEAD@{"));
+    assert!(reflog[0].index > 0);
+    assert!(reflog[1].index > 0);
+    assert!(reflog.iter().all(|entry| !entry.new_id.0.is_empty()));
+    assert!(reflog.iter().all(|entry| entry.time.is_some()));
+}
+
+#[test]
+fn log_all_branches_includes_older_stash_reflog_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    std::fs::write(repo.join("a.txt"), "base\n").unwrap();
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    std::fs::write(repo.join("stash.txt"), "first\n").unwrap();
+    run_git(repo, &["add", "stash.txt"]);
+    run_git(repo, &["stash", "push", "-m", "stash-one"]);
+
+    std::fs::write(repo.join("stash.txt"), "second\n").unwrap();
+    run_git(repo, &["add", "stash.txt"]);
+    run_git(repo, &["stash", "push", "-m", "stash-two"]);
+
+    let stash_ids = git_stdout(
+        repo,
+        &["reflog", "show", "-n2", "--format=%H", "refs/stash"],
+    );
+    let stash_ids: Vec<&str> = stash_ids.lines().collect();
+    assert_eq!(stash_ids.len(), 2, "expected two stash reflog entries");
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+    let all = opened.log_all_branches_page(200, None).unwrap();
+
+    assert!(
+        all.commits.iter().any(|c| c.id.0 == stash_ids[0]),
+        "expected all-branches log to include stash tip"
+    );
+    assert!(
+        all.commits.iter().any(|c| c.id.0 == stash_ids[1]),
+        "expected all-branches log to include older stash reflog commit"
+    );
 }

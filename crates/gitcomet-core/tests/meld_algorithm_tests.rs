@@ -145,6 +145,38 @@ fn myers_matching_blocks_inline() {
     assert_eq!(total_matched(&blocks), 7);
 }
 
+/// Covers the short-input fast path where inline k-mer filtering is skipped.
+#[test]
+fn myers_matching_blocks_inline_short_inputs() {
+    let a = "ab";
+    let b = "ac";
+
+    let blocks = matching_blocks_chars_inline(a, b);
+    assert_eq!(
+        blocks,
+        vec![MatchingBlock {
+            a_start: 0,
+            b_start: 0,
+            length: 1
+        }]
+    );
+    verify_matching_blocks_chars(a, b, &blocks);
+}
+
+/// Covers the inline k-mer indexing path with multiple trigram anchors.
+#[test]
+fn myers_matching_blocks_inline_kmer_path() {
+    let a = "0123456789";
+    let b = "xx012yy789zz";
+
+    let blocks = matching_blocks_chars_inline(a, b);
+    verify_matching_blocks_chars(a, b, &blocks);
+    assert!(
+        blocks.iter().any(|block| block.length >= 3),
+        "expected at least one trigram-sized match, got {blocks:?}"
+    );
+}
+
 /// Meld `sync_point_none` test concept — same inputs as `basic` with no
 /// sync points. Since our algorithm never uses sync points, the result
 /// should be identical to the basic test.
@@ -260,6 +292,33 @@ fn myers_matching_blocks_sync_point_validation() {
     ));
 }
 
+#[test]
+fn sync_point_error_display_formats_both_variants() {
+    let out_of_bounds = SyncPointError::OutOfBounds {
+        index: 2,
+        a_pos: 9,
+        b_pos: 4,
+        a_len: 5,
+        b_len: 6,
+    };
+    assert_eq!(
+        out_of_bounds.to_string(),
+        "sync point #2 (9, 4) is out of bounds for lengths (5, 6)"
+    );
+
+    let not_increasing = SyncPointError::NotStrictlyIncreasing {
+        index: 3,
+        prev_a: 4,
+        prev_b: 7,
+        a_pos: 4,
+        b_pos: 8,
+    };
+    assert_eq!(
+        not_increasing.to_string(),
+        "sync point #3 (4, 8) is not strictly increasing after (4, 7)"
+    );
+}
+
 /// Line-level matching blocks for simple sequences.
 #[test]
 fn matching_blocks_lines_basic() {
@@ -340,6 +399,48 @@ fn matching_blocks_lines_sync_points_respected() {
                 length: 2
             }
         ]
+    );
+}
+
+#[test]
+fn matching_blocks_lines_remap_sparse_matches_after_discarding_noise() {
+    let mut a = vec!["head".to_string()];
+    for idx in 0..11 {
+        a.push(format!("noise-{idx}"));
+    }
+    a.push("tail".to_string());
+    let a_refs: Vec<&str> = a.iter().map(String::as_str).collect();
+
+    let b = ["head", "tail"];
+    let blocks = matching_blocks_lines(&a_refs, &b);
+    assert_eq!(
+        blocks,
+        vec![
+            MatchingBlock {
+                a_start: 0,
+                b_start: 0,
+                length: 1
+            },
+            MatchingBlock {
+                a_start: 12,
+                b_start: 1,
+                length: 1
+            }
+        ]
+    );
+}
+
+#[test]
+fn matching_blocks_lines_flushes_trailing_match_at_end() {
+    let a = ["x", "same"];
+    let b = ["same"];
+    assert_eq!(
+        matching_blocks_lines(&a, &b),
+        vec![MatchingBlock {
+            a_start: 1,
+            b_start: 0,
+            length: 1
+        }]
     );
 }
 
@@ -459,6 +560,12 @@ fn delete_last_line_empty() {
 #[test]
 fn delete_last_line_single_char() {
     assert_eq!(delete_last_line("x"), "");
+}
+
+/// Edge case: multi-char single-line input with no separator.
+#[test]
+fn delete_last_line_two_chars_no_separator() {
+    assert_eq!(delete_last_line("xy"), "");
 }
 
 /// Edge case: single newline.

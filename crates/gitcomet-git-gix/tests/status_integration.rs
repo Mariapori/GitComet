@@ -8,6 +8,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(windows)]
 use std::sync::OnceLock;
 #[cfg(unix)]
 use std::{fs::Permissions, os::unix::fs::PermissionsExt};
@@ -93,6 +94,22 @@ fn run_git_expect_failure(repo: &Path, args: &[&str]) {
         .status()
         .expect("git command to run");
     assert!(!status.success(), "expected git {:?} to fail", args);
+}
+
+fn run_git_output(repo: &Path, args: &[&str]) -> String {
+    let output = git_command()
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git command to run");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn write(repo: &Path, rel: &str, contents: &str) -> PathBuf {
@@ -947,6 +964,206 @@ fn diff_file_image_returns_none_for_directories() {
         .unwrap();
 
     assert!(result.is_none());
+}
+
+#[test]
+fn diff_file_commit_target_without_path_returns_none() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "one\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    let head = run_git_output(repo, &["rev-parse", "HEAD"]);
+    let target = DiffTarget::Commit {
+        commit_id: gitcomet_core::domain::CommitId(head),
+        path: None,
+    };
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+    assert!(opened.diff_file_text(&target).unwrap().is_none());
+    assert!(opened.diff_file_image(&target).unwrap().is_none());
+}
+
+#[test]
+fn diff_unified_outside_repository_path_returns_backend_error() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let outside = dir.path().join("outside.txt");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(&outside, "outside\n").unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "you@example.com"]);
+    run_git(&repo, &["config", "user.name", "You"]);
+    run_git(&repo, &["config", "commit.gpgsign", "false"]);
+    write(&repo, "a.txt", "one\n");
+    run_git(&repo, &["add", "a.txt"]);
+    run_git(
+        &repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(&repo).unwrap();
+    let err = opened
+        .diff_unified(&DiffTarget::WorkingTree {
+            path: outside,
+            area: DiffArea::Unstaged,
+        })
+        .expect_err("expected diff_unified to fail for outside path");
+    assert!(
+        matches!(err.kind(), ErrorKind::Backend(_)),
+        "expected backend error, got {err:?}"
+    );
+}
+
+#[test]
+fn diff_working_tree_with_absolute_file_path_reads_current_file() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "one\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    write(repo, "a.txt", "one\ntwo\n");
+    let absolute = repo.join("a.txt");
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    let text = opened
+        .diff_file_text(&DiffTarget::WorkingTree {
+            path: absolute.clone(),
+            area: DiffArea::Unstaged,
+        })
+        .unwrap()
+        .expect("text diff for absolute path");
+    assert_eq!(text.old, None);
+    assert_eq!(text.new.as_deref(), Some("one\ntwo\n"));
+
+    let image = opened
+        .diff_file_image(&DiffTarget::WorkingTree {
+            path: absolute,
+            area: DiffArea::Unstaged,
+        })
+        .unwrap()
+        .expect("image diff for absolute path");
+    assert_eq!(image.old, None);
+    assert_eq!(image.new.as_deref(), Some("one\ntwo\n".as_bytes()));
+}
+
+#[test]
+fn staged_diff_for_unmerged_conflict_prefers_ours_for_text_and_image() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    setup_both_modified_text_conflict(repo, "a.txt", "ours\n", "theirs\n");
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    let text = opened
+        .diff_file_text(&DiffTarget::WorkingTree {
+            path: PathBuf::from("a.txt"),
+            area: DiffArea::Staged,
+        })
+        .unwrap()
+        .expect("staged text diff for conflict");
+    assert_eq!(text.old.as_deref(), Some("ours\n"));
+    assert_eq!(text.new.as_deref(), Some("ours\n"));
+
+    let image = opened
+        .diff_file_image(&DiffTarget::WorkingTree {
+            path: PathBuf::from("a.txt"),
+            area: DiffArea::Staged,
+        })
+        .unwrap()
+        .expect("staged image diff for conflict");
+    assert_eq!(image.old.as_deref(), Some("ours\n".as_bytes()));
+    assert_eq!(image.new.as_deref(), Some("ours\n".as_bytes()));
+}
+
+#[test]
+fn diff_commit_with_unknown_revision_and_outside_conflict_path_are_handled() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let outside = dir.path().join("outside.txt");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(&outside, "outside\n").unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "you@example.com"]);
+    run_git(&repo, &["config", "user.name", "You"]);
+    run_git(&repo, &["config", "commit.gpgsign", "false"]);
+    write(&repo, "a.txt", "one\n");
+    run_git(&repo, &["add", "a.txt"]);
+    run_git(
+        &repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(&repo).unwrap();
+    let unknown_target = DiffTarget::Commit {
+        commit_id: gitcomet_core::domain::CommitId("not-a-real-revision".to_string()),
+        path: Some(PathBuf::from("a.txt")),
+    };
+
+    let text = opened
+        .diff_file_text(&unknown_target)
+        .unwrap()
+        .expect("text diff object for unknown revision");
+    assert_eq!(text.old, None);
+    assert_eq!(text.new, None);
+
+    let image = opened
+        .diff_file_image(&unknown_target)
+        .unwrap()
+        .expect("image diff object for unknown revision");
+    assert_eq!(image.old, None);
+    assert_eq!(image.new, None);
+
+    let err = opened
+        .conflict_session(&outside)
+        .expect_err("outside absolute path should be rejected");
+    assert!(
+        matches!(err.kind(), ErrorKind::Backend(_)),
+        "expected backend error for outside path, got {err:?}"
+    );
 }
 
 #[test]
@@ -2819,6 +3036,119 @@ fn stage_and_unstage_paths_update_status() {
 }
 
 #[test]
+fn unstage_empty_paths_with_head_unstages_all_index_changes() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "one\n");
+    write(repo, "b.txt", "base\n");
+    run_git(repo, &["add", "a.txt", "b.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    write(repo, "a.txt", "one\ntwo\n");
+    write(repo, "b.txt", "base\nnext\n");
+    run_git(repo, &["add", "a.txt", "b.txt"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    opened.unstage(&[]).unwrap();
+
+    let staged = run_git_output(repo, &["diff", "--cached", "--name-only"]);
+    assert!(
+        staged.is_empty(),
+        "expected empty staged diff, got {staged:?}"
+    );
+
+    let unstaged = run_git_output(repo, &["diff", "--name-only"]);
+    assert!(
+        unstaged.lines().any(|line| line == "a.txt"),
+        "expected a.txt to be unstaged-modified, got {unstaged:?}"
+    );
+    assert!(
+        unstaged.lines().any(|line| line == "b.txt"),
+        "expected b.txt to be unstaged-modified, got {unstaged:?}"
+    );
+}
+
+#[test]
+fn unstage_empty_paths_without_head_unstages_all_added_paths() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+
+    write(repo, "a.txt", "one\n");
+    write(repo, "b.txt", "two\n");
+    run_git(repo, &["add", "a.txt", "b.txt"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    opened.unstage(&[]).unwrap();
+
+    let staged = run_git_output(repo, &["diff", "--cached", "--name-only"]);
+    assert!(
+        staged.is_empty(),
+        "expected empty staged diff, got {staged:?}"
+    );
+
+    let short = run_git_output(repo, &["status", "--short"]);
+    assert!(
+        short.lines().any(|line| line == "?? a.txt"),
+        "expected a.txt to be untracked after unstage-all, got {short:?}"
+    );
+    assert!(
+        short.lines().any(|line| line == "?? b.txt"),
+        "expected b.txt to be untracked after unstage-all, got {short:?}"
+    );
+}
+
+#[test]
+fn unstage_paths_without_head_only_unstages_selected_entries() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+
+    write(repo, "a.txt", "one\n");
+    write(repo, "b.txt", "two\n");
+    run_git(repo, &["add", "a.txt", "b.txt"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    opened.unstage(&[Path::new("a.txt")]).unwrap();
+
+    let short = run_git_output(repo, &["status", "--short"]);
+    assert!(
+        short.lines().any(|line| line == "?? a.txt"),
+        "expected a.txt to be untracked after targeted unstage, got {short:?}"
+    );
+    assert!(
+        short.lines().any(|line| line == "A  b.txt"),
+        "expected b.txt to remain staged after targeted unstage, got {short:?}"
+    );
+}
+
+#[test]
 fn commit_creates_new_commit_and_cleans_status() {
     if !require_git_shell_for_status_integration_tests() {
         return;
@@ -3473,6 +3803,131 @@ fn rebase_replays_commits_onto_target_branch() {
 }
 
 #[test]
+fn rebase_in_progress_and_abort_round_trip() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    run_git(repo, &["checkout", "-b", "feature"]);
+    write(repo, "a.txt", "feature\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+
+    run_git(repo, &["checkout", "main"]);
+    write(repo, "a.txt", "main\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "main"],
+    );
+
+    run_git(repo, &["checkout", "feature"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    assert!(!opened.rebase_in_progress().unwrap());
+    assert!(opened.rebase_with_output("main").is_err());
+    assert!(opened.rebase_in_progress().unwrap());
+
+    opened.rebase_abort_with_output().unwrap();
+    assert!(!opened.rebase_in_progress().unwrap());
+}
+
+#[test]
+fn rebase_continue_without_in_progress_rebase_returns_error() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    assert!(opened.rebase_continue_with_output().is_err());
+}
+
+#[test]
+fn merge_abort_with_output_clears_conflict_state() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    run_git(repo, &["checkout", "-b", "feature"]);
+    write(repo, "a.txt", "feature\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+
+    run_git(repo, &["checkout", "-"]);
+    write(repo, "a.txt", "main\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "main"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    assert!(opened.merge_ref_with_output("feature").is_err());
+    assert!(opened.merge_commit_message().unwrap().is_some());
+
+    opened.merge_abort_with_output().unwrap();
+
+    assert!(opened.merge_commit_message().unwrap().is_none());
+    let status = opened.status().unwrap();
+    assert!(status.staged.is_empty());
+    assert!(status.unstaged.is_empty());
+}
+
+#[test]
 fn create_and_delete_local_branch() {
     if !require_git_shell_for_status_integration_tests() {
         return;
@@ -3517,6 +3972,139 @@ fn create_and_delete_local_branch() {
 }
 
 #[test]
+fn checkout_branch_switches_head_to_target_branch() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "one\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+    run_git(repo, &["branch", "feature"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+    opened.checkout_branch("feature").unwrap();
+
+    let head = run_git_output(repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(head, "feature");
+}
+
+#[test]
+fn delete_branch_force_removes_unmerged_branch() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "one\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    run_git(repo, &["checkout", "-b", "feature"]);
+    write(repo, "feature.txt", "feature\n");
+    run_git(repo, &["add", "feature.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+    run_git(repo, &["checkout", "main"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    let err = opened
+        .delete_branch("feature")
+        .expect_err("safe delete should fail for unmerged branch");
+    match err.kind() {
+        ErrorKind::Backend(msg) => {
+            assert!(
+                msg.contains("not fully merged") || msg.contains("cannot delete branch"),
+                "unexpected delete-branch error: {msg}"
+            );
+        }
+        other => panic!("expected backend error, got {other:?}"),
+    }
+
+    opened.delete_branch_force("feature").unwrap();
+
+    let deleted = git_command()
+        .arg("-C")
+        .arg(repo)
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/feature"])
+        .status()
+        .expect("show-ref");
+    assert!(!deleted.success(), "expected force-delete to remove branch");
+}
+
+#[test]
+fn cherry_pick_applies_commit_onto_current_branch() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    run_git(repo, &["checkout", "-b", "feature"]);
+    write(repo, "b.txt", "feature\n");
+    run_git(repo, &["add", "b.txt"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "feature commit",
+        ],
+    );
+    let feature_sha = run_git_output(repo, &["rev-parse", "HEAD"]);
+    run_git(repo, &["checkout", "main"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+    opened
+        .cherry_pick(&gitcomet_core::domain::CommitId(feature_sha))
+        .unwrap();
+
+    assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "feature\n");
+    let status = opened.status().unwrap();
+    assert!(status.staged.is_empty());
+    assert!(status.unstaged.is_empty());
+}
+
+#[test]
 fn create_and_delete_local_tag() {
     if !require_git_shell_for_status_integration_tests() {
         return;
@@ -3553,6 +4141,115 @@ fn create_and_delete_local_tag() {
         .status()
         .expect("show-ref");
     assert!(!deleted.success(), "expected tag to be deleted");
+}
+
+#[test]
+fn list_tags_returns_sorted_names_with_commit_targets() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "one\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    run_git(repo, &["tag", "-a", "a-first", "-m", "a-first"]);
+    run_git(repo, &["tag", "z-last"]);
+    let head = run_git_output(repo, &["rev-parse", "HEAD"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+    let tags = opened.list_tags().unwrap();
+
+    let names = tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>();
+    assert_eq!(names, vec!["a-first", "z-last"]);
+    assert!(tags.iter().all(|tag| tag.target.0 == head));
+}
+
+#[test]
+fn list_remote_tags_collects_sorted_results_and_skips_unavailable_remote() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let origin = dir.path().join("origin.git");
+    let backup = dir.path().join("backup.git");
+    let missing = dir.path().join("missing.git");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&origin).unwrap();
+    fs::create_dir_all(&backup).unwrap();
+
+    run_git(&repo, &["init", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "you@example.com"]);
+    run_git(&repo, &["config", "user.name", "You"]);
+    run_git(&repo, &["config", "commit.gpgsign", "false"]);
+
+    write(&repo, "a.txt", "one\n");
+    run_git(&repo, &["add", "a.txt"]);
+    run_git(
+        &repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    run_git(&origin, &["init", "--bare", "-b", "main"]);
+    run_git(&backup, &["init", "--bare", "-b", "main"]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", origin.to_string_lossy().as_ref()],
+    );
+    run_git(
+        &repo,
+        &["remote", "add", "backup", backup.to_string_lossy().as_ref()],
+    );
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "broken",
+            missing.to_string_lossy().as_ref(),
+        ],
+    );
+
+    run_git(&repo, &["tag", "origin-tag"]);
+    run_git(&repo, &["tag", "backup-tag"]);
+    run_git(&repo, &["push", "origin", "refs/tags/origin-tag"]);
+    run_git(&repo, &["push", "backup", "refs/tags/backup-tag"]);
+
+    let head = run_git_output(&repo, &["rev-parse", "HEAD"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(&repo).unwrap();
+    let remote_tags = opened.list_remote_tags().unwrap();
+    let tuples = remote_tags
+        .iter()
+        .map(|tag| {
+            (
+                tag.remote.as_str(),
+                tag.name.as_str(),
+                tag.target.as_ref().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        tuples,
+        vec![
+            ("backup", "backup-tag", head.clone()),
+            ("origin", "origin-tag", head)
+        ]
+    );
 }
 
 #[test]
@@ -3741,6 +4438,92 @@ fn prune_local_tags_deletes_tags_missing_from_remotes() {
 }
 
 #[test]
+fn prune_local_tags_with_output_no_remotes_is_noop() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "you@example.com"]);
+    run_git(&repo, &["config", "user.name", "You"]);
+    run_git(&repo, &["config", "commit.gpgsign", "false"]);
+    write(&repo, "a.txt", "one\n");
+    run_git(&repo, &["add", "a.txt"]);
+    run_git(
+        &repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+    run_git(&repo, &["tag", "local-only"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(&repo).unwrap();
+    let output = opened.prune_local_tags_with_output().unwrap();
+
+    assert_eq!(output.exit_code, Some(0));
+    assert!(
+        output
+            .stdout
+            .contains("No remotes configured; skipping tag prune."),
+        "unexpected stdout: {}",
+        output.stdout
+    );
+    run_git(
+        &repo,
+        &["show-ref", "--verify", "--quiet", "refs/tags/local-only"],
+    );
+}
+
+#[test]
+fn prune_local_tags_with_output_reports_noop_when_all_tags_exist_remotely() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let origin = dir.path().join("origin.git");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&origin).unwrap();
+
+    run_git(&repo, &["init", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "you@example.com"]);
+    run_git(&repo, &["config", "user.name", "You"]);
+    run_git(&repo, &["config", "commit.gpgsign", "false"]);
+    write(&repo, "a.txt", "one\n");
+    run_git(&repo, &["add", "a.txt"]);
+    run_git(
+        &repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+
+    run_git(&origin, &["init", "--bare", "-b", "main"]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", origin.to_string_lossy().as_ref()],
+    );
+    run_git(&repo, &["push", "-u", "origin", "main"]);
+    run_git(&repo, &["tag", "v1.0.0"]);
+    run_git(&repo, &["push", "origin", "refs/tags/v1.0.0"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(&repo).unwrap();
+    let output = opened.prune_local_tags_with_output().unwrap();
+
+    assert_eq!(output.exit_code, Some(0));
+    assert!(
+        output.stdout.contains("No local tags to prune."),
+        "unexpected stdout: {}",
+        output.stdout
+    );
+    run_git(
+        &repo,
+        &["show-ref", "--verify", "--quiet", "refs/tags/v1.0.0"],
+    );
+}
+
+#[test]
 fn list_remote_branches_includes_fetched_remote_tracking_refs() {
     if !require_git_shell_for_status_integration_tests() {
         return;
@@ -3795,6 +4578,207 @@ fn list_remote_branches_includes_fetched_remote_tracking_refs() {
             .any(|b| b.remote == "origin" && b.name == "feature")
     );
     assert!(!branches.iter().any(|b| b.name == "HEAD"));
+}
+
+#[test]
+fn checkout_remote_branch_creates_tracking_branch_when_missing_locally() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin.git");
+    let seed = dir.path().join("seed");
+    let clone = dir.path().join("clone");
+    fs::create_dir_all(&origin).unwrap();
+    fs::create_dir_all(&seed).unwrap();
+
+    run_git(&origin, &["init", "--bare", "-b", "main"]);
+
+    run_git(&seed, &["init", "-b", "main"]);
+    run_git(&seed, &["config", "user.email", "you@example.com"]);
+    run_git(&seed, &["config", "user.name", "You"]);
+    run_git(&seed, &["config", "commit.gpgsign", "false"]);
+    write(&seed, "a.txt", "one\n");
+    run_git(&seed, &["add", "a.txt"]);
+    run_git(
+        &seed,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+    run_git(
+        &seed,
+        &["remote", "add", "origin", origin.to_string_lossy().as_ref()],
+    );
+    run_git(&seed, &["push", "-u", "origin", "main"]);
+
+    run_git(&seed, &["checkout", "-b", "feature"]);
+    write(&seed, "feature.txt", "feature\n");
+    run_git(&seed, &["add", "feature.txt"]);
+    run_git(
+        &seed,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+    run_git(&seed, &["push", "-u", "origin", "feature"]);
+
+    run_git(
+        dir.path(),
+        &[
+            "clone",
+            origin.to_string_lossy().as_ref(),
+            clone.to_string_lossy().as_ref(),
+        ],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(&clone).unwrap();
+    opened
+        .checkout_remote_branch("origin", "feature", "feature")
+        .unwrap();
+
+    let head = run_git_output(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(head, "feature");
+
+    let upstream = run_git_output(
+        &clone,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    assert_eq!(upstream, "origin/feature");
+}
+
+#[test]
+fn checkout_remote_branch_existing_local_branch_updates_upstream_and_checks_out() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin.git");
+    let seed = dir.path().join("seed");
+    let clone = dir.path().join("clone");
+    fs::create_dir_all(&origin).unwrap();
+    fs::create_dir_all(&seed).unwrap();
+
+    run_git(&origin, &["init", "--bare", "-b", "main"]);
+
+    run_git(&seed, &["init", "-b", "main"]);
+    run_git(&seed, &["config", "user.email", "you@example.com"]);
+    run_git(&seed, &["config", "user.name", "You"]);
+    run_git(&seed, &["config", "commit.gpgsign", "false"]);
+    write(&seed, "a.txt", "one\n");
+    run_git(&seed, &["add", "a.txt"]);
+    run_git(
+        &seed,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+    run_git(
+        &seed,
+        &["remote", "add", "origin", origin.to_string_lossy().as_ref()],
+    );
+    run_git(&seed, &["push", "-u", "origin", "main"]);
+
+    run_git(&seed, &["checkout", "-b", "feature"]);
+    write(&seed, "feature.txt", "feature\n");
+    run_git(&seed, &["add", "feature.txt"]);
+    run_git(
+        &seed,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+    run_git(&seed, &["push", "-u", "origin", "feature"]);
+
+    run_git(
+        dir.path(),
+        &[
+            "clone",
+            origin.to_string_lossy().as_ref(),
+            clone.to_string_lossy().as_ref(),
+        ],
+    );
+    run_git(&clone, &["checkout", "-b", "topic"]);
+    run_git(&clone, &["checkout", "main"]);
+
+    let upstream_before = git_command()
+        .arg("-C")
+        .arg(&clone)
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "topic@{upstream}",
+        ])
+        .status()
+        .expect("topic upstream probe");
+    assert!(
+        !upstream_before.success(),
+        "topic should start without upstream tracking"
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(&clone).unwrap();
+    opened
+        .checkout_remote_branch("origin", "feature", "topic")
+        .unwrap();
+
+    let head = run_git_output(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(head, "topic");
+    let upstream = run_git_output(
+        &clone,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    assert_eq!(upstream, "origin/feature");
+}
+
+#[test]
+fn checkout_remote_branch_returns_backend_error_for_missing_remote_branch() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin.git");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&origin).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+
+    run_git(&origin, &["init", "--bare", "-b", "main"]);
+
+    run_git(&repo, &["init", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "you@example.com"]);
+    run_git(&repo, &["config", "user.name", "You"]);
+    run_git(&repo, &["config", "commit.gpgsign", "false"]);
+    write(&repo, "a.txt", "one\n");
+    run_git(&repo, &["add", "a.txt"]);
+    run_git(
+        &repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
+    run_git(
+        &repo,
+        &["remote", "add", "origin", origin.to_string_lossy().as_ref()],
+    );
+    run_git(&repo, &["push", "-u", "origin", "main"]);
+    run_git(&repo, &["fetch", "origin"]);
+
+    let backend = GixBackend;
+    let opened = backend.open(&repo).unwrap();
+    let err = opened
+        .checkout_remote_branch("origin", "missing-branch", "topic")
+        .expect_err("missing remote branch should return backend error");
+    match err.kind() {
+        ErrorKind::Backend(msg) => {
+            assert!(
+                msg.contains("git checkout --track failed"),
+                "unexpected backend error: {msg}"
+            );
+        }
+        other => panic!("expected backend error, got {other:?}"),
+    }
 }
 
 #[test]

@@ -102,3 +102,75 @@ fn parse_git_worktree_list_porcelain(output: &str) -> Vec<Worktree> {
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_git_worktree_list_porcelain;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_git_worktree_list_porcelain_parses_regular_and_detached_entries() {
+        let parsed = parse_git_worktree_list_porcelain(
+            "\
+worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /repo-linked
+HEAD 2222222222222222222222222222222222222222
+detached
+",
+        );
+
+        assert_eq!(parsed.len(), 2);
+
+        assert_eq!(parsed[0].path, PathBuf::from("/repo"));
+        assert_eq!(
+            parsed[0].head.as_ref().map(|id| id.as_ref()),
+            Some("1111111111111111111111111111111111111111")
+        );
+        assert_eq!(parsed[0].branch.as_deref(), Some("main"));
+        assert!(!parsed[0].detached);
+
+        assert_eq!(parsed[1].path, PathBuf::from("/repo-linked"));
+        assert_eq!(
+            parsed[1].head.as_ref().map(|id| id.as_ref()),
+            Some("2222222222222222222222222222222222222222")
+        );
+        assert!(parsed[1].branch.is_none());
+        assert!(parsed[1].detached);
+    }
+
+    #[test]
+    fn parse_git_worktree_list_porcelain_ignores_noise_before_first_worktree() {
+        let parsed = parse_git_worktree_list_porcelain(
+            "\
+HEAD deadbeef
+branch refs/heads/ignored
+
+worktree /repo
+branch feature/topic
+",
+        );
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].path, PathBuf::from("/repo"));
+        assert_eq!(parsed[0].branch.as_deref(), Some("feature/topic"));
+        assert!(parsed[0].head.is_none());
+    }
+
+    #[test]
+    fn parse_git_worktree_list_porcelain_skips_empty_head_values() {
+        let parsed = parse_git_worktree_list_porcelain(
+            "\
+worktree /repo
+HEAD
+branch refs/heads/main
+",
+        );
+
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].head.is_none());
+        assert_eq!(parsed[0].branch.as_deref(), Some("main"));
+    }
+}

@@ -1694,3 +1694,375 @@ fn repo_command_finished_checkout_conflict_base_clears_binary_conflict_context()
     assert!(!repo_state.conflict_hide_resolved);
     assert!(repo_state.conflict_rev > before_rev);
 }
+
+#[test]
+fn repo_command_finished_conflict_sync_noops_when_paths_or_session_do_not_match() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    let repo_id = setup_repo_with_conflict(
+        &mut state,
+        &mut repos,
+        &id_alloc,
+        "file.txt",
+        FileConflictKind::BothModified,
+    );
+
+    // No session yet: should no-op.
+    let before_no_session_rev = state
+        .repos
+        .iter()
+        .find(|r| r.id == repo_id)
+        .unwrap()
+        .conflict_rev;
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::CheckoutConflictBase {
+                path: PathBuf::from("file.txt"),
+            },
+            result: Ok(CommandOutput::empty_success(
+                "git checkout :1:file.txt -- file.txt",
+            )),
+        },
+    );
+    assert_eq!(
+        state
+            .repos
+            .iter()
+            .find(|r| r.id == repo_id)
+            .unwrap()
+            .conflict_rev,
+        before_no_session_rev
+    );
+
+    // Load a normal session.
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ConflictFileLoaded {
+            repo_id,
+            path: PathBuf::from("file.txt"),
+            result: Box::new(Ok(Some(sample_marker_conflict_file("file.txt")))),
+            conflict_session: None,
+        },
+    );
+
+    // Tracked conflict path mismatch should no-op.
+    let before_tracked_mismatch_rev = state
+        .repos
+        .iter()
+        .find(|r| r.id == repo_id)
+        .unwrap()
+        .conflict_rev;
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::CheckoutConflictBase {
+                path: PathBuf::from("other.txt"),
+            },
+            result: Ok(CommandOutput::empty_success(
+                "git checkout :1:other.txt -- other.txt",
+            )),
+        },
+    );
+    assert_eq!(
+        state
+            .repos
+            .iter()
+            .find(|r| r.id == repo_id)
+            .unwrap()
+            .conflict_rev,
+        before_tracked_mismatch_rev
+    );
+
+    // Session path mismatch should also no-op.
+    state
+        .repos
+        .iter_mut()
+        .find(|r| r.id == repo_id)
+        .unwrap()
+        .conflict_session
+        .as_mut()
+        .expect("session")
+        .path = PathBuf::from("different-session-path.txt");
+    let before_session_mismatch_rev = state
+        .repos
+        .iter()
+        .find(|r| r.id == repo_id)
+        .unwrap()
+        .conflict_rev;
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::CheckoutConflictBase {
+                path: PathBuf::from("file.txt"),
+            },
+            result: Ok(CommandOutput::empty_success(
+                "git checkout :1:file.txt -- file.txt",
+            )),
+        },
+    );
+    assert_eq!(
+        state
+            .repos
+            .iter()
+            .find(|r| r.id == repo_id)
+            .unwrap()
+            .conflict_rev,
+        before_session_mismatch_rev
+    );
+}
+
+#[test]
+fn repo_command_finished_checkout_conflict_side_ours_syncs_region_resolution() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    let repo_id = setup_repo_with_conflict(
+        &mut state,
+        &mut repos,
+        &id_alloc,
+        "file.txt",
+        FileConflictKind::BothModified,
+    );
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ConflictFileLoaded {
+            repo_id,
+            path: PathBuf::from("file.txt"),
+            result: Box::new(Ok(Some(sample_marker_conflict_file("file.txt")))),
+            conflict_session: None,
+        },
+    );
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::CheckoutConflict {
+                path: PathBuf::from("file.txt"),
+                side: ConflictSide::Ours,
+            },
+            result: Ok(CommandOutput::empty_success(
+                "git checkout --ours -- file.txt",
+            )),
+        },
+    );
+
+    let session = state
+        .repos
+        .iter()
+        .find(|r| r.id == repo_id)
+        .unwrap()
+        .conflict_session
+        .as_ref()
+        .expect("session");
+    assert!(session.regions.iter().all(|region| matches!(
+        region.resolution,
+        gitcomet_core::conflict_session::ConflictRegionResolution::PickOurs
+    )));
+}
+
+#[test]
+fn repo_command_finished_accept_conflict_deletion_maps_added_by_them_to_pick_ours() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    let repo_id = setup_repo_with_conflict(
+        &mut state,
+        &mut repos,
+        &id_alloc,
+        "file.txt",
+        FileConflictKind::AddedByThem,
+    );
+
+    let file = ConflictFile {
+        path: PathBuf::from("file.txt"),
+        base_bytes: None,
+        ours_bytes: None,
+        theirs_bytes: Some(b"theirs only\n".to_vec()),
+        current_bytes: Some(b"theirs only\n".to_vec()),
+        base: None,
+        ours: None,
+        theirs: Some("theirs only\n".to_string()),
+        current: Some("theirs only\n".to_string()),
+    };
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ConflictFileLoaded {
+            repo_id,
+            path: PathBuf::from("file.txt"),
+            result: Box::new(Ok(Some(file))),
+            conflict_session: None,
+        },
+    );
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::AcceptConflictDeletion {
+                path: PathBuf::from("file.txt"),
+            },
+            result: Ok(CommandOutput::empty_success("git rm -- file.txt")),
+        },
+    );
+
+    let session = state
+        .repos
+        .iter()
+        .find(|r| r.id == repo_id)
+        .unwrap()
+        .conflict_session
+        .as_ref()
+        .expect("session exists");
+    assert_eq!(
+        session.regions[0].resolution,
+        gitcomet_core::conflict_session::ConflictRegionResolution::PickOurs
+    );
+}
+
+#[test]
+fn repo_command_finished_accept_conflict_deletion_maps_both_modified_to_pick_ours() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    let repo_id = setup_repo_with_conflict(
+        &mut state,
+        &mut repos,
+        &id_alloc,
+        "file.txt",
+        FileConflictKind::BothModified,
+    );
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ConflictFileLoaded {
+            repo_id,
+            path: PathBuf::from("file.txt"),
+            result: Box::new(Ok(Some(sample_marker_conflict_file("file.txt")))),
+            conflict_session: None,
+        },
+    );
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::AcceptConflictDeletion {
+                path: PathBuf::from("file.txt"),
+            },
+            result: Ok(CommandOutput::empty_success("git rm -- file.txt")),
+        },
+    );
+
+    let session = state
+        .repos
+        .iter()
+        .find(|r| r.id == repo_id)
+        .unwrap()
+        .conflict_session
+        .as_ref()
+        .expect("session exists");
+    assert_eq!(
+        session.regions[0].resolution,
+        gitcomet_core::conflict_session::ConflictRegionResolution::PickOurs
+    );
+}
+
+#[test]
+fn repo_command_finished_checkout_conflict_base_noops_for_regions_without_base() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+
+    let repo_id = setup_repo_with_conflict(
+        &mut state,
+        &mut repos,
+        &id_alloc,
+        "file.txt",
+        FileConflictKind::AddedByThem,
+    );
+
+    let file = ConflictFile {
+        path: PathBuf::from("file.txt"),
+        base_bytes: None,
+        ours_bytes: None,
+        theirs_bytes: Some(b"theirs only\n".to_vec()),
+        current_bytes: Some(b"theirs only\n".to_vec()),
+        base: None,
+        ours: None,
+        theirs: Some("theirs only\n".to_string()),
+        current: Some("theirs only\n".to_string()),
+    };
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::ConflictFileLoaded {
+            repo_id,
+            path: PathBuf::from("file.txt"),
+            result: Box::new(Ok(Some(file))),
+            conflict_session: None,
+        },
+    );
+    let before_rev = state
+        .repos
+        .iter()
+        .find(|r| r.id == repo_id)
+        .unwrap()
+        .conflict_rev;
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::RepoCommandFinished {
+            repo_id,
+            command: RepoCommandKind::CheckoutConflictBase {
+                path: PathBuf::from("file.txt"),
+            },
+            result: Ok(CommandOutput::empty_success(
+                "git checkout :1:file.txt -- file.txt",
+            )),
+        },
+    );
+
+    let repo_state = state.repos.iter().find(|r| r.id == repo_id).unwrap();
+    assert_eq!(repo_state.conflict_rev, before_rev);
+    assert_eq!(
+        repo_state
+            .conflict_session
+            .as_ref()
+            .expect("session exists")
+            .regions[0]
+            .resolution,
+        gitcomet_core::conflict_session::ConflictRegionResolution::Unresolved
+    );
+}

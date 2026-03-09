@@ -663,7 +663,7 @@ fn path_dir_hint(event: &notify::Event) -> Option<bool> {
 mod tests {
     use super::*;
     use notify::EventKind;
-    use notify::event::{AccessKind, AccessMode, CreateKind};
+    use notify::event::{AccessKind, AccessMode, CreateKind, RemoveKind};
     use std::process::Command;
     use std::time::SystemTime;
 
@@ -694,6 +694,17 @@ mod tests {
         // Keep tests deterministic and independent from host global excludes.
         run_git(workdir, &["config", "core.excludesFile", NULL_DEVICE]);
         run_git(workdir, &["config", "core.fileMode", "false"]);
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
     }
 
     #[test]
@@ -1020,5 +1031,142 @@ mod tests {
             classify_repo_event(&workdir, git_dir.as_deref(), &mut rules, &ignored_event),
             None
         );
+    }
+
+    #[test]
+    fn panic_payload_to_string_handles_string_and_unknown_payloads() {
+        assert_eq!(
+            panic_payload_to_string(Box::new("panic message".to_string())),
+            "panic message"
+        );
+        assert_eq!(
+            panic_payload_to_string(Box::new(123usize)),
+            "unknown panic payload"
+        );
+    }
+
+    #[test]
+    fn debouncer_covers_no_pending_due_check_and_max_delay_selection() {
+        let base = Instant::now();
+        let mut d = DebouncedChange::new(Duration::from_millis(500), Duration::from_millis(100));
+
+        assert_eq!(d.take_if_due(base), None);
+        assert_eq!(d.push(RepoExternalChange::Worktree, base), None);
+
+        let timeout = d
+            .next_timeout(base + Duration::from_millis(90))
+            .expect("pending timeout");
+        assert!(
+            timeout <= Duration::from_millis(10),
+            "max-delay path should schedule the earliest timeout; got {timeout:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_git_dir_parses_relative_dot_git_file() {
+        let dir = unique_temp_dir("gitcomet-monitor-test");
+        let workdir = dir.join("repo");
+        fs::create_dir_all(&workdir).expect("create workdir");
+        fs::write(workdir.join(".git"), "gitdir: .actual-git\n").expect("write .git file");
+
+        assert_eq!(resolve_git_dir(&workdir), Some(workdir.join(".actual-git")));
+    }
+
+    #[test]
+    fn classify_repo_event_handles_empty_paths_git_state_and_gitignore_config() {
+        let dir = unique_temp_dir("gitcomet-monitor-test");
+        let workdir = dir.join("repo");
+        fs::create_dir_all(workdir.join(".git")).expect("create .git dir");
+        let git_dir = Some(workdir.join(".git"));
+
+        let mut rules = GitignoreRules::default();
+        let empty_paths = notify::Event {
+            kind: EventKind::Any,
+            paths: vec![],
+            attrs: Default::default(),
+        };
+        assert_eq!(
+            classify_repo_event(&workdir, git_dir.as_deref(), &mut rules, &empty_paths),
+            Some(RepoExternalChange::Both)
+        );
+
+        let git_head = notify::Event {
+            kind: EventKind::Any,
+            paths: vec![workdir.join(".git").join("HEAD")],
+            attrs: Default::default(),
+        };
+        assert_eq!(
+            classify_repo_event(&workdir, git_dir.as_deref(), &mut rules, &git_head),
+            Some(RepoExternalChange::GitState)
+        );
+
+        let gitignore_changed = notify::Event {
+            kind: EventKind::Any,
+            paths: vec![workdir.join(".gitignore")],
+            attrs: Default::default(),
+        };
+        assert_eq!(
+            classify_repo_event(&workdir, git_dir.as_deref(), &mut rules, &gitignore_changed),
+            Some(RepoExternalChange::Worktree)
+        );
+    }
+
+    #[test]
+    fn helper_predicates_cover_git_dir_index_strip_prefix_and_remove_hints() {
+        let dir = unique_temp_dir("gitcomet-monitor-test");
+        let workdir = dir.join("repo");
+        let git_dir = dir.join("worktrees").join("repo");
+        fs::create_dir_all(workdir.join(".git")).expect("create .git dir");
+        fs::create_dir_all(&git_dir).expect("create detached git dir");
+
+        assert!(is_git_index_path(
+            &workdir,
+            Some(&git_dir),
+            &git_dir.join("index")
+        ));
+        assert!(is_gitignore_config_path(
+            &workdir,
+            Some(&git_dir),
+            &workdir.join(".gitignore")
+        ));
+
+        let mut rules = GitignoreRules::default();
+        assert!(
+            !is_ignored_worktree_path_with_hint(
+                &workdir,
+                &mut rules,
+                dir.join("outside.txt").as_path(),
+                Some(false),
+            ),
+            "paths outside the workdir should never be treated as ignored"
+        );
+
+        let create_file = notify::Event {
+            kind: EventKind::Create(CreateKind::File),
+            paths: vec![],
+            attrs: Default::default(),
+        };
+        assert_eq!(path_dir_hint(&create_file), Some(false));
+
+        let remove_folder = notify::Event {
+            kind: EventKind::Remove(RemoveKind::Folder),
+            paths: vec![],
+            attrs: Default::default(),
+        };
+        assert_eq!(path_dir_hint(&remove_folder), Some(true));
+
+        let remove_file = notify::Event {
+            kind: EventKind::Remove(RemoveKind::File),
+            paths: vec![],
+            attrs: Default::default(),
+        };
+        assert_eq!(path_dir_hint(&remove_file), Some(false));
+
+        let remove_any = notify::Event {
+            kind: EventKind::Remove(RemoveKind::Any),
+            paths: vec![],
+            attrs: Default::default(),
+        };
+        assert_eq!(path_dir_hint(&remove_any), None);
     }
 }

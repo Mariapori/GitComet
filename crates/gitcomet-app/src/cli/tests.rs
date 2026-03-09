@@ -2421,6 +2421,155 @@ fn compat_diff_rejects_too_many_positionals() {
     );
 }
 
+#[test]
+fn compat_direct_missing_values_for_value_flags_error() {
+    let env = TestEnv::new();
+    let no_config = |_: &str| None;
+    let cases: Vec<Vec<OsString>> = vec![
+        vec![OsString::from("--L1")],
+        vec![OsString::from("-L1")],
+        vec![OsString::from("--label")],
+        vec![OsString::from("-o")],
+        vec![OsString::from("--base")],
+    ];
+
+    for raw_args in cases {
+        let err = parse_compat_external_mode_with_config(&raw_args, &env, &no_config).unwrap_err();
+        assert!(
+            err.contains("Missing value for compatibility flag"),
+            "unexpected error for args {raw_args:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn compat_direct_unknown_flag_and_empty_input_return_none() {
+    let env = TestEnv::new();
+    let no_config = |_: &str| None;
+
+    let unknown = vec![OsString::from("--unknown-external-flag")];
+    assert!(
+        parse_compat_external_mode_with_config(&unknown, &env, &no_config)
+            .unwrap()
+            .is_none()
+    );
+
+    let empty: Vec<OsString> = Vec::new();
+    assert!(
+        parse_compat_external_mode_with_config(&empty, &env, &no_config)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn compat_direct_diff_labels_without_positionals_error() {
+    let env = TestEnv::new();
+    let no_config = |_: &str| None;
+    let raw_args = vec![
+        OsString::from("--L1"),
+        OsString::from("LEFT_LABEL"),
+        OsString::from("--L2"),
+        OsString::from("RIGHT_LABEL"),
+    ];
+
+    let err = parse_compat_external_mode_with_config(&raw_args, &env, &no_config).unwrap_err();
+    assert!(
+        err.contains("expected 2 positional paths (LOCAL REMOTE)"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn compat_parses_attached_short_output_and_label_equals_forms() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = tmp_file(&dir, "base.txt", "base\n");
+    let local = tmp_file(&dir, "local.txt", "local\n");
+    let remote = tmp_file(&dir, "remote.txt", "remote\n");
+    let merged = dir.path().join("merged.txt");
+    let env = TestEnv::new();
+    let no_config = |_: &str| None;
+    let raw_args = vec![
+        OsString::from("-L1=BASE_LABEL"),
+        OsString::from("-L2LOCAL_LABEL"),
+        OsString::from("-L3=REMOTE_LABEL"),
+        OsString::from(format!("-o{}", merged.display())),
+        base.clone().into_os_string(),
+        local.clone().into_os_string(),
+        remote.clone().into_os_string(),
+    ];
+
+    let mode = parse_compat_external_mode_with_config(&raw_args, &env, &no_config)
+        .expect("parse ok")
+        .expect("compat mode should resolve");
+
+    match mode {
+        AppMode::Mergetool(config) => {
+            assert_eq!(config.merged, merged);
+            assert_eq!(config.base.as_ref(), Some(&base));
+            assert_eq!(config.local, local);
+            assert_eq!(config.remote, remote);
+            assert_eq!(config.label_base.as_deref(), Some("BASE_LABEL"));
+            assert_eq!(config.label_local.as_deref(), Some("LOCAL_LABEL"));
+            assert_eq!(config.label_remote.as_deref(), Some("REMOTE_LABEL"));
+        }
+        other => panic!("expected Mergetool mode, got: {other:?}"),
+    }
+}
+
+#[test]
+fn compat_double_dash_collects_remaining_positionals_for_difftool() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = tmp_file(&dir, "left.txt", "left\n");
+    let remote = tmp_file(&dir, "right.txt", "right\n");
+    let env = TestEnv::new();
+    let no_config = |_: &str| None;
+    let raw_args = vec![
+        OsString::from("--"),
+        local.clone().into_os_string(),
+        remote.clone().into_os_string(),
+    ];
+
+    let mode = parse_compat_external_mode_with_config(&raw_args, &env, &no_config)
+        .expect("parse ok")
+        .expect("compat mode should resolve");
+
+    match mode {
+        AppMode::Difftool(config) => {
+            assert_eq!(config.local, local);
+            assert_eq!(config.remote, remote);
+        }
+        other => panic!("expected Difftool mode, got: {other:?}"),
+    }
+}
+
+#[test]
+fn compat_base_flag_requires_two_positionals_when_output_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = tmp_file(&dir, "base.txt", "base\n");
+    let local = tmp_file(&dir, "local.txt", "local\n");
+    let merged = dir.path().join("merged.txt");
+    let env = TestEnv::new();
+
+    let err = parse_mode_for_test(
+        vec![
+            OsString::from("gitcomet-app"),
+            OsString::from("--base"),
+            base.into_os_string(),
+            OsString::from("--out"),
+            merged.into_os_string(),
+            local.into_os_string(),
+        ],
+        &env,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.contains("expected exactly 2 positional paths (LOCAL REMOTE) when --base is provided"),
+        "unexpected error: {err}"
+    );
+}
+
 // ── Conflict style and diff algorithm ─────────────────────────────
 
 #[test]

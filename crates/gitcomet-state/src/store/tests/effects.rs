@@ -1755,3 +1755,705 @@ fn drop_stash_effect_requests_stash_reload_on_error() {
     );
     assert_eq!(*calls.lock().unwrap(), vec!["drop 4".to_string()]);
 }
+
+fn unique_temp_path(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ))
+}
+
+fn unsupported_repo_result<T>() -> Result<T> {
+    Err(Error::new(ErrorKind::Unsupported(
+        "unsupported repo for effect scheduling coverage",
+    )))
+}
+
+struct UnsupportedRepo {
+    spec: RepoSpec,
+}
+
+impl GitRepository for UnsupportedRepo {
+    fn spec(&self) -> &RepoSpec {
+        &self.spec
+    }
+
+    fn log_head_page(&self, _limit: usize, _cursor: Option<&LogCursor>) -> Result<LogPage> {
+        unsupported_repo_result()
+    }
+    fn commit_details(&self, _id: &CommitId) -> Result<CommitDetails> {
+        unsupported_repo_result()
+    }
+    fn reflog_head(&self, _limit: usize) -> Result<Vec<ReflogEntry>> {
+        unsupported_repo_result()
+    }
+    fn current_branch(&self) -> Result<String> {
+        unsupported_repo_result()
+    }
+    fn list_branches(&self) -> Result<Vec<Branch>> {
+        unsupported_repo_result()
+    }
+    fn list_remotes(&self) -> Result<Vec<Remote>> {
+        unsupported_repo_result()
+    }
+    fn list_remote_branches(&self) -> Result<Vec<RemoteBranch>> {
+        unsupported_repo_result()
+    }
+    fn status(&self) -> Result<RepoStatus> {
+        unsupported_repo_result()
+    }
+    fn diff_unified(&self, _target: &DiffTarget) -> Result<String> {
+        unsupported_repo_result()
+    }
+
+    fn create_branch(&self, _name: &str, _target: &CommitId) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn delete_branch(&self, _name: &str) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn checkout_branch(&self, _name: &str) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn revert(&self, _id: &CommitId) -> Result<()> {
+        unsupported_repo_result()
+    }
+
+    fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn stash_list(&self) -> Result<Vec<StashEntry>> {
+        unsupported_repo_result()
+    }
+    fn stash_apply(&self, _index: usize) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn stash_drop(&self, _index: usize) -> Result<()> {
+        unsupported_repo_result()
+    }
+
+    fn stage(&self, _paths: &[&Path]) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn unstage(&self, _paths: &[&Path]) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn commit(&self, _message: &str) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn fetch_all(&self) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn pull(&self, _mode: PullMode) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn push(&self) -> Result<()> {
+        unsupported_repo_result()
+    }
+    fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
+        unsupported_repo_result()
+    }
+}
+
+fn recv_n_msgs(msg_rx: &std::sync::mpsc::Receiver<Msg>, n: usize) {
+    for _ in 0..n {
+        msg_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("expected effect scheduler message");
+    }
+}
+
+#[test]
+fn open_repo_effect_emits_repo_opened_ok() {
+    struct Backend {
+        repo: Arc<dyn GitRepository>,
+    }
+    impl GitBackend for Backend {
+        fn open(&self, _path: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
+            Ok(Arc::clone(&self.repo))
+        }
+    }
+
+    let repo_id = RepoId(42);
+    let workdir = unique_temp_path("gitcomet-open-repo-ok");
+    let repo: Arc<dyn GitRepository> = Arc::new(UnsupportedRepo {
+        spec: RepoSpec {
+            workdir: workdir.clone(),
+        },
+    });
+    let backend: Arc<dyn GitBackend> = Arc::new(Backend { repo });
+
+    let executor = super::executor::TaskExecutor::new(1);
+    let repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let (msg_tx, msg_rx) = std::sync::mpsc::channel::<Msg>();
+
+    super::effects::schedule_effect(
+        &executor,
+        &backend,
+        &repos,
+        msg_tx,
+        Effect::OpenRepo {
+            repo_id,
+            path: workdir.clone(),
+        },
+    );
+
+    let msg = msg_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("expected RepoOpenedOk");
+    match msg {
+        Msg::RepoOpenedOk {
+            repo_id: got_repo_id,
+            spec,
+            repo,
+        } => {
+            assert_eq!(got_repo_id, repo_id);
+            assert_eq!(spec.workdir, workdir);
+            assert_eq!(repo.spec().workdir, workdir);
+        }
+        _ => panic!("expected RepoOpenedOk"),
+    }
+}
+
+#[test]
+fn open_repo_effect_emits_repo_opened_err() {
+    struct Backend;
+    impl GitBackend for Backend {
+        fn open(&self, _path: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
+            Err(Error::new(ErrorKind::Backend(
+                "backend open failed".to_string(),
+            )))
+        }
+    }
+
+    let repo_id = RepoId(43);
+    let workdir = unique_temp_path("gitcomet-open-repo-err");
+    let backend: Arc<dyn GitBackend> = Arc::new(Backend);
+    let executor = super::executor::TaskExecutor::new(1);
+    let repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let (msg_tx, msg_rx) = std::sync::mpsc::channel::<Msg>();
+
+    super::effects::schedule_effect(
+        &executor,
+        &backend,
+        &repos,
+        msg_tx,
+        Effect::OpenRepo {
+            repo_id,
+            path: workdir.clone(),
+        },
+    );
+
+    let msg = msg_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("expected RepoOpenedErr");
+    match msg {
+        Msg::RepoOpenedErr {
+            repo_id: got_repo_id,
+            spec,
+            error,
+        } => {
+            assert_eq!(got_repo_id, repo_id);
+            assert_eq!(spec.workdir, workdir);
+            assert!(matches!(error.kind(), ErrorKind::Backend(_)));
+        }
+        _ => panic!("expected RepoOpenedErr"),
+    }
+}
+
+#[test]
+fn schedule_effect_dispatches_many_variants_with_repo_present() {
+    struct Backend;
+    impl GitBackend for Backend {
+        fn open(&self, _path: &Path) -> std::result::Result<Arc<dyn GitRepository>, Error> {
+            panic!("open should not be called in this test")
+        }
+    }
+
+    let repo_id = RepoId(500);
+    let workdir = unique_temp_path("gitcomet-effects-dispatch");
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+
+    let repo: Arc<dyn GitRepository> = Arc::new(UnsupportedRepo {
+        spec: RepoSpec {
+            workdir: workdir.clone(),
+        },
+    });
+    let repos: HashMap<RepoId, Arc<dyn GitRepository>> = {
+        let mut repos = HashMap::default();
+        repos.insert(repo_id, repo);
+        repos
+    };
+
+    let backend: Arc<dyn GitBackend> = Arc::new(Backend);
+    let executor = super::executor::TaskExecutor::new(1);
+    let (msg_tx, msg_rx) = std::sync::mpsc::channel::<Msg>();
+
+    let target = DiffTarget::WorkingTree {
+        path: PathBuf::from("tracked.txt"),
+        area: DiffArea::Unstaged,
+    };
+    let commit_id = CommitId("deadbeef".to_string());
+    let effect_specs: Vec<(Effect, usize)> = vec![
+        (Effect::LoadBranches { repo_id }, 1),
+        (Effect::LoadRemotes { repo_id }, 1),
+        (Effect::LoadRemoteBranches { repo_id }, 1),
+        (Effect::LoadStatus { repo_id }, 1),
+        (Effect::LoadHeadBranch { repo_id }, 1),
+        (Effect::LoadUpstreamDivergence { repo_id }, 1),
+        (
+            Effect::LoadLog {
+                repo_id,
+                scope: LogScope::CurrentBranch,
+                limit: 20,
+                cursor: None,
+            },
+            1,
+        ),
+        (
+            Effect::LoadLog {
+                repo_id,
+                scope: LogScope::AllBranches,
+                limit: 20,
+                cursor: Some(LogCursor {
+                    last_seen: CommitId("cursor".to_string()),
+                }),
+            },
+            1,
+        ),
+        (Effect::LoadTags { repo_id }, 1),
+        (Effect::LoadRemoteTags { repo_id }, 1),
+        (Effect::LoadStashes { repo_id, limit: 3 }, 1),
+        (Effect::LoadReflog { repo_id, limit: 5 }, 1),
+        (
+            Effect::LoadFileHistory {
+                repo_id,
+                path: PathBuf::from("tracked.txt"),
+                limit: 10,
+            },
+            1,
+        ),
+        (
+            Effect::LoadBlame {
+                repo_id,
+                path: PathBuf::from("tracked.txt"),
+                rev: Some("HEAD".to_string()),
+            },
+            1,
+        ),
+        (Effect::LoadWorktrees { repo_id }, 1),
+        (Effect::LoadSubmodules { repo_id }, 1),
+        (Effect::LoadRebaseState { repo_id }, 1),
+        (Effect::LoadMergeCommitMessage { repo_id }, 1),
+        (
+            Effect::LoadCommitDetails {
+                repo_id,
+                commit_id: commit_id.clone(),
+            },
+            1,
+        ),
+        (
+            Effect::LoadDiff {
+                repo_id,
+                target: target.clone(),
+            },
+            1,
+        ),
+        (
+            Effect::LoadDiffFile {
+                repo_id,
+                target: target.clone(),
+            },
+            1,
+        ),
+        (
+            Effect::LoadDiffFileImage {
+                repo_id,
+                target: target.clone(),
+            },
+            1,
+        ),
+        (
+            Effect::LoadConflictFile {
+                repo_id,
+                path: PathBuf::from("conflicted.txt"),
+            },
+            1,
+        ),
+        (
+            Effect::SaveWorktreeFile {
+                repo_id,
+                path: PathBuf::from("nested/new.txt"),
+                contents: "content".to_string(),
+                stage: true,
+            },
+            1,
+        ),
+        (
+            Effect::CheckoutBranch {
+                repo_id,
+                name: "main".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::CheckoutRemoteBranch {
+                repo_id,
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+                local_branch: "main".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::CheckoutCommit {
+                repo_id,
+                commit_id: commit_id.clone(),
+            },
+            1,
+        ),
+        (
+            Effect::CherryPickCommit {
+                repo_id,
+                commit_id: commit_id.clone(),
+            },
+            1,
+        ),
+        (
+            Effect::RevertCommit {
+                repo_id,
+                commit_id: commit_id.clone(),
+            },
+            1,
+        ),
+        (
+            Effect::CreateBranch {
+                repo_id,
+                name: "topic".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::CreateBranchAndCheckout {
+                repo_id,
+                name: "topic2".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::DeleteBranch {
+                repo_id,
+                name: "topic".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::ForceDeleteBranch {
+                repo_id,
+                name: "topic".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::ExportPatch {
+                repo_id,
+                commit_id: commit_id.clone(),
+                dest: PathBuf::from("out.patch"),
+            },
+            1,
+        ),
+        (
+            Effect::ApplyPatch {
+                repo_id,
+                patch: PathBuf::from("change.patch"),
+            },
+            1,
+        ),
+        (
+            Effect::AddWorktree {
+                repo_id,
+                path: PathBuf::from("wt"),
+                reference: Some("main".to_string()),
+            },
+            1,
+        ),
+        (
+            Effect::RemoveWorktree {
+                repo_id,
+                path: PathBuf::from("wt"),
+            },
+            1,
+        ),
+        (
+            Effect::AddSubmodule {
+                repo_id,
+                url: "https://example.com/repo.git".to_string(),
+                path: PathBuf::from("sub"),
+            },
+            1,
+        ),
+        (Effect::UpdateSubmodules { repo_id }, 1),
+        (
+            Effect::RemoveSubmodule {
+                repo_id,
+                path: PathBuf::from("sub"),
+            },
+            1,
+        ),
+        (
+            Effect::StageHunk {
+                repo_id,
+                patch: "@@ -1 +1 @@".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::UnstageHunk {
+                repo_id,
+                patch: "@@ -1 +1 @@".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::ApplyWorktreePatch {
+                repo_id,
+                patch: "@@ -1 +1 @@".to_string(),
+                reverse: true,
+            },
+            1,
+        ),
+        (
+            Effect::StagePath {
+                repo_id,
+                path: PathBuf::from("tracked.txt"),
+            },
+            1,
+        ),
+        (
+            Effect::StagePaths {
+                repo_id,
+                paths: vec![PathBuf::from("b.txt"), PathBuf::from("a.txt")],
+            },
+            1,
+        ),
+        (
+            Effect::UnstagePath {
+                repo_id,
+                path: PathBuf::from("tracked.txt"),
+            },
+            1,
+        ),
+        (
+            Effect::UnstagePaths {
+                repo_id,
+                paths: vec![PathBuf::from("b.txt"), PathBuf::from("a.txt")],
+            },
+            1,
+        ),
+        (
+            Effect::DiscardWorktreeChangesPath {
+                repo_id,
+                path: PathBuf::from("tracked.txt"),
+            },
+            1,
+        ),
+        (
+            Effect::DiscardWorktreeChangesPaths {
+                repo_id,
+                paths: vec![PathBuf::from("b.txt"), PathBuf::from("a.txt")],
+            },
+            1,
+        ),
+        (
+            Effect::Commit {
+                repo_id,
+                message: "msg".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::CommitAmend {
+                repo_id,
+                message: "msg".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::FetchAll {
+                repo_id,
+                prune: true,
+            },
+            1,
+        ),
+        (Effect::PruneMergedBranches { repo_id }, 1),
+        (Effect::PruneLocalTags { repo_id }, 1),
+        (
+            Effect::Pull {
+                repo_id,
+                mode: PullMode::FastForwardOnly,
+            },
+            1,
+        ),
+        (
+            Effect::PullBranch {
+                repo_id,
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::MergeRef {
+                repo_id,
+                reference: "origin/main".to_string(),
+            },
+            1,
+        ),
+        (Effect::Push { repo_id }, 1),
+        (Effect::ForcePush { repo_id }, 1),
+        (
+            Effect::PushSetUpstream {
+                repo_id,
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::DeleteRemoteBranch {
+                repo_id,
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::Reset {
+                repo_id,
+                target: "HEAD~1".to_string(),
+                mode: gitcomet_core::services::ResetMode::Mixed,
+            },
+            1,
+        ),
+        (
+            Effect::Rebase {
+                repo_id,
+                onto: "main".to_string(),
+            },
+            1,
+        ),
+        (Effect::RebaseContinue { repo_id }, 1),
+        (Effect::RebaseAbort { repo_id }, 1),
+        (Effect::MergeAbort { repo_id }, 1),
+        (
+            Effect::CreateTag {
+                repo_id,
+                name: "v1.0.0".to_string(),
+                target: "HEAD".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::DeleteTag {
+                repo_id,
+                name: "v1.0.0".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::PushTag {
+                repo_id,
+                remote: "origin".to_string(),
+                name: "v1.0.0".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::DeleteRemoteTag {
+                repo_id,
+                remote: "origin".to_string(),
+                name: "v1.0.0".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::AddRemote {
+                repo_id,
+                name: "origin".to_string(),
+                url: "https://example.com/repo.git".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::RemoveRemote {
+                repo_id,
+                name: "origin".to_string(),
+            },
+            1,
+        ),
+        (
+            Effect::SetRemoteUrl {
+                repo_id,
+                name: "origin".to_string(),
+                url: "https://example.com/repo.git".to_string(),
+                kind: gitcomet_core::services::RemoteUrlKind::Fetch,
+            },
+            1,
+        ),
+        (
+            Effect::CheckoutConflictSide {
+                repo_id,
+                path: PathBuf::from("conflicted.txt"),
+                side: gitcomet_core::services::ConflictSide::Ours,
+            },
+            1,
+        ),
+        (
+            Effect::AcceptConflictDeletion {
+                repo_id,
+                path: PathBuf::from("conflicted.txt"),
+            },
+            1,
+        ),
+        (
+            Effect::CheckoutConflictBase {
+                repo_id,
+                path: PathBuf::from("conflicted.txt"),
+            },
+            1,
+        ),
+        (
+            Effect::LaunchMergetool {
+                repo_id,
+                path: PathBuf::from("conflicted.txt"),
+            },
+            1,
+        ),
+        (
+            Effect::Stash {
+                repo_id,
+                message: "wip".to_string(),
+                include_untracked: false,
+            },
+            1,
+        ),
+        (Effect::ApplyStash { repo_id, index: 0 }, 1),
+        (Effect::PopStash { repo_id, index: 0 }, 1),
+        (Effect::DropStash { repo_id, index: 0 }, 2),
+    ];
+
+    for (effect, expected_messages) in effect_specs {
+        super::effects::schedule_effect(&executor, &backend, &repos, msg_tx.clone(), effect);
+        recv_n_msgs(&msg_rx, expected_messages);
+    }
+}

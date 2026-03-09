@@ -153,7 +153,7 @@ impl MainPaneView {
                         .style(components::ButtonStyle::Outlined)
                         .disabled(!can_nav_prev)
                         .on_click(theme, cx, |this, _e, _w, cx| {
-                            this.conflict_jump_prev();
+                            this.conflict_jump_prev(cx);
                             cx.notify();
                         }),
                 )
@@ -163,7 +163,7 @@ impl MainPaneView {
                         .style(components::ButtonStyle::Outlined)
                         .disabled(!can_nav_next)
                         .on_click(theme, cx, |this, _e, _w, cx| {
-                            this.conflict_jump_next();
+                            this.conflict_jump_next(cx);
                             cx.notify();
                         }),
                 )
@@ -2788,10 +2788,10 @@ impl MainPaneView {
                         if conflict_resolver_active {
                             match direction {
                                 conflict_resolver::ConflictNavDirection::Prev => {
-                                    this.conflict_jump_prev();
+                                    this.conflict_jump_prev(cx);
                                 }
                                 conflict_resolver::ConflictNavDirection::Next => {
-                                    this.conflict_jump_next();
+                                    this.conflict_jump_next(cx);
                                 }
                             }
                         } else {
@@ -2821,10 +2821,10 @@ impl MainPaneView {
                         if conflict_resolver_active {
                             match direction {
                                 conflict_resolver::ConflictNavDirection::Prev => {
-                                    this.conflict_jump_prev();
+                                    this.conflict_jump_prev(cx);
                                 }
                                 conflict_resolver::ConflictNavDirection::Next => {
-                                    this.conflict_jump_next();
+                                    this.conflict_jump_next(cx);
                                 }
                             }
                         } else {
@@ -2854,10 +2854,10 @@ impl MainPaneView {
                         if conflict_resolver_active {
                             match direction {
                                 conflict_resolver::ConflictNavDirection::Prev => {
-                                    this.conflict_jump_prev();
+                                    this.conflict_jump_prev(cx);
                                 }
                                 conflict_resolver::ConflictNavDirection::Next => {
-                                    this.conflict_jump_next();
+                                    this.conflict_jump_next(cx);
                                 }
                             }
                         } else {
