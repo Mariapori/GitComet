@@ -812,7 +812,7 @@ fn remote_menu_lists_fetch_and_prune_actions(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn local_branch_menu_has_pull_and_merge_actions(cx: &mut gpui::TestAppContext) {
+fn local_branch_menu_has_pull_merge_and_squash_actions(cx: &mut gpui::TestAppContext) {
     let (store, events) = AppStore::new(Arc::new(TestBackend));
     let (view, cx) =
         cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
@@ -914,6 +914,31 @@ fn local_branch_menu_has_pull_and_merge_actions(cx: &mut gpui::TestAppContext) {
             _ => panic!("expected Merge into current entry with MergeRef action"),
         }
 
+        let squash_entry = model.items.iter().find_map(|item| match item {
+            ContextMenuItem::Entry {
+                label,
+                action,
+                disabled,
+                ..
+            } if label.as_ref() == "Squash into current" => Some(((**action).clone(), *disabled)),
+            _ => None,
+        });
+
+        match squash_entry {
+            Some((
+                ContextMenuAction::SquashRef {
+                    repo_id: rid,
+                    reference,
+                },
+                disabled,
+            )) => {
+                assert_eq!(rid, repo_id);
+                assert_eq!(reference, branch_name);
+                assert!(!disabled);
+            }
+            _ => panic!("expected Squash into current entry with SquashRef action"),
+        }
+
         let has_pull_into_current = model.items.iter().any(|item| match item {
             ContextMenuItem::Entry { label, .. } => label.as_ref() == "Pull into current",
             _ => false,
@@ -923,12 +948,144 @@ fn local_branch_menu_has_pull_and_merge_actions(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn local_branch_menu_excludes_pull_and_merge_for_current_branch(cx: &mut gpui::TestAppContext) {
+fn remote_branch_menu_has_pull_merge_and_squash_actions(cx: &mut gpui::TestAppContext) {
     let (store, events) = AppStore::new(Arc::new(TestBackend));
     let (view, cx) =
         cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
 
     let repo_id = RepoId(23);
+    let branch_name = "origin/feature/awesome".to_string();
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_remote_branch_menu_merge",
+        std::process::id()
+    ));
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+            repo.head_branch = Loadable::Ready("main".to_string());
+
+            let state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+            this.state = Arc::clone(&state);
+            this._ui_model
+                .update(cx, |model, cx| model.set_state(state, cx));
+            cx.notify();
+        });
+    });
+
+    cx.update(|_window, app| {
+        let model = view
+            .update(app, |this, cx| {
+                this.popover_host.update(cx, |host, cx| {
+                    host.context_menu_model(
+                        &PopoverKind::BranchMenu {
+                            repo_id,
+                            section: BranchSection::Remote,
+                            name: branch_name.clone(),
+                        },
+                        cx,
+                    )
+                })
+            })
+            .expect("expected branch context menu model");
+
+        let pull_entry = model.items.iter().find_map(|item| match item {
+            ContextMenuItem::Entry {
+                label,
+                action,
+                disabled,
+                ..
+            } if label.as_ref() == "Pull into current" => Some(((**action).clone(), *disabled)),
+            _ => None,
+        });
+
+        match pull_entry {
+            Some((
+                ContextMenuAction::PullBranch {
+                    repo_id: rid,
+                    remote,
+                    branch,
+                },
+                disabled,
+            )) => {
+                assert_eq!(rid, repo_id);
+                assert_eq!(remote, "origin");
+                assert_eq!(branch, "feature/awesome");
+                assert!(!disabled);
+            }
+            _ => panic!("expected Pull into current entry with PullBranch action"),
+        }
+
+        let merge_entry = model.items.iter().find_map(|item| match item {
+            ContextMenuItem::Entry {
+                label,
+                action,
+                disabled,
+                ..
+            } if label.as_ref() == "Merge into current" => Some(((**action).clone(), *disabled)),
+            _ => None,
+        });
+
+        match merge_entry {
+            Some((
+                ContextMenuAction::MergeRef {
+                    repo_id: rid,
+                    reference,
+                },
+                disabled,
+            )) => {
+                assert_eq!(rid, repo_id);
+                assert_eq!(reference, branch_name);
+                assert!(!disabled);
+            }
+            _ => panic!("expected Merge into current entry with MergeRef action"),
+        }
+
+        let squash_entry = model.items.iter().find_map(|item| match item {
+            ContextMenuItem::Entry {
+                label,
+                action,
+                disabled,
+                ..
+            } if label.as_ref() == "Squash into current" => Some(((**action).clone(), *disabled)),
+            _ => None,
+        });
+
+        match squash_entry {
+            Some((
+                ContextMenuAction::SquashRef {
+                    repo_id: rid,
+                    reference,
+                },
+                disabled,
+            )) => {
+                assert_eq!(rid, repo_id);
+                assert_eq!(reference, branch_name);
+                assert!(!disabled);
+            }
+            _ => panic!("expected Squash into current entry with SquashRef action"),
+        }
+    });
+}
+
+#[gpui::test]
+fn local_branch_menu_excludes_pull_merge_and_squash_for_current_branch(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) =
+        cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
+
+    let repo_id = RepoId(24);
     let branch_name = "main".to_string();
     let workdir = std::env::temp_dir().join(format!(
         "gitcomet_ui_test_{}_local_branch_menu_current_branch",
@@ -981,6 +1138,10 @@ fn local_branch_menu_excludes_pull_and_merge_for_current_branch(cx: &mut gpui::T
             ContextMenuItem::Entry { label, .. } => label.as_ref() == "Pull into current",
             _ => false,
         });
+        let has_squash = model.items.iter().any(|item| match item {
+            ContextMenuItem::Entry { label, .. } => label.as_ref() == "Squash into current",
+            _ => false,
+        });
 
         let delete_disabled = model.items.iter().any(|item| match item {
             ContextMenuItem::Entry {
@@ -1001,6 +1162,7 @@ fn local_branch_menu_excludes_pull_and_merge_for_current_branch(cx: &mut gpui::T
 
         assert!(!has_pull, "expected pull entry to be excluded");
         assert!(!has_merge, "expected merge entry to be excluded");
+        assert!(!has_squash, "expected squash entry to be excluded");
         assert!(delete_disabled, "expected delete entry to be disabled");
     });
 }

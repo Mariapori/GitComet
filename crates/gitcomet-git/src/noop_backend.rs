@@ -273,6 +273,7 @@ mod tests {
         assert_unsupported(repo.commit_amend_with_output("message"));
         assert_unsupported(repo.pull_branch_with_output("origin", "main"));
         assert_unsupported(repo.merge_ref_with_output("origin/main"));
+        assert_unsupported(repo.squash_ref_with_output("origin/main"));
         assert_unsupported(repo.reset_with_output("HEAD~1", ResetMode::Mixed));
         assert_unsupported(repo.blame_file(path, None));
         assert_unsupported(repo.checkout_conflict_side(path, ConflictSide::Ours));

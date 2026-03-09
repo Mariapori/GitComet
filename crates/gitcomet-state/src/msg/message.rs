@@ -294,6 +294,10 @@ pub enum Msg {
         repo_id: RepoId,
         reference: String,
     },
+    SquashRef {
+        repo_id: RepoId,
+        reference: String,
+    },
     Push {
         repo_id: RepoId,
     },

@@ -312,6 +312,10 @@ pub(super) fn reduce(
             begin_local_action(state, repo_id);
             actions_emit_effects::merge_ref(repo_id, reference)
         }
+        Msg::SquashRef { repo_id, reference } => {
+            begin_local_action(state, repo_id);
+            actions_emit_effects::squash_ref(repo_id, reference)
+        }
         Msg::Push { repo_id } => actions_emit_effects::push(repos, state, repo_id),
         Msg::ForcePush { repo_id } => actions_emit_effects::force_push(repos, state, repo_id),
         Msg::PushSetUpstream {

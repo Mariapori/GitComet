@@ -110,6 +110,10 @@ impl GitRepository for GixRepo {
         self.merge_ref_with_output_impl(reference)
     }
 
+    fn squash_ref_with_output(&self, reference: &str) -> Result<CommandOutput> {
+        self.squash_ref_with_output_impl(reference)
+    }
+
     fn diff_unified(&self, target: &DiffTarget) -> Result<String> {
         self.diff_unified_impl(target)
     }

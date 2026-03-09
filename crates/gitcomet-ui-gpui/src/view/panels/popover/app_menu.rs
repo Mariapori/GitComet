@@ -4,14 +4,7 @@ pub(super) fn panel(this: &mut PopoverHost, cx: &mut gpui::Context<PopoverHost>)
     let theme = this.theme;
     let close = cx.listener(|this, _e: &ClickEvent, _w, cx| this.close_popover(cx));
 
-    let active_repo = this.active_repo();
-    let active_repo_id = active_repo.map(|r| r.id);
-    let rebase_in_progress = active_repo
-        .and_then(|r| match &r.rebase_in_progress {
-            Loadable::Ready(v) => Some(*v),
-            _ => None,
-        })
-        .unwrap_or(false);
+    let active_repo_id = this.active_repo().map(|r| r.id);
 
     let separator = || {
         div()
@@ -94,63 +87,6 @@ pub(super) fn panel(this: &mut PopoverHost, cx: &mut gpui::Context<PopoverHost>)
                     );
                 },
             )),
-        )
-        .child(separator())
-        .child(section_label("app_menu_repo_section", "Repository"))
-        .child(
-            entry(
-                "app_menu_rebase",
-                "Rebase onto…".into(),
-                active_repo_id.is_none() || rebase_in_progress,
-            )
-            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                let Some(repo_id) = active_repo_id else {
-                    return;
-                };
-                if rebase_in_progress {
-                    return;
-                }
-                this.open_popover_at(
-                    PopoverKind::RebasePrompt { repo_id },
-                    e.position(),
-                    window,
-                    cx,
-                );
-            })),
-        )
-        .child(
-            entry(
-                "app_menu_rebase_continue",
-                "Rebase --continue".into(),
-                active_repo_id.is_none() || !rebase_in_progress,
-            )
-            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                let Some(repo_id) = active_repo_id else {
-                    return;
-                };
-                if !rebase_in_progress {
-                    return;
-                }
-                this.store.dispatch(Msg::RebaseContinue { repo_id });
-                this.close_popover(cx);
-            })),
-        )
-        .child(
-            entry(
-                "app_menu_rebase_abort",
-                "Rebase --abort".into(),
-                active_repo_id.is_none() || !rebase_in_progress,
-            )
-            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                let Some(repo_id) = active_repo_id else {
-                    return;
-                };
-                if !rebase_in_progress {
-                    return;
-                }
-                this.store.dispatch(Msg::RebaseAbort { repo_id });
-                this.close_popover(cx);
-            })),
         )
         .child(separator())
         .child(section_label("app_menu_patches_section", "Patches"))

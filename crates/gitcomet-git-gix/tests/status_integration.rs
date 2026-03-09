@@ -3579,6 +3579,76 @@ fn merge_fast_forwards_when_possible_even_if_merge_ff_is_disabled() {
 }
 
 #[test]
+fn squash_ref_stages_changes_without_creating_merge_commit() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    write(repo, "a.txt", "base\n");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+
+    run_git(repo, &["checkout", "-b", "feature"]);
+    write(repo, "b.txt", "feature\n");
+    run_git(repo, &["add", "b.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+    );
+
+    run_git(repo, &["checkout", "-"]);
+    write(repo, "c.txt", "main\n");
+    run_git(repo, &["add", "c.txt"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "main"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    let output = opened
+        .squash_ref_with_output("feature")
+        .expect("squash should succeed");
+    assert_eq!(output.exit_code, Some(0));
+
+    let parents = git_command()
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-list", "--parents", "-n", "1", "HEAD"])
+        .output()
+        .expect("rev-list --parents");
+    assert!(parents.status.success());
+    let parent_count = String::from_utf8(parents.stdout)
+        .unwrap()
+        .split_whitespace()
+        .count()
+        .saturating_sub(1);
+    assert_eq!(parent_count, 1, "squash should not create a merge commit");
+
+    assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "feature\n");
+
+    let status = opened.status().unwrap();
+    assert!(
+        status
+            .staged
+            .iter()
+            .any(|f| f.path == PathBuf::from("b.txt")),
+        "expected squashed changes to be staged"
+    );
+}
+
+#[test]
 fn merge_commit_message_is_available_during_conflict() {
     if !require_git_shell_for_status_integration_tests() {
         return;

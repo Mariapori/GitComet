@@ -421,6 +421,7 @@ fn summarize_command(
             RepoCommandKind::Pull { .. } => "Pull",
             RepoCommandKind::PullBranch { .. } => "Pull",
             RepoCommandKind::MergeRef { .. } => "Merge",
+            RepoCommandKind::SquashRef { .. } => "Squash",
             RepoCommandKind::Push => "Push",
             RepoCommandKind::ForcePush => "Force push",
             RepoCommandKind::PushSetUpstream { .. } => "Push",
@@ -523,6 +524,20 @@ fn summarize_command(
                 "Completed"
             };
             format!("Merge {reference}: {base}")
+        }
+        RepoCommandKind::SquashRef { reference } => {
+            let base = if output.stdout.contains("Already up to date") {
+                "Already up to date"
+            } else if output.stdout.contains("Squash commit -- not updating HEAD")
+                || output
+                    .stdout
+                    .contains("Automatic merge went well; stopped before committing as requested")
+            {
+                "Staged"
+            } else {
+                "Completed"
+            };
+            format!("Squash {reference}: {base}")
         }
         RepoCommandKind::Push => {
             if output.stderr.contains("Everything up-to-date") {
@@ -968,6 +983,12 @@ mod tests {
                 },
                 "Merge",
             ),
+            (
+                RepoCommandKind::SquashRef {
+                    reference: "feature".into(),
+                },
+                "Squash",
+            ),
             (RepoCommandKind::Push, "Push"),
             (RepoCommandKind::ForcePush, "Force push"),
             (
@@ -1127,6 +1148,20 @@ mod tests {
             None,
         );
         assert_eq!(merge_ref_summary, "Merge feature: Fast-forwarded");
+
+        let (_, squash_ref_summary) = summarize_command(
+            &RepoCommandKind::SquashRef {
+                reference: "feature".into(),
+            },
+            &command_output(
+                "git merge --squash feature",
+                "Squash commit -- not updating HEAD\nAutomatic merge went well; stopped before committing as requested",
+                "",
+            ),
+            true,
+            None,
+        );
+        assert_eq!(squash_ref_summary, "Squash feature: Staged");
 
         let (_, push_uptodate) = summarize_command(
             &RepoCommandKind::Push,

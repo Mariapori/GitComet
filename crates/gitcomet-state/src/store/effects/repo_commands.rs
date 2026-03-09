@@ -426,6 +426,26 @@ pub(super) fn schedule_merge_ref(
     );
 }
 
+pub(super) fn schedule_squash_ref(
+    executor: &TaskExecutor,
+    repos: &RepoMap,
+    msg_tx: mpsc::Sender<Msg>,
+    repo_id: RepoId,
+    reference: String,
+) {
+    let command_reference = reference.clone();
+    schedule_repo_command(
+        executor,
+        repos,
+        msg_tx,
+        repo_id,
+        RepoCommandKind::SquashRef {
+            reference: command_reference,
+        },
+        move |repo| repo.squash_ref_with_output(&reference),
+    );
+}
+
 pub(super) fn schedule_push(
     executor: &TaskExecutor,
     repos: &RepoMap,

@@ -257,6 +257,9 @@ pub(super) fn schedule_effect(
         Effect::MergeRef { repo_id, reference } => {
             repo_commands::schedule_merge_ref(executor, repos, msg_tx, repo_id, reference);
         }
+        Effect::SquashRef { repo_id, reference } => {
+            repo_commands::schedule_squash_ref(executor, repos, msg_tx, repo_id, reference);
+        }
         Effect::Push { repo_id } => repo_commands::schedule_push(executor, repos, msg_tx, repo_id),
         Effect::ForcePush { repo_id } => {
             repo_commands::schedule_force_push(executor, repos, msg_tx, repo_id)

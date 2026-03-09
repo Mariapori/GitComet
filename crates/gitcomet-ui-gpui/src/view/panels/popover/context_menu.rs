@@ -496,6 +496,9 @@ impl PopoverHost {
             ContextMenuAction::MergeRef { repo_id, reference } => {
                 self.store.dispatch(Msg::MergeRef { repo_id, reference });
             }
+            ContextMenuAction::SquashRef { repo_id, reference } => {
+                self.store.dispatch(Msg::SquashRef { repo_id, reference });
+            }
             ContextMenuAction::ApplyStash { repo_id, index } => {
                 self.store.dispatch(Msg::ApplyStash { repo_id, index });
             }

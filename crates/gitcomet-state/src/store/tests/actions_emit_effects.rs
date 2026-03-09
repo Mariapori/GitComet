@@ -710,6 +710,36 @@ fn merge_ref_emits_effect() {
 }
 
 #[test]
+fn squash_ref_emits_effect() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    state.repos.push(RepoState::new_opening(
+        RepoId(1),
+        RepoSpec {
+            workdir: PathBuf::from("/tmp/repo"),
+        },
+    ));
+    state.active_repo = Some(RepoId(1));
+
+    let effects = reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::SquashRef {
+            repo_id: RepoId(1),
+            reference: "feature".to_string(),
+        },
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SquashRef { repo_id: RepoId(1), reference }] if reference == "feature"
+    ));
+    assert_eq!(state.repos[0].local_actions_in_flight, 1);
+}
+
+#[test]
 fn rebase_emits_effect() {
     let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
     let id_alloc = AtomicU64::new(1);

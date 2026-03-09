@@ -250,6 +250,10 @@ pub(super) fn merge_ref(repo_id: RepoId, reference: String) -> Vec<Effect> {
     vec![Effect::MergeRef { repo_id, reference }]
 }
 
+pub(super) fn squash_ref(repo_id: RepoId, reference: String) -> Vec<Effect> {
+    vec![Effect::SquashRef { repo_id, reference }]
+}
+
 pub(super) fn push(
     repos: &HashMap<RepoId, Arc<dyn GitRepository>>,
     state: &mut AppState,
@@ -506,6 +510,7 @@ fn tracks_local_actions_in_flight(command: &RepoCommandKind) -> bool {
     matches!(
         command,
         RepoCommandKind::MergeRef { .. }
+            | RepoCommandKind::SquashRef { .. }
             | RepoCommandKind::Reset { .. }
             | RepoCommandKind::Rebase { .. }
             | RepoCommandKind::RebaseContinue

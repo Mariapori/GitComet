@@ -17,6 +17,9 @@ pub enum RepoCommandKind {
     MergeRef {
         reference: String,
     },
+    SquashRef {
+        reference: String,
+    },
     Push,
     ForcePush,
     PushSetUpstream {

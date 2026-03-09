@@ -405,6 +405,24 @@ impl GixRepo {
         run_git_with_output(cmd, &command_str)
     }
 
+    pub(super) fn squash_ref_with_output_impl(&self, reference: &str) -> Result<CommandOutput> {
+        validate_ref_like_arg(reference, "reference")?;
+
+        let command_str = format!("git merge --squash --no-commit {reference}");
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(&self.spec.workdir)
+            .arg("-c")
+            .arg("color.ui=false")
+            .arg("--no-pager")
+            .arg("merge")
+            .arg("--squash")
+            .arg("--no-commit")
+            .arg("--")
+            .arg(reference);
+        run_git_with_output(cmd, &command_str)
+    }
+
     pub(super) fn add_remote_with_output_impl(
         &self,
         name: &str,

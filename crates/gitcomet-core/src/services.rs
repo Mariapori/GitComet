@@ -378,6 +378,12 @@ pub trait GitRepository: Send + Sync {
         )))
     }
 
+    fn squash_ref_with_output(&self, _reference: &str) -> Result<CommandOutput> {
+        Err(Error::new(ErrorKind::Unsupported(
+            "squashing a specific ref is not implemented for this backend",
+        )))
+    }
+
     fn reset_with_output(&self, _target: &str, _mode: ResetMode) -> Result<CommandOutput> {
         Err(Error::new(ErrorKind::Unsupported(
             "git reset is not implemented for this backend",

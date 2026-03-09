@@ -2400,6 +2400,13 @@ fn schedule_effect_dispatches_many_variants_with_repo_present() {
             },
             1,
         ),
+        (
+            Effect::SquashRef {
+                repo_id,
+                reference: "origin/main".to_string(),
+            },
+            1,
+        ),
         (Effect::Push { repo_id }, 1),
         (Effect::ForcePush { repo_id }, 1),
         (

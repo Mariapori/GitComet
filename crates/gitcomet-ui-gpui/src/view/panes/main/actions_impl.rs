@@ -271,17 +271,19 @@ impl MainPaneView {
         conflict_ix: usize,
         output_text: &str,
     ) -> Option<usize> {
-        first_output_marker_line_for_conflict(
-            &self.conflict_resolver.resolved_output_conflict_markers,
+        // Prefer the conflict block's start line so keyboard navigation keeps
+        // the three-way input panes and resolved output aligned to the same anchor.
+        output_line_range_for_conflict_block_in_text(
+            &self.conflict_resolver.marker_segments,
+            output_text,
             conflict_ix,
         )
+        .map(|range| range.start)
         .or_else(|| {
-            output_line_range_for_conflict_block_in_text(
-                &self.conflict_resolver.marker_segments,
-                output_text,
+            first_output_marker_line_for_conflict(
+                &self.conflict_resolver.resolved_output_conflict_markers,
                 conflict_ix,
             )
-            .map(|range| range.start)
         })
     }
 
@@ -337,12 +339,7 @@ impl MainPaneView {
             {
                 let conflict_ix = marker.conflict_ix;
                 self.conflict_resolver.active_conflict = conflict_ix;
-                self.conflict_resolver_scroll_all_views_to_conflict(
-                    conflict_ix,
-                    None,
-                    Some(target),
-                    cx,
-                );
+                self.conflict_resolver_scroll_all_views_to_conflict(conflict_ix, None, None, cx);
             } else {
                 self.conflict_resolver_scroll_resolved_output_to_line(
                     target,
@@ -403,12 +400,7 @@ impl MainPaneView {
             {
                 let conflict_ix = marker.conflict_ix;
                 self.conflict_resolver.active_conflict = conflict_ix;
-                self.conflict_resolver_scroll_all_views_to_conflict(
-                    conflict_ix,
-                    None,
-                    Some(target),
-                    cx,
-                );
+                self.conflict_resolver_scroll_all_views_to_conflict(conflict_ix, None, None, cx);
             } else {
                 self.conflict_resolver_scroll_resolved_output_to_line(
                     target,

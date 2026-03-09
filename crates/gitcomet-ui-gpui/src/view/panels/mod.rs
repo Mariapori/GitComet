@@ -105,6 +105,10 @@ enum ContextMenuAction {
         repo_id: RepoId,
         reference: String,
     },
+    SquashRef {
+        repo_id: RepoId,
+        reference: String,
+    },
     ApplyStash {
         repo_id: RepoId,
         index: usize,

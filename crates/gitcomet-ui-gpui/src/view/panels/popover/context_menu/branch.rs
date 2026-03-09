@@ -85,6 +85,16 @@ pub(super) fn model(
                     reference: name.clone(),
                 }),
             });
+            items.push(ContextMenuItem::Entry {
+                label: "Squash into current".into(),
+                icon: Some("⇉".into()),
+                shortcut: Some("S".into()),
+                disabled: false,
+                action: Box::new(ContextMenuAction::SquashRef {
+                    repo_id,
+                    reference: name.clone(),
+                }),
+            });
         }
         items.push(ContextMenuItem::Entry {
             label: "Delete branch".into(),
@@ -118,6 +128,16 @@ pub(super) fn model(
                 shortcut: Some("M".into()),
                 disabled: false,
                 action: Box::new(ContextMenuAction::MergeRef {
+                    repo_id,
+                    reference: name.clone(),
+                }),
+            });
+            items.push(ContextMenuItem::Entry {
+                label: "Squash into current".into(),
+                icon: Some("⇉".into()),
+                shortcut: Some("S".into()),
+                disabled: false,
+                action: Box::new(ContextMenuAction::SquashRef {
                     repo_id,
                     reference: name.clone(),
                 }),
