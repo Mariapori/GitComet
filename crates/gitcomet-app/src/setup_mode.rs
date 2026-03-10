@@ -1337,26 +1337,15 @@ mod tests {
 
         #[cfg(not(windows))]
         {
-            let config_dir = config_path
-                .parent()
-                .expect("config file has parent")
-                .to_path_buf();
-            let mut dir_perms = fs::metadata(&config_dir)
-                .expect("config dir metadata")
-                .permissions();
-            dir_perms.set_readonly(true);
-            fs::set_permissions(&config_dir, dir_perms).expect("set readonly config dir");
-
+            // Simulate a write-time git config failure in a way that does not
+            // depend on filesystem permissions (root in containers can bypass
+            // readonly directory bits on some CI runners).
+            let lock_path = config_path.with_extension("lock");
+            fs::write(&lock_path, b"lock").expect("create config lock file");
             let unset_result = unset_all_config_values(&scope, "foo.readonly");
+            fs::remove_file(&lock_path).expect("remove config lock file");
 
-            let mut restore_perms = fs::metadata(&config_dir)
-                .expect("config dir metadata for restore")
-                .permissions();
-            restore_perms.set_readonly(false);
-            fs::set_permissions(&config_dir, restore_perms)
-                .expect("restore config dir permissions");
-
-            let unset_err = unset_result.expect_err("readonly config dir should fail to unset");
+            let unset_err = unset_result.expect_err("config lock file should fail to unset");
             assert!(unset_err.contains("--unset-all"));
         }
 

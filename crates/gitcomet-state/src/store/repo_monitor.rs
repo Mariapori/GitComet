@@ -10,7 +10,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -60,6 +60,24 @@ fn send_stop_or_log(tx: &mpsc::Sender<MonitorMsg>, repo_id: RepoId, context: &'s
             format!("repo_id={repo_id:?}; send failed: {error}"),
         );
     }
+}
+
+fn send_watcher_event_or_log(
+    tx: &mpsc::Sender<MonitorMsg>,
+    event: notify::Result<notify::Event>,
+    callback_enabled: &AtomicBool,
+) -> bool {
+    if !callback_enabled.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    send_or_log(
+        tx,
+        MonitorMsg::Event(event),
+        SendFailureKind::RepoMonitorMessage,
+        "repo monitor watcher callback",
+    );
+    true
 }
 
 fn panic_payload_to_string(payload: Box<dyn Any + Send + 'static>) -> String {
@@ -611,15 +629,16 @@ fn repo_monitor_thread(
     let workdir = super::canonicalize_path(workdir);
     let git_dir = resolve_git_dir(&workdir);
     let mut gitignore = GitignoreRules::load(&workdir, git_dir.as_deref());
+    let callback_enabled = Arc::new(AtomicBool::new(true));
 
     let watcher = notify::recommended_watcher({
         let monitor_tx = monitor_tx.clone();
+        let callback_enabled = Arc::clone(&callback_enabled);
         move |res| {
-            send_or_log(
+            send_watcher_event_or_log(
                 &monitor_tx,
-                MonitorMsg::Event(res),
-                SendFailureKind::RepoMonitorMessage,
-                "repo monitor watcher callback",
+                res,
+                callback_enabled.as_ref(),
             );
         }
     });
@@ -643,6 +662,7 @@ fn repo_monitor_thread(
         .watch(&workdir, RecursiveMode::Recursive)
         .or_else(|_| watcher.watch(&workdir, RecursiveMode::NonRecursive))
     {
+        callback_enabled.store(false, Ordering::Relaxed);
         record_monitor_failure(
             MonitorFailureKind::Start,
             "repo_monitor_thread watch workdir",
@@ -705,7 +725,10 @@ fn repo_monitor_thread(
         let timeout = debouncer.next_timeout(now).unwrap_or(idle_tick);
 
         match monitor_rx.recv_timeout(timeout) {
-            Ok(MonitorMsg::Stop) => break,
+            Ok(MonitorMsg::Stop) => {
+                callback_enabled.store(false, Ordering::Relaxed);
+                break;
+            }
             Ok(MonitorMsg::Event(Ok(event))) => {
                 if let Some(change) =
                     classify_repo_event(&workdir, git_dir.as_deref(), &mut gitignore, &event)
@@ -726,9 +749,13 @@ fn repo_monitor_thread(
                 let now = Instant::now();
                 flush_if_active(debouncer.take_if_due(now));
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                callback_enabled.store(false, Ordering::Relaxed);
+                break;
+            }
         }
     }
+    callback_enabled.store(false, Ordering::Relaxed);
 }
 
 fn resolve_git_dir(workdir: &Path) -> Option<PathBuf> {
@@ -925,6 +952,7 @@ mod tests {
     use notify::EventKind;
     use notify::event::{AccessKind, AccessMode, CreateKind, RemoveKind};
     use std::process::Command;
+    use std::sync::{atomic::AtomicBool, mpsc};
     use std::time::SystemTime;
 
     #[cfg(windows)]
@@ -1486,5 +1514,49 @@ mod tests {
             !rules.cache.contains_key(&key),
             "expired cache entry should be removed"
         );
+    }
+
+    #[test]
+    fn watcher_callback_send_is_skipped_when_shutdown_gate_is_closed() {
+        let (tx, rx) = mpsc::channel::<MonitorMsg>();
+        drop(rx);
+        let callback_enabled = AtomicBool::new(false);
+        let did_send = send_watcher_event_or_log(
+            &tx,
+            Ok(notify::Event {
+                kind: EventKind::Any,
+                paths: vec![],
+                attrs: Default::default(),
+            }),
+            &callback_enabled,
+        );
+        assert!(!did_send, "callback gate should suppress watcher sends");
+    }
+
+    #[test]
+    fn watcher_callback_send_records_failure_when_gate_is_open() {
+        let before = super::super::send_diagnostics::send_failure_count(
+            super::super::send_diagnostics::SendFailureKind::RepoMonitorMessage,
+        );
+
+        let (tx, rx) = mpsc::channel::<MonitorMsg>();
+        drop(rx);
+        let callback_enabled = AtomicBool::new(true);
+
+        let did_send = send_watcher_event_or_log(
+            &tx,
+            Ok(notify::Event {
+                kind: EventKind::Any,
+                paths: vec![],
+                attrs: Default::default(),
+            }),
+            &callback_enabled,
+        );
+        assert!(did_send, "callback should attempt sends while monitor is active");
+
+        let after = super::super::send_diagnostics::send_failure_count(
+            super::super::send_diagnostics::SendFailureKind::RepoMonitorMessage,
+        );
+        assert!(after >= before + 1);
     }
 }
