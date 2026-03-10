@@ -585,7 +585,7 @@ fn commit_details_metadata_fields_are_selectable(cx: &mut gpui::TestAppContext) 
 }
 
 #[gpui::test]
-fn switching_active_repo_clears_commit_message_input(cx: &mut gpui::TestAppContext) {
+fn switching_active_repo_restores_commit_message_draft_per_repo(cx: &mut gpui::TestAppContext) {
     let (store, events) = AppStore::new(Arc::new(TestBackend));
     let (view, cx) = cx.add_window_view(|window, cx| {
         super::super::GitCometView::new(store, events, None, window, cx)
@@ -647,6 +647,47 @@ fn switching_active_repo_clears_commit_message_input(cx: &mut gpui::TestAppConte
         let details_pane = view.read(app).details_pane.clone();
         let pane = details_pane.read(app);
         assert_eq!(pane.commit_message_input.read(app).text(), "");
+    });
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            this.details_pane.update(cx, |pane, cx| {
+                pane.commit_message_input.update(cx, |input, cx| {
+                    input.set_text("repo-b draft".to_string(), cx)
+                });
+                cx.notify();
+            });
+        });
+    });
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let next_state = make_state(repo_a);
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+        });
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        assert_eq!(pane.commit_message_input.read(app).text(), "draft message");
+    });
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let next_state = make_state(repo_b);
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+        });
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        assert_eq!(pane.commit_message_input.read(app).text(), "repo-b draft");
     });
 }
 

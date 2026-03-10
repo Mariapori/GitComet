@@ -24,6 +24,7 @@ pub(in super::super) struct DetailsPaneView {
     pub(in super::super) commit_details_sha_input: Entity<components::TextInput>,
     pub(in super::super) commit_details_date_input: Entity<components::TextInput>,
     pub(in super::super) commit_details_parent_input: Entity<components::TextInput>,
+    pub(in super::super) commit_message_drafts: HashMap<RepoId, SharedString>,
     pub(in super::super) commit_message_user_edited: bool,
     pub(in super::super) commit_message_last_text: SharedString,
     pub(in super::super) commit_message_programmatic_change: bool,
@@ -186,6 +187,7 @@ impl DetailsPaneView {
             commit_details_sha_input,
             commit_details_date_input,
             commit_details_parent_input,
+            commit_message_drafts: HashMap::default(),
             commit_message_user_edited: false,
             commit_message_last_text: SharedString::default(),
             commit_message_programmatic_change: false,
@@ -269,6 +271,8 @@ impl DetailsPaneView {
         });
 
         self.state = next;
+        self.commit_message_drafts
+            .retain(|repo_id, _| self.state.repos.iter().any(|repo| repo.id == *repo_id));
 
         let repos = &self.state.repos;
         let last_status = &mut self.status_multi_selection_last_status;
@@ -304,7 +308,19 @@ impl DetailsPaneView {
             true
         });
 
-        if prev_active_repo_id != next_repo_id {
+        let switched_repo = prev_active_repo_id != next_repo_id;
+        let mut restored_commit_message: Option<SharedString> = None;
+        if switched_repo {
+            if let Some(prev_repo_id) = prev_active_repo_id {
+                let current: SharedString =
+                    self.commit_message_input.read(cx).text().to_string().into();
+                if current.is_empty() {
+                    self.commit_message_drafts.remove(&prev_repo_id);
+                } else {
+                    self.commit_message_drafts.insert(prev_repo_id, current);
+                }
+            }
+
             self.unstaged_scroll
                 .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
             self.staged_scroll
@@ -314,11 +330,15 @@ impl DetailsPaneView {
             self.commit_scroll.set_offset(point(px(0.0), px(0.0)));
             self.commit_files_scroll
                 .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
+            let restore = next_repo_id
+                .and_then(|repo_id| self.commit_message_drafts.get(&repo_id).cloned())
+                .unwrap_or_default();
+            restored_commit_message = Some(restore.clone());
             self.commit_message_user_edited = false;
             self.commit_message_programmatic_change = true;
             self.commit_message_input
-                .update(cx, |input, cx| input.set_text(String::new(), cx));
-            self.commit_message_last_text = SharedString::default();
+                .update(cx, |input, cx| input.set_text(restore.to_string(), cx));
+            self.commit_message_last_text = restore;
         } else if prev_selected_commit != next_selected_commit {
             self.commit_scroll.set_offset(point(px(0.0), px(0.0)));
             self.commit_files_scroll
@@ -331,7 +351,19 @@ impl DetailsPaneView {
             }
             _ => next_merge_message.is_some(),
         };
-        if merge_started && let Some(message) = next_merge_message {
+        let restored_is_empty = restored_commit_message
+            .as_ref()
+            .map(|message| message.trim().is_empty())
+            .unwrap_or(true);
+        let apply_merge_message = if switched_repo {
+            restored_is_empty
+        } else {
+            true
+        };
+        if merge_started
+            && apply_merge_message
+            && let Some(message) = next_merge_message
+        {
             self.commit_message_user_edited = false;
             self.commit_message_programmatic_change = true;
             self.commit_message_last_text = message.clone().into();
