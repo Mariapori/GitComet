@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 gitcomet-core = { workspace = true }
-globset = { workspace = true }
 notify = { workspace = true }
 smol = { workspace = true }
 serde = { workspace = true }

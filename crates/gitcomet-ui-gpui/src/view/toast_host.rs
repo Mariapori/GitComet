@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct ToastHost {
     theme: AppTheme,
     tooltip_host: WeakEntity<TooltipHost>,
+    root_view: WeakEntity<GitCometView>,
 
     toasts: Vec<ToastState>,
     clone_progress_toast_id: Option<u64>,
@@ -23,15 +24,30 @@ fn strip_code_message_indentation(message: &str) -> String {
 }
 
 impl ToastHost {
-    pub(super) fn new(theme: AppTheme, tooltip_host: WeakEntity<TooltipHost>) -> Self {
+    pub(super) fn new(
+        theme: AppTheme,
+        tooltip_host: WeakEntity<TooltipHost>,
+        root_view: WeakEntity<GitCometView>,
+    ) -> Self {
         Self {
             theme,
             tooltip_host,
+            root_view,
             toasts: Vec::new(),
             clone_progress_toast_id: None,
             clone_progress_last_seq: 0,
             clone_progress_dest: None,
         }
+    }
+
+    fn route_error_to_banner(&mut self, message: String, cx: &mut gpui::Context<Self>) -> bool {
+        let root_view = self.root_view.clone();
+        cx.defer(move |cx| {
+            let _ = root_view.update(cx, |root, cx| {
+                root.push_toast(components::ToastKind::Error, message, cx);
+            });
+        });
+        true
     }
 
     pub(super) fn set_theme(&mut self, theme: AppTheme, cx: &mut gpui::Context<Self>) {
@@ -45,6 +61,11 @@ impl ToastHost {
         message: String,
         cx: &mut gpui::Context<Self>,
     ) {
+        if matches!(kind, components::ToastKind::Error)
+            && self.route_error_to_banner(message.clone(), cx)
+        {
+            return;
+        }
         let ttl = match kind {
             components::ToastKind::Error => Duration::from_secs(15),
             components::ToastKind::Warning => Duration::from_secs(10),
@@ -62,6 +83,11 @@ impl ToastHost {
         link_label: String,
         cx: &mut gpui::Context<Self>,
     ) {
+        if matches!(kind, components::ToastKind::Error)
+            && self.route_error_to_banner(message.clone(), cx)
+        {
+            return;
+        }
         let ttl = match kind {
             components::ToastKind::Error => Duration::from_secs(15),
             components::ToastKind::Warning => Duration::from_secs(10),

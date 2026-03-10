@@ -64,7 +64,6 @@ pub(in super::super) struct PopoverHost {
     _stash_message_input_subscription: gpui::Subscription,
     notify_fingerprint: u64,
     root_view: WeakEntity<GitCometView>,
-    toast_host: WeakEntity<ToastHost>,
     main_pane: Entity<MainPaneView>,
     details_pane: Entity<DetailsPaneView>,
 
@@ -131,7 +130,6 @@ impl PopoverHost {
         timezone: Timezone,
         show_timezone: bool,
         root_view: WeakEntity<GitCometView>,
-        toast_host: WeakEntity<ToastHost>,
         main_pane: Entity<MainPaneView>,
         details_pane: Entity<DetailsPaneView>,
         window: &mut Window,
@@ -377,7 +375,6 @@ impl PopoverHost {
             _stash_message_input_subscription: stash_message_input_subscription,
             notify_fingerprint: 0,
             root_view,
-            toast_host,
             main_pane,
             details_pane,
             popover: None,
@@ -901,9 +898,9 @@ impl PopoverHost {
         message: String,
         cx: &mut gpui::Context<Self>,
     ) {
-        let _ = self
-            .toast_host
-            .update(cx, |host, cx| host.push_toast(kind, message, cx));
+        let _ = self.root_view.update(cx, |root, cx| {
+            root.push_toast(kind, message, cx);
+        });
     }
 
     fn open_external_url(&mut self, url: &str) -> Result<(), std::io::Error> {

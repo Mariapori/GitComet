@@ -274,6 +274,39 @@ fn clone_finished_auth_error_sets_clone_retry_prompt() {
 }
 
 #[test]
+fn clone_finished_ssh_publickey_error_sets_passphrase_prompt() {
+    let mut repos: HashMap<RepoId, Arc<dyn GitRepository>> = HashMap::default();
+    let id_alloc = AtomicU64::new(1);
+    let mut state = AppState::default();
+    let url = "git@github.com:private/repo.git".to_string();
+    let dest = PathBuf::from("/tmp/private-repo");
+
+    reduce(
+        &mut repos,
+        &id_alloc,
+        &mut state,
+        Msg::Internal(crate::msg::InternalMsg::CloneRepoFinished {
+            url: url.clone(),
+            dest: dest.clone(),
+            result: Err(auth_error(
+                "git clone failed: git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+            )),
+        }),
+    );
+
+    let prompt = state.auth_prompt.expect("expected auth prompt");
+    assert_eq!(prompt.kind, AuthPromptKind::Passphrase);
+    assert_eq!(
+        prompt.operation,
+        AuthRetryOperation::Clone {
+            url,
+            dest: dest.clone(),
+        }
+    );
+    assert!(prompt.reason.contains("Permission denied (publickey)"));
+}
+
+#[test]
 fn submit_auth_prompt_replays_repo_command_and_stages_trimmed_credentials() {
     let _lock = super::staged_auth_test_lock();
     clear_staged_git_auth();

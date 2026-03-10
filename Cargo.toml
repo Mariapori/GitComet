@@ -39,13 +39,12 @@ gitcomet-ui-gpui = { path = "crates/gitcomet-ui-gpui" }
 # External crates
 clap = { version = "4", features = ["derive"] }
 criterion = "0.8"
-gix = "0.80"
-globset = "0.4"
-gpui = "0.2.2"
+gix = { version = "0.80", default-features = false, features = ["max-performance-safe", "comfort", "basic", "auto-chain-error", "status"] }
+gpui = { version = "0.2.2" }
 mimalloc = { version = "0.1", features = ["v3"] }
 notify = "8"
 regex = "1"
-resvg = "0.47.0"
+resvg = { version = "0.47.0", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 rustc-hash = "2.1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }

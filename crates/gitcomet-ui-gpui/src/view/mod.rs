@@ -332,7 +332,8 @@ impl GitCometView {
 
         let title_bar = cx.new(|_cx| TitleBarView::new(initial_theme, weak_view.clone()));
         let tooltip_host = cx.new(|_cx| TooltipHost::new(initial_theme));
-        let toast_host = cx.new(|_cx| ToastHost::new(initial_theme, tooltip_host.downgrade()));
+        let toast_host = cx
+            .new(|_cx| ToastHost::new(initial_theme, tooltip_host.downgrade(), weak_view.clone()));
         let repo_tabs_bar = cx.new(|cx| {
             RepoTabsBarView::new(
                 Arc::clone(&store),
@@ -405,7 +406,6 @@ impl GitCometView {
                 timezone,
                 show_timezone,
                 weak_view.clone(),
-                toast_host.downgrade(),
                 main_pane.clone(),
                 details_pane.clone(),
                 window,
@@ -486,7 +486,7 @@ impl GitCometView {
         });
 
         let auth_prompt_secret_input = cx.new(|cx| {
-            components::TextInput::new(
+            let mut input = components::TextInput::new(
                 components::TextInputOptions {
                     placeholder: "Password / passphrase".into(),
                     multiline: false,
@@ -496,7 +496,9 @@ impl GitCometView {
                 },
                 window,
                 cx,
-            )
+            );
+            input.set_masked(true, cx);
+            input
         });
 
         let mut view = Self {
@@ -543,6 +545,7 @@ impl GitCometView {
             pending_force_remove_worktree_prompt: None,
             startup_crash_report,
             error_banner_input,
+            transient_error_banner: None,
             auth_prompt_username_input,
             auth_prompt_secret_input,
             auth_prompt_key: None,
@@ -750,12 +753,80 @@ impl GitCometView {
         rows
     }
 
+    fn set_transient_error_banner(&mut self, message: String, cx: &mut gpui::Context<Self>) {
+        if message.trim().is_empty() {
+            return;
+        }
+
+        if self
+            .active_repo()
+            .and_then(|repo| repo.last_error.as_deref())
+            == Some(message.as_str())
+        {
+            return;
+        }
+
+        if self
+            .transient_error_banner
+            .as_ref()
+            .is_some_and(|banner| banner.as_ref() == message.as_str())
+        {
+            return;
+        }
+
+        self.transient_error_banner = Some(message.into());
+        cx.notify();
+    }
+
+    fn split_error_banner_message(err_text: &str) -> (Option<SharedString>, SharedString) {
+        let lines: Vec<&str> = err_text.lines().collect();
+        let Some(cmd_start) = lines.iter().position(|line| line.starts_with("    git ")) else {
+            return (None, err_text.to_string().into());
+        };
+
+        let mut cmd_end = cmd_start;
+        while cmd_end < lines.len() && lines[cmd_end].starts_with("    ") {
+            cmd_end += 1;
+        }
+
+        let command = lines[cmd_start..cmd_end]
+            .iter()
+            .map(|line| line.strip_prefix("    ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut body_lines: Vec<String> = Vec::with_capacity(lines.len());
+        for line in &lines[..cmd_start] {
+            body_lines.push((*line).to_string());
+        }
+        for line in &lines[cmd_end..] {
+            body_lines.push(line.strip_prefix("    ").unwrap_or(line).to_string());
+        }
+
+        let mut collapsed: Vec<String> = Vec::with_capacity(body_lines.len());
+        let mut prev_blank = false;
+        for line in body_lines {
+            let blank = line.trim().is_empty();
+            if blank && prev_blank {
+                continue;
+            }
+            collapsed.push(line);
+            prev_blank = blank;
+        }
+
+        (Some(command.into()), collapsed.join("\n").into())
+    }
+
     fn push_toast(
         &mut self,
         kind: components::ToastKind,
         message: String,
         cx: &mut gpui::Context<Self>,
     ) {
+        if matches!(kind, components::ToastKind::Error) {
+            self.set_transient_error_banner(message, cx);
+            return;
+        }
         self.toast_host
             .update(cx, |host, cx| host.push_toast(kind, message, cx));
     }
@@ -769,6 +840,10 @@ impl GitCometView {
         link_label: String,
         cx: &mut gpui::Context<Self>,
     ) {
+        if matches!(kind, components::ToastKind::Error) {
+            self.set_transient_error_banner(message, cx);
+            return;
+        }
         self.toast_host.update(cx, |host, cx| {
             host.push_toast_with_link(kind, message, link_url, link_label, cx)
         });
@@ -1137,52 +1212,21 @@ impl Render for GitCometView {
             self.auth_prompt_key = None;
         }
 
-        if self.state.auth_prompt.is_none()
-            && let Some(repo_id) = self.active_repo_id()
-            && let Some(repo) = self.active_repo()
-            && let Some(err) = repo.last_error.as_ref()
-        {
-            let err_text: &str = err.as_ref();
-            let (error_command, display_error): (Option<SharedString>, SharedString) = (|| {
-                let lines: Vec<&str> = err_text.lines().collect();
-                let Some(cmd_start) = lines.iter().position(|line| line.starts_with("    git "))
-                else {
-                    return (None, err.clone().into());
-                };
-
-                let mut cmd_end = cmd_start;
-                while cmd_end < lines.len() && lines[cmd_end].starts_with("    ") {
-                    cmd_end += 1;
-                }
-
-                let command = lines[cmd_start..cmd_end]
-                    .iter()
-                    .map(|line| line.strip_prefix("    ").unwrap_or(line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let mut body_lines: Vec<String> = Vec::with_capacity(lines.len());
-                for line in &lines[..cmd_start] {
-                    body_lines.push((*line).to_string());
-                }
-                for line in &lines[cmd_end..] {
-                    body_lines.push(line.strip_prefix("    ").unwrap_or(line).to_string());
-                }
-
-                let mut collapsed: Vec<String> = Vec::with_capacity(body_lines.len());
-                let mut prev_blank = false;
-                for line in body_lines {
-                    let blank = line.trim().is_empty();
-                    if blank && prev_blank {
-                        continue;
-                    }
-                    collapsed.push(line);
-                    prev_blank = blank;
-                }
-
-                (Some(command.into()), collapsed.join("\n").into())
-            })(
-            );
+        let repo_error = self
+            .active_repo_id()
+            .and_then(|repo_id| {
+                self.active_repo()
+                    .and_then(|repo| repo.last_error.as_ref().map(|err| (repo_id, err.clone())))
+            })
+            .map(|(repo_id, err)| (Some(repo_id), err.into()));
+        let banner_error = self
+            .transient_error_banner
+            .clone()
+            .map(|err| (None, err))
+            .or(repo_error);
+        if let Some((dismiss_repo_id, err_text)) = banner_error {
+            let (error_command, display_error) =
+                Self::split_error_banner_message(err_text.as_ref());
             self.error_banner_input.update(cx, |input, cx| {
                 input.set_theme(theme, cx);
                 input.set_text(display_error.clone(), cx);
@@ -1197,7 +1241,14 @@ impl Render for GitCometView {
                 ))
                 .style(components::ButtonStyle::Transparent)
                 .on_click(theme, cx, move |this, _e, _w, cx| {
-                    this.store.dispatch(Msg::DismissRepoError { repo_id });
+                    if this.transient_error_banner.take().is_some() {
+                        cx.notify();
+                        return;
+                    }
+
+                    if let Some(repo_id) = dismiss_repo_id {
+                        this.store.dispatch(Msg::DismissRepoError { repo_id });
+                    }
                     cx.notify();
                 });
 

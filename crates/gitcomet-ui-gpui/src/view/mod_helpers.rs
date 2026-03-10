@@ -992,6 +992,7 @@ pub struct GitCometView {
     pub(super) startup_crash_report: Option<StartupCrashReport>,
 
     pub(super) error_banner_input: Entity<components::TextInput>,
+    pub(super) transient_error_banner: Option<SharedString>,
     pub(super) auth_prompt_username_input: Entity<components::TextInput>,
     pub(super) auth_prompt_secret_input: Entity<components::TextInput>,
     pub(super) auth_prompt_key: Option<String>,

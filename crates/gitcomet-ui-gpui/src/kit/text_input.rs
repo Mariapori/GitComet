@@ -2226,10 +2226,14 @@ impl Element for TextElement {
 
         self.input.update(cx, |input, cx| {
             let prev_height_rows = if input.multiline && input.soft_wrap {
-                input.wrap_cache.map(|cache| cache.rows).or(input.last_wrap_rows)
+                input
+                    .wrap_cache
+                    .map(|cache| cache.rows)
+                    .or(input.last_wrap_rows)
             } else {
                 None
             };
+            let had_pending_cursor_autoscroll = input.pending_cursor_autoscroll;
             input.last_layout = prepaint.layout.take();
             input.last_line_starts = prepaint.line_starts.clone();
             input.last_bounds = Some(bounds);
@@ -2243,15 +2247,23 @@ impl Element for TextElement {
                 input.last_wrap_rows = None;
             }
             input.scroll_x = prepaint.scroll_x;
-            if input.pending_cursor_autoscroll {
+            if had_pending_cursor_autoscroll {
                 input.ensure_cursor_visible_in_vertical_scroll(cx);
             }
             let next_height_rows = if input.multiline && input.soft_wrap {
-                input.wrap_cache.map(|cache| cache.rows).or(input.last_wrap_rows)
+                input
+                    .wrap_cache
+                    .map(|cache| cache.rows)
+                    .or(input.last_wrap_rows)
             } else {
                 None
             };
             if prev_height_rows != next_height_rows {
+                // Wrapped height changes land one frame later in the parent scroll container.
+                // Keep one follow-up pass so Enter-at-EOF remains pinned to the true bottom.
+                if had_pending_cursor_autoscroll && input.cursor_offset() == input.content.len() {
+                    input.pending_cursor_autoscroll = true;
+                }
                 cx.notify();
             }
         });

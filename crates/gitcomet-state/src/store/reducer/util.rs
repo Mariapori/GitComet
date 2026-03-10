@@ -690,7 +690,9 @@ pub(super) fn detect_auth_prompt_kind_from_message(message: &str) -> Option<Auth
         || lower.contains("read_passphrase")
         || lower.contains("passphrase for key")
         || (lower.contains("passphrase") && lower.contains("terminal prompts disabled"));
-    if passphrase {
+    let ssh_publickey = lower.contains("permission denied (publickey")
+        || (lower.contains("could not read from remote repository") && lower.contains("publickey"));
+    if passphrase || ssh_publickey {
         return Some(AuthPromptKind::Passphrase);
     }
 
@@ -1439,6 +1441,12 @@ mod tests {
         assert_eq!(
             detect_auth_prompt_kind_from_message(
                 "git push failed: Enter passphrase for key '/home/user/.ssh/id_ed25519': terminal prompts disabled"
+            ),
+            Some(crate::model::AuthPromptKind::Passphrase)
+        );
+        assert_eq!(
+            detect_auth_prompt_kind_from_message(
+                "git clone --progress git@github.com:org/repo.git C:\\git\\repo failed: git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."
             ),
             Some(crate::model::AuthPromptKind::Passphrase)
         );
