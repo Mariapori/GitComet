@@ -161,6 +161,7 @@ pub struct TextInput {
     read_only: bool,
     chromeless: bool,
     soft_wrap: bool,
+    masked: bool,
     line_ending: &'static str,
     style: TextInputStyle,
     highlights: Arc<Vec<(Range<usize>, gpui::HighlightStyle)>>,
@@ -176,6 +177,7 @@ pub struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     last_line_height: Pixels,
     wrap_cache: Option<WrapCache>,
+    last_wrap_rows: Option<usize>,
     is_selecting: bool,
     suppress_right_click: bool,
     context_menu: Option<TextInputContextMenuState>,
@@ -201,6 +203,7 @@ impl TextInput {
             read_only: options.read_only,
             chromeless: options.chromeless,
             soft_wrap: options.soft_wrap,
+            masked: false,
             line_ending: if cfg!(windows) { "\r\n" } else { "\n" },
             style: TextInputStyle::from_theme(AppTheme::zed_ayu_dark()),
             highlights: Arc::new(Vec::new()),
@@ -214,6 +217,7 @@ impl TextInput {
             last_bounds: None,
             last_line_height: px(0.0),
             wrap_cache: None,
+            last_wrap_rows: None,
             is_selecting: false,
             suppress_right_click: false,
             context_menu: None,
@@ -237,6 +241,7 @@ impl TextInput {
             read_only: options.read_only,
             chromeless: options.chromeless,
             soft_wrap: options.soft_wrap,
+            masked: false,
             line_ending: if cfg!(windows) { "\r\n" } else { "\n" },
             style: TextInputStyle::from_theme(AppTheme::zed_ayu_dark()),
             highlights: Arc::new(Vec::new()),
@@ -250,6 +255,7 @@ impl TextInput {
             last_bounds: None,
             last_line_height: px(0.0),
             wrap_cache: None,
+            last_wrap_rows: None,
             is_selecting: false,
             suppress_right_click: false,
             context_menu: None,
@@ -363,6 +369,17 @@ impl TextInput {
         }
         self.soft_wrap = soft_wrap;
         self.wrap_cache = None;
+        if !soft_wrap {
+            self.last_wrap_rows = None;
+        }
+        cx.notify();
+    }
+
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        if self.masked == masked {
+            return;
+        }
+        self.masked = masked;
         cx.notify();
     }
 
@@ -944,6 +961,7 @@ impl TextInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.clamp_to_char_boundary(offset);
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.vertical_motion_x = None;
@@ -952,6 +970,7 @@ impl TextInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.clamp_to_char_boundary(offset);
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -964,6 +983,14 @@ impl TextInput {
         self.vertical_motion_x = None;
         self.cursor_blink_visible = true;
         cx.notify();
+    }
+
+    fn clamp_to_char_boundary(&self, offset: usize) -> usize {
+        let mut offset = offset.min(self.content.len());
+        while offset > 0 && !self.content.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -1849,6 +1876,12 @@ impl Element for TextElement {
                 && cache.width > px(0.0)
             {
                 style.size.height = (line_height * cache.rows as f32).into();
+            } else if input.soft_wrap
+                && let Some(rows) = input.last_wrap_rows
+                && rows > 0
+            {
+                // Preserve the previous wrapped row count until the next wrap pass finishes.
+                style.size.height = (line_height * rows as f32).into();
             } else {
                 style.size.height = (line_height * line_count).into();
             }
@@ -1878,6 +1911,11 @@ impl Element for TextElement {
 
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), style_colors.placeholder)
+        } else if input.masked {
+            (
+                mask_text_for_display(content.as_ref()).into(),
+                style_colors.text,
+            )
         } else {
             (content, style_colors.text)
         };
@@ -2187,17 +2225,33 @@ impl Element for TextElement {
         }
 
         self.input.update(cx, |input, cx| {
-            let wrap_cache_changed = input.wrap_cache != prepaint.wrap_cache;
+            let prev_height_rows = if input.multiline && input.soft_wrap {
+                input.wrap_cache.map(|cache| cache.rows).or(input.last_wrap_rows)
+            } else {
+                None
+            };
             input.last_layout = prepaint.layout.take();
             input.last_line_starts = prepaint.line_starts.clone();
             input.last_bounds = Some(bounds);
             input.last_line_height = line_height;
             input.wrap_cache = prepaint.wrap_cache;
+            if input.multiline && input.soft_wrap {
+                if let Some(cache) = input.wrap_cache {
+                    input.last_wrap_rows = Some(cache.rows);
+                }
+            } else {
+                input.last_wrap_rows = None;
+            }
             input.scroll_x = prepaint.scroll_x;
             if input.pending_cursor_autoscroll {
                 input.ensure_cursor_visible_in_vertical_scroll(cx);
             }
-            if wrap_cache_changed {
+            let next_height_rows = if input.multiline && input.soft_wrap {
+                input.wrap_cache.map(|cache| cache.rows).or(input.last_wrap_rows)
+            } else {
+                None
+            };
+            if prev_height_rows != next_height_rows {
                 cx.notify();
             }
         });
@@ -2485,6 +2539,18 @@ fn split_lines_with_starts(text: &SharedString) -> (Vec<usize>, Vec<SharedString
     (starts, lines)
 }
 
+fn mask_text_for_display(text: &str) -> String {
+    let mut masked = String::with_capacity(text.len());
+    for &byte in text.as_bytes() {
+        match byte {
+            b'\n' => masked.push('\n'),
+            b'\r' => masked.push('\r'),
+            _ => masked.push('*'),
+        }
+    }
+    masked
+}
+
 fn line_for_offset(starts: &[usize], lines: &[ShapedLine], offset: usize) -> (usize, usize) {
     let mut ix = starts.partition_point(|&s| s <= offset);
     if ix == 0 {
@@ -2494,4 +2560,25 @@ fn line_for_offset(starts: &[usize], lines: &[ShapedLine], offset: usize) -> (us
     let start = starts.get(line_ix).copied().unwrap_or(0);
     let local = offset.saturating_sub(start).min(lines[line_ix].len());
     (line_ix, local)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_text_for_display;
+
+    #[test]
+    fn mask_text_preserves_length_and_newlines() {
+        let input = "a\nb\r\nc";
+        let masked = mask_text_for_display(input);
+        assert_eq!(masked.len(), input.len());
+        assert_eq!(masked, "*\n*\r\n*");
+    }
+
+    #[test]
+    fn mask_text_removes_original_characters() {
+        let input = "secret-passphrase";
+        let masked = mask_text_for_display(input);
+        assert_ne!(masked, input);
+        assert!(masked.chars().all(|ch| ch == '*'));
+    }
 }
