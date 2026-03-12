@@ -12,8 +12,6 @@ const REPLACEMENT_PAIR_BASE_COST: u32 = 80;
 const REPLACEMENT_PAIR_SCALE_COST: u32 = 120;
 const REPLACEMENT_DISSIMILAR_PENALTY_COST: u32 = 40;
 const REPLACEMENT_DISSIMILAR_PENALTY_MIN_LEN: usize = 4;
-const MYERS_MAX_LINES_PER_SIDE_DEFAULT: usize = 5_000;
-const MYERS_MAX_LINES_PER_SIDE_ENV: &str = "GITCOMET_MYERS_MAX_LINES_PER_SIDE";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileDiffEofNewline {
@@ -175,7 +173,6 @@ enum ReplacementAlignStep {
 pub fn side_by_side_rows(old: &str, new: &str) -> Vec<FileDiffRow> {
     let old_lines = split_lines(old);
     let new_lines = split_lines(new);
-
     let edits = myers_edits(&old_lines, &new_lines);
 
     let mut raw = Vec::with_capacity(edits.len());
@@ -921,25 +918,7 @@ fn myers_fallback_edits<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Edit<'a>> {
     edits
 }
 
-fn should_use_myers_size_fallback(
-    old_len: usize,
-    new_len: usize,
-    max_lines_per_side: usize,
-) -> bool {
-    old_len >= max_lines_per_side || new_len >= max_lines_per_side
-}
-
 pub(crate) fn myers_edits<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Edit<'a>> {
-    // Configurable guardrail for the O((n+m)^2) trace storage in Myers.
-    let myers_max_lines_per_side = std::env::var(MYERS_MAX_LINES_PER_SIDE_ENV)
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|&limit| limit > 0)
-        .unwrap_or(MYERS_MAX_LINES_PER_SIDE_DEFAULT);
-    if should_use_myers_size_fallback(old.len(), new.len(), myers_max_lines_per_side) {
-        return myers_fallback_edits(old, new);
-    }
-
     // Guard against overflow: if n + m exceeds isize::MAX, use linear fallback.
     let Some(sum) = old.len().checked_add(new.len()) else {
         return myers_fallback_edits(old, new);
@@ -1468,9 +1447,40 @@ mod tests {
     }
 
     #[test]
-    fn myers_size_fallback_threshold_is_per_side_and_inclusive() {
-        assert!(!should_use_myers_size_fallback(4, 4, 5));
-        assert!(should_use_myers_size_fallback(5, 1, 5));
-        assert!(should_use_myers_size_fallback(1, 5, 5));
+    fn side_by_side_large_files_keep_distant_changes_localized() {
+        let line_count = 6_000;
+        let mut old_lines: Vec<String> =
+            (0..line_count).map(|i| format!("line-{i:05}")).collect();
+        let mut new_lines = old_lines.clone();
+
+        let first_change_ix = 137usize;
+        let second_change_ix = line_count - 201;
+        old_lines[first_change_ix] = "alpha-old".to_string();
+        new_lines[first_change_ix] = "alpha-new".to_string();
+        old_lines[second_change_ix] = "omega-old".to_string();
+        new_lines[second_change_ix] = "omega-new".to_string();
+
+        let old = format!("{}\n", old_lines.join("\n"));
+        let new = format!("{}\n", new_lines.join("\n"));
+        let rows = side_by_side_rows(&old, &new);
+
+        let changed: Vec<&FileDiffRow> = rows
+            .iter()
+            .filter(|row| row.kind != FileDiffRowKind::Context)
+            .collect();
+
+        assert_eq!(
+            changed.len(),
+            2,
+            "large files should not collapse distant edits into one huge changed block"
+        );
+        assert!(
+            changed.iter().all(|row| row.kind == FileDiffRowKind::Modify),
+            "both changes should remain localized modify rows"
+        );
+        assert_eq!(changed[0].old_line, Some((first_change_ix + 1) as u32));
+        assert_eq!(changed[0].new_line, Some((first_change_ix + 1) as u32));
+        assert_eq!(changed[1].old_line, Some((second_change_ix + 1) as u32));
+        assert_eq!(changed[1].new_line, Some((second_change_ix + 1) as u32));
     }
 }
