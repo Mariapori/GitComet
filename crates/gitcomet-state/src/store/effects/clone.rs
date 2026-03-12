@@ -192,7 +192,11 @@ fn create_askpass_script() -> Result<AskPassScript, Error> {
     Ok(AskPassScript { _dir: dir, path })
 }
 
-fn configure_clone_auth_prompt(cmd: &mut Command, auth: &StagedGitAuth, askpass: &AskPassScript) {
+fn configure_clone_auth_prompt(
+    cmd: &mut Command,
+    auth: Option<&StagedGitAuth>,
+    askpass: &AskPassScript,
+) {
     cmd.env("GIT_ASKPASS", &askpass.path);
     cmd.env("SSH_ASKPASS", &askpass.path);
     cmd.env("SSH_ASKPASS_REQUIRE", "force");
@@ -200,17 +204,23 @@ fn configure_clone_auth_prompt(cmd: &mut Command, auth: &StagedGitAuth, askpass:
         cmd.env("DISPLAY", "gitcomet:0");
     }
 
-    let kind = match auth.kind {
-        GitAuthKind::UsernamePassword => GITCOMET_AUTH_KIND_USERNAME_PASSWORD,
-        GitAuthKind::Passphrase => GITCOMET_AUTH_KIND_PASSPHRASE,
-    };
-    cmd.env(GITCOMET_AUTH_KIND_ENV, kind);
-    if let Some(username) = &auth.username {
-        cmd.env(GITCOMET_AUTH_USERNAME_ENV, username);
+    if let Some(auth) = auth {
+        let kind = match auth.kind {
+            GitAuthKind::UsernamePassword => GITCOMET_AUTH_KIND_USERNAME_PASSWORD,
+            GitAuthKind::Passphrase => GITCOMET_AUTH_KIND_PASSPHRASE,
+        };
+        cmd.env(GITCOMET_AUTH_KIND_ENV, kind);
+        if let Some(username) = &auth.username {
+            cmd.env(GITCOMET_AUTH_USERNAME_ENV, username);
+        } else {
+            cmd.env_remove(GITCOMET_AUTH_USERNAME_ENV);
+        }
+        cmd.env(GITCOMET_AUTH_SECRET_ENV, &auth.secret);
     } else {
+        cmd.env_remove(GITCOMET_AUTH_KIND_ENV);
         cmd.env_remove(GITCOMET_AUTH_USERNAME_ENV);
+        cmd.env_remove(GITCOMET_AUTH_SECRET_ENV);
     }
-    cmd.env(GITCOMET_AUTH_SECRET_ENV, &auth.secret);
 }
 
 pub(super) fn schedule_clone_repo(
@@ -244,14 +254,12 @@ pub(super) fn schedule_clone_repo(
             .stdin(Stdio::null())
             .env("GIT_TERMINAL_PROMPT", "0");
 
-        let askpass_script = match take_pending_git_auth()
-            .map(|auth| {
-                let script = create_askpass_script()?;
-                configure_clone_auth_prompt(&mut cmd, &auth, &script);
-                Ok(script)
-            })
-            .transpose()
-        {
+        let askpass_script = match (|| {
+            let auth = take_pending_git_auth();
+            let script = create_askpass_script()?;
+            configure_clone_auth_prompt(&mut cmd, auth.as_ref(), &script);
+            Ok::<AskPassScript, Error>(script)
+        })() {
             Ok(script) => script,
             Err(err) => {
                 send_or_log(

@@ -1,83 +1,119 @@
 use super::GixRepo;
-use crate::util::run_git_capture;
 use gitcomet_core::conflict_session::{ConflictPayload, ConflictSession};
-use gitcomet_core::domain::{DiffArea, DiffTarget, FileConflictKind, FileDiffImage, FileDiffText};
+use gitcomet_core::domain::{
+    Diff, DiffArea, DiffTarget, FileConflictKind, FileDiffImage, FileDiffText,
+};
 use gitcomet_core::error::{Error, ErrorKind};
 use gitcomet_core::services::{ConflictFileStages, Result, decode_utf8_optional};
+use std::io::{BufReader, Read};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str;
 
 impl GixRepo {
-    pub(super) fn diff_unified_impl(&self, target: &DiffTarget) -> Result<String> {
+    fn build_unified_diff_command(&self, target: &DiffTarget) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(&self.spec.workdir)
+            .arg("-c")
+            .arg("color.ui=false")
+            .arg("--no-pager");
+
         match target {
             DiffTarget::WorkingTree { path, area } => {
-                let mut cmd = Command::new("git");
-                cmd.arg("-C")
-                    .arg(&self.spec.workdir)
-                    .arg("-c")
-                    .arg("color.ui=false")
-                    .arg("--no-pager")
-                    .arg("diff")
-                    .arg("--no-ext-diff");
-
+                cmd.arg("diff").arg("--no-ext-diff");
                 if matches!(area, DiffArea::Staged) {
                     cmd.arg("--cached");
                 }
-
                 cmd.arg("--").arg(path);
-
-                let output = cmd
-                    .output()
-                    .map_err(|e| Error::new(ErrorKind::Io(e.kind())))?;
-
-                let ok_exit = output.status.success() || output.status.code() == Some(1);
-                if !ok_exit {
-                    let stderr = str::from_utf8(&output.stderr).unwrap_or("<non-utf8 stderr>");
-                    return Err(Error::new(ErrorKind::Backend(format!(
-                        "git diff failed: {stderr}"
-                    ))));
-                }
-
-                String::from_utf8(output.stdout).map_err(|_| {
-                    Error::new(ErrorKind::Backend(
-                        "git diff produced non-UTF-8 output".to_string(),
-                    ))
-                })
             }
             DiffTarget::Commit { commit_id, path } => {
-                let mut cmd = Command::new("git");
-                cmd.arg("-C")
-                    .arg(&self.spec.workdir)
-                    .arg("-c")
-                    .arg("color.ui=false")
-                    .arg("--no-pager")
-                    .arg("show")
+                cmd.arg("show")
                     .arg("--no-ext-diff")
                     .arg("--pretty=format:")
                     .arg(commit_id.as_ref());
-
                 if let Some(path) = path {
                     cmd.arg("--").arg(path);
                 }
-
-                run_git_capture(cmd, "git show --pretty=format:")
             }
         }
+
+        cmd
+    }
+
+    pub(super) fn diff_unified_impl(&self, target: &DiffTarget) -> Result<String> {
+        let output = self
+            .build_unified_diff_command(target)
+            .output()
+            .map_err(|e| Error::new(ErrorKind::Io(e.kind())))?;
+
+        let ok_exit = output.status.success() || output.status.code() == Some(1);
+        if !ok_exit {
+            let stderr = str::from_utf8(&output.stderr).unwrap_or("<non-utf8 stderr>");
+            return Err(Error::new(ErrorKind::Backend(format!(
+                "git diff failed: {stderr}"
+            ))));
+        }
+
+        String::from_utf8(output.stdout).map_err(|_| {
+            Error::new(ErrorKind::Backend(
+                "git diff produced non-UTF-8 output".to_string(),
+            ))
+        })
+    }
+
+    pub(super) fn diff_parsed_impl(&self, target: &DiffTarget) -> Result<Diff> {
+        let mut cmd = self.build_unified_diff_command(target);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| Error::new(ErrorKind::Io(e.kind())))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            Error::new(ErrorKind::Backend(
+                "git diff did not provide a stdout pipe".to_string(),
+            ))
+        })?;
+        let mut stderr = child.stderr.take().ok_or_else(|| {
+            Error::new(ErrorKind::Backend(
+                "git diff did not provide a stderr pipe".to_string(),
+            ))
+        })?;
+
+        // Drain stderr concurrently so very large stderr output can't block stdout parsing.
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            bytes
+        });
+
+        let diff = Diff::from_unified_reader(target.clone(), BufReader::new(stdout))
+            .map_err(|e| Error::new(ErrorKind::Io(e.kind())))?;
+        let status = child
+            .wait()
+            .map_err(|e| Error::new(ErrorKind::Io(e.kind())))?;
+        let stderr_bytes = stderr_reader.join().unwrap_or_default();
+
+        let ok_exit = status.success() || status.code() == Some(1);
+        if !ok_exit {
+            let stderr = str::from_utf8(&stderr_bytes).unwrap_or("<non-utf8 stderr>");
+            return Err(Error::new(ErrorKind::Backend(format!(
+                "git diff failed: {stderr}"
+            ))));
+        }
+
+        Ok(diff)
     }
 
     pub(super) fn diff_file_text_impl(&self, target: &DiffTarget) -> Result<Option<FileDiffText>> {
         match target {
             DiffTarget::WorkingTree { path, area } => {
-                if matches!(area, DiffArea::Unstaged) {
-                    let full_path = if path.is_absolute() {
-                        path.clone()
-                    } else {
-                        self.spec.workdir.join(path)
-                    };
-                    if std::fs::metadata(&full_path).is_ok_and(|m| m.is_dir()) {
-                        return Ok(None);
-                    }
+                let full_path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    self.spec.workdir.join(path)
+                };
+                if std::fs::metadata(&full_path).is_ok_and(|m| m.is_dir()) {
+                    return Ok(None);
                 }
 
                 let repo = self._repo.to_thread_local();
@@ -166,15 +202,13 @@ impl GixRepo {
     ) -> Result<Option<FileDiffImage>> {
         match target {
             DiffTarget::WorkingTree { path, area } => {
-                if matches!(area, DiffArea::Unstaged) {
-                    let full_path = if path.is_absolute() {
-                        path.clone()
-                    } else {
-                        self.spec.workdir.join(path)
-                    };
-                    if std::fs::metadata(&full_path).is_ok_and(|m| m.is_dir()) {
-                        return Ok(None);
-                    }
+                let full_path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    self.spec.workdir.join(path)
+                };
+                if std::fs::metadata(&full_path).is_ok_and(|m| m.is_dir()) {
+                    return Ok(None);
                 }
 
                 let repo = self._repo.to_thread_local();

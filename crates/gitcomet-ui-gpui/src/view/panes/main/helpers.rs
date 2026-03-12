@@ -1,33 +1,15 @@
 use super::*;
 
-/// Extract unique source lines from two-way diff rows for provenance matching.
-///
-/// Returns (old_lines, new_lines) as `Vec<SharedString>` suitable for `SourceLines`.
-pub(super) fn collect_two_way_source_lines(
-    diff_rows: &[FileDiffRow],
-) -> (Vec<SharedString>, Vec<SharedString>) {
-    let mut old_lines = Vec::with_capacity(diff_rows.len());
-    let mut new_lines = Vec::with_capacity(diff_rows.len());
-    for row in diff_rows {
-        if let Some(ref text) = row.old {
-            old_lines.push(SharedString::from(text.clone()));
-        }
-        if let Some(ref text) = row.new {
-            new_lines.push(SharedString::from(text.clone()));
-        }
-    }
-    (old_lines, new_lines)
-}
-
 pub(super) fn build_resolved_output_syntax_highlights(
     theme: AppTheme,
-    lines: &[String],
+    output_text: &str,
     language: Option<rows::DiffSyntaxLanguage>,
 ) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
     let Some(language) = language else {
         return Vec::new();
     };
-    let syntax_mode = if lines.len() <= CONFLICT_RESOLVED_OUTLINE_AUTO_SYNTAX_MAX_LINES {
+    let line_count = count_newlines(output_text).saturating_add(1);
+    let syntax_mode = if line_count <= CONFLICT_RESOLVED_OUTLINE_AUTO_SYNTAX_MAX_LINES {
         rows::DiffSyntaxMode::Auto
     } else {
         rows::DiffSyntaxMode::HeuristicOnly
@@ -35,7 +17,7 @@ pub(super) fn build_resolved_output_syntax_highlights(
 
     let mut highlights = Vec::new();
     let mut line_offset = 0usize;
-    for (line_ix, line) in lines.iter().enumerate() {
+    for (line_ix, line) in output_text.split('\n').enumerate() {
         for (range, style) in rows::syntax_highlights_for_line(theme, line, language, syntax_mode) {
             highlights.push((
                 (line_offset + range.start)..(line_offset + range.end),
@@ -43,7 +25,7 @@ pub(super) fn build_resolved_output_syntax_highlights(
             ));
         }
         line_offset += line.len();
-        if line_ix + 1 < lines.len() {
+        if line_ix + 1 < line_count {
             line_offset += 1;
         }
     }
@@ -62,6 +44,25 @@ pub(super) fn count_newlines(text: &str) -> usize {
     text.as_bytes().iter().filter(|&&b| b == b'\n').count()
 }
 
+pub(super) fn build_line_starts(text: &str) -> Vec<usize> {
+    let mut line_starts = Vec::with_capacity(count_newlines(text).saturating_add(1));
+    line_starts.push(0usize);
+    for (ix, byte) in text.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            line_starts.push(ix.saturating_add(1));
+        }
+    }
+    line_starts
+}
+
+pub(super) fn line_start_offset_for_index(
+    line_starts: &[usize],
+    text_len: usize,
+    line_ix: usize,
+) -> usize {
+    line_starts.get(line_ix).copied().unwrap_or(text_len)
+}
+
 pub(super) fn source_line_count(text: &str) -> usize {
     if text.is_empty() {
         0
@@ -70,11 +71,157 @@ pub(super) fn source_line_count(text: &str) -> usize {
     }
 }
 
-pub(super) fn output_line_range_for_conflict_block_in_text(
-    segments: &[conflict_resolver::ConflictSegment],
-    output_text: &str,
-    conflict_ix: usize,
+/// Number of logical rows produced by `split('\n')` (always at least 1).
+pub(super) fn split_line_count(text: &str) -> usize {
+    count_newlines(text).saturating_add(1)
+}
+
+/// Byte range of line content at `line_ix` (without trailing newline).
+///
+/// Uses `split('\n')` row semantics, so trailing newline creates a final empty row.
+pub(super) fn line_content_byte_range_for_index(
+    text: &str,
+    line_ix: usize,
 ) -> Option<Range<usize>> {
+    let line_count = split_line_count(text);
+    if line_ix >= line_count {
+        return None;
+    }
+    let line_starts = build_line_starts(text);
+    let text_len = text.len();
+    let start = line_starts.get(line_ix).copied().unwrap_or(text_len);
+    let mut end = line_starts
+        .get(line_ix.saturating_add(1))
+        .copied()
+        .unwrap_or(text_len)
+        .min(text_len);
+    if end > start && text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\n') {
+        end = end.saturating_sub(1);
+    }
+    Some(start..end)
+}
+
+/// Build insertion text for appending one logical line to output.
+pub(super) fn append_line_insertion_text(existing: &str, line: &str) -> String {
+    let needs_leading_newline = !existing.is_empty() && !existing.ends_with('\n');
+    let mut out = String::with_capacity(
+        line.len()
+            .saturating_add(1)
+            .saturating_add(usize::from(needs_leading_newline)),
+    );
+    if needs_leading_newline {
+        out.push('\n');
+    }
+    out.push_str(line);
+    out.push('\n');
+    out
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ResolvedOutlineDelta {
+    pub(super) old_range: Range<usize>,
+    pub(super) new_range: Range<usize>,
+}
+
+pub(super) fn resolved_outline_delta_between_texts(
+    old_text: &str,
+    new_text: &str,
+) -> Option<ResolvedOutlineDelta> {
+    if old_text == new_text {
+        return None;
+    }
+
+    let old = old_text.as_bytes();
+    let new = new_text.as_bytes();
+    let old_len = old.len();
+    let new_len = new.len();
+
+    let mut prefix = 0usize;
+    let prefix_max = old_len.min(new_len);
+    while prefix < prefix_max && old[prefix] == new[prefix] {
+        prefix = prefix.saturating_add(1);
+    }
+    while prefix > 0 && (!old_text.is_char_boundary(prefix) || !new_text.is_char_boundary(prefix)) {
+        prefix = prefix.saturating_sub(1);
+    }
+
+    let mut suffix = 0usize;
+    while suffix < old_len.saturating_sub(prefix)
+        && suffix < new_len.saturating_sub(prefix)
+        && old[old_len.saturating_sub(1 + suffix)] == new[new_len.saturating_sub(1 + suffix)]
+    {
+        suffix = suffix.saturating_add(1);
+    }
+    while suffix > 0
+        && (!old_text.is_char_boundary(old_len.saturating_sub(suffix))
+            || !new_text.is_char_boundary(new_len.saturating_sub(suffix)))
+    {
+        suffix = suffix.saturating_sub(1);
+    }
+
+    Some(ResolvedOutlineDelta {
+        old_range: prefix..old_len.saturating_sub(suffix),
+        new_range: prefix..new_len.saturating_sub(suffix),
+    })
+}
+
+fn line_index_for_byte_offset(line_starts: &[usize], byte_offset: usize) -> usize {
+    if line_starts.is_empty() {
+        return 0;
+    }
+    line_starts
+        .partition_point(|&start| start <= byte_offset)
+        .saturating_sub(1)
+}
+
+pub(super) fn dirty_byte_range_to_line_range(
+    line_starts: &[usize],
+    text_len: usize,
+    dirty_range: Range<usize>,
+) -> Range<usize> {
+    let line_count = line_starts.len().max(1);
+    let start_byte = dirty_range.start.min(text_len);
+    let end_byte = dirty_range.end.min(text_len);
+    let start_line = line_index_for_byte_offset(line_starts, start_byte).min(line_count - 1);
+    let end_line_exclusive = if dirty_range.is_empty() {
+        start_line.saturating_add(1)
+    } else {
+        line_index_for_byte_offset(line_starts, end_byte).saturating_add(1)
+    }
+    .clamp(start_line.saturating_add(1), line_count);
+    start_line..end_line_exclusive
+}
+
+pub(super) fn shifted_line_index(ix: usize, delta: isize) -> usize {
+    if delta >= 0 {
+        ix.saturating_add(delta as usize)
+    } else {
+        ix.saturating_sub((-delta) as usize)
+    }
+}
+
+pub(super) fn remap_line_keyed_cache_for_delta<T>(
+    cache: &mut HashMap<usize, T>,
+    old_range: Range<usize>,
+    new_range: Range<usize>,
+) {
+    let shift = new_range.len() as isize - old_range.len() as isize;
+    let previous = std::mem::take(cache);
+    for (line_ix, value) in previous {
+        if line_ix < old_range.start {
+            cache.insert(line_ix, value);
+            continue;
+        }
+        if line_ix >= old_range.end {
+            cache.insert(shifted_line_index(line_ix, shift), value);
+        }
+    }
+}
+
+pub(super) fn resolved_output_conflict_block_ranges_in_text(
+    marker_segments: &[conflict_resolver::ConflictSegment],
+    output_text: &str,
+) -> Option<Vec<Range<usize>>> {
     fn is_line_boundary(text: &str, byte_ix: usize) -> bool {
         if byte_ix == 0 || byte_ix == text.len() {
             return true;
@@ -84,11 +231,10 @@ pub(super) fn output_line_range_for_conflict_block_in_text(
             .is_some_and(|b| *b == b'\n')
     }
 
+    let mut ranges = Vec::new();
     let mut cursor = 0usize;
     let mut line_offset = 0usize;
-    let mut block_ix = 0usize;
-
-    for seg in segments {
+    for seg in marker_segments {
         match seg {
             conflict_resolver::ConflictSegment::Text(text) => {
                 let tail = output_text.get(cursor..)?;
@@ -113,26 +259,99 @@ pub(super) fn output_line_range_for_conflict_block_in_text(
                 {
                     return None;
                 }
-
-                let content = expected.as_str();
                 let start_line = line_offset;
-                let mut end_line = line_offset.saturating_add(count_newlines(content));
-                if end == output_text.len() && !content.is_empty() {
+                let mut end_line = line_offset.saturating_add(count_newlines(&expected));
+                if end == output_text.len() && !expected.is_empty() {
                     end_line = end_line.saturating_add(1);
                 }
-
-                if block_ix == conflict_ix {
-                    return Some(start_line..end_line);
-                }
-
-                line_offset = line_offset.saturating_add(count_newlines(content));
+                ranges.push(start_line..end_line);
+                line_offset = line_offset.saturating_add(count_newlines(&expected));
                 cursor = end;
-                block_ix = block_ix.saturating_add(1);
             }
         }
     }
 
-    None
+    Some(ranges)
+}
+
+pub(super) fn conflict_marker_ranges_for_block(
+    block: &conflict_resolver::ConflictBlock,
+    line_range: Range<usize>,
+) -> Vec<Range<usize>> {
+    let mut marker_ranges = Vec::new();
+    if !block.resolved
+        && let Some(relative_subranges) = unresolved_decision_ranges_for_block(block)
+            .or_else(|| unresolved_subchunk_conflict_ranges_for_block(block))
+    {
+        for relative in relative_subranges {
+            let start = line_range
+                .start
+                .saturating_add(relative.start)
+                .min(line_range.end);
+            let end = line_range
+                .start
+                .saturating_add(relative.end)
+                .min(line_range.end);
+            marker_ranges.push(start..end);
+        }
+    }
+    if marker_ranges.is_empty() {
+        marker_ranges.push(line_range);
+    }
+    marker_ranges
+}
+
+pub(super) fn write_conflict_markers_for_ranges(
+    markers: &mut [Option<ResolvedOutputConflictMarker>],
+    conflict_ix: usize,
+    unresolved: bool,
+    marker_ranges: &[Range<usize>],
+) {
+    let output_line_count = markers.len();
+    if output_line_count == 0 {
+        return;
+    }
+
+    for marker_range in marker_ranges {
+        if marker_range.start < marker_range.end {
+            let end = marker_range.end.min(output_line_count);
+            for (line_ix, marker_slot) in markers
+                .iter_mut()
+                .enumerate()
+                .take(end)
+                .skip(marker_range.start)
+            {
+                *marker_slot = Some(ResolvedOutputConflictMarker {
+                    conflict_ix,
+                    range_start: marker_range.start,
+                    range_end: marker_range.end,
+                    is_start: line_ix == marker_range.start,
+                    is_end: line_ix + 1 == marker_range.end,
+                    unresolved,
+                });
+            }
+            continue;
+        }
+
+        let anchor = marker_range.start.min(output_line_count.saturating_sub(1));
+        markers[anchor] = Some(ResolvedOutputConflictMarker {
+            conflict_ix,
+            range_start: marker_range.start,
+            range_end: marker_range.end,
+            is_start: true,
+            is_end: true,
+            unresolved,
+        });
+    }
+}
+
+pub(super) fn output_line_range_for_conflict_block_in_text(
+    segments: &[conflict_resolver::ConflictSegment],
+    output_text: &str,
+    conflict_ix: usize,
+) -> Option<Range<usize>> {
+    resolved_output_conflict_block_ranges_in_text(segments, output_text)
+        .and_then(|ranges| ranges.get(conflict_ix).cloned())
 }
 
 pub(super) fn conflict_fragment_text_for_choice(
@@ -338,63 +557,28 @@ pub(super) fn build_resolved_output_conflict_markers(
         return markers;
     }
 
-    let mut conflict_ix = 0usize;
-    for seg in marker_segments {
-        let conflict_resolver::ConflictSegment::Block(block) = seg else {
-            continue;
-        };
-        let unresolved = !block.resolved;
+    let Some(block_ranges) =
+        resolved_output_conflict_block_ranges_in_text(marker_segments, output_text)
+    else {
+        return markers;
+    };
 
-        if let Some(range) =
-            output_line_range_for_conflict_block_in_text(marker_segments, output_text, conflict_ix)
-        {
-            let mut marker_ranges: Vec<Range<usize>> = Vec::new();
-            if unresolved
-                && let Some(relative_subranges) = unresolved_decision_ranges_for_block(block)
-                    .or_else(|| unresolved_subchunk_conflict_ranges_for_block(block))
-            {
-                for relative in relative_subranges {
-                    let start = range.start.saturating_add(relative.start).min(range.end);
-                    let end = range.start.saturating_add(relative.end).min(range.end);
-                    marker_ranges.push(start..end);
-                }
-            }
-            if marker_ranges.is_empty() {
-                marker_ranges.push(range);
-            }
-
-            for marker_range in marker_ranges {
-                if marker_range.start < marker_range.end {
-                    let end = marker_range.end.min(output_line_count);
-                    for (line_ix, marker_slot) in markers
-                        .iter_mut()
-                        .enumerate()
-                        .take(end)
-                        .skip(marker_range.start)
-                    {
-                        *marker_slot = Some(ResolvedOutputConflictMarker {
-                            conflict_ix,
-                            range_start: marker_range.start,
-                            range_end: marker_range.end,
-                            is_start: line_ix == marker_range.start,
-                            is_end: line_ix + 1 == marker_range.end,
-                            unresolved,
-                        });
-                    }
-                } else {
-                    let anchor = marker_range.start.min(output_line_count.saturating_sub(1));
-                    markers[anchor] = Some(ResolvedOutputConflictMarker {
-                        conflict_ix,
-                        range_start: marker_range.start,
-                        range_end: marker_range.end,
-                        is_start: true,
-                        is_end: true,
-                        unresolved,
-                    });
-                }
-            }
-        }
-        conflict_ix = conflict_ix.saturating_add(1);
+    for (conflict_ix, (block, range)) in marker_segments
+        .iter()
+        .filter_map(|seg| match seg {
+            conflict_resolver::ConflictSegment::Block(block) => Some(block),
+            _ => None,
+        })
+        .zip(block_ranges.into_iter())
+        .enumerate()
+    {
+        let marker_ranges = conflict_marker_ranges_for_block(block, range);
+        write_conflict_markers_for_ranges(
+            &mut markers,
+            conflict_ix,
+            !block.resolved,
+            marker_ranges.as_slice(),
+        );
     }
 
     markers
@@ -1434,6 +1618,22 @@ pub(super) fn focused_mergetool_save_exit_code(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(in crate::view) enum PreparedSyntaxViewMode {
+    FileDiffInline,
+    FileDiffSplitLeft,
+    FileDiffSplitRight,
+    WorktreePreview,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(in crate::view) struct PreparedSyntaxDocumentKey {
+    pub(in crate::view) repo_id: RepoId,
+    pub(in crate::view) target_rev: u64,
+    pub(in crate::view) file_path: std::path::PathBuf,
+    pub(in crate::view) view_mode: PreparedSyntaxViewMode,
+}
+
 pub(in crate::view) struct MainPaneView {
     pub(in crate::view) store: Arc<AppStore>,
     pub(super) state: Arc<AppState>,
@@ -1462,9 +1662,14 @@ pub(in crate::view) struct MainPaneView {
     pub(in crate::view) diff_cache_rev: u64,
     pub(in crate::view) diff_cache_target: Option<DiffTarget>,
     pub(in crate::view) diff_cache: Vec<AnnotatedDiffLine>,
+    pub(in crate::view) diff_row_provider: Option<Arc<super::diff_cache::PagedPatchDiffRows>>,
+    pub(in crate::view) diff_split_row_provider:
+        Option<Arc<super::diff_cache::PagedPatchSplitRows>>,
     pub(in crate::view) diff_file_for_src_ix: Vec<Option<Arc<str>>>,
     pub(in crate::view) diff_language_for_src_ix: Vec<Option<rows::DiffSyntaxLanguage>>,
     pub(in crate::view) diff_click_kinds: Vec<DiffClickKind>,
+    pub(in crate::view) diff_line_kind_for_src_ix: Vec<gitcomet_core::domain::DiffLineKind>,
+    pub(in crate::view) diff_hide_unified_header_for_src_ix: Vec<bool>,
     pub(in crate::view) diff_header_display_cache: HashMap<usize, SharedString>,
     pub(in crate::view) diff_split_cache: Vec<PatchSplitRow>,
     pub(in crate::view) diff_split_cache_len: usize,
@@ -1472,15 +1677,17 @@ pub(in crate::view) struct MainPaneView {
     pub(in crate::view) diff_autoscroll_pending: bool,
     pub(in crate::view) diff_raw_input: Entity<components::TextInput>,
     pub(in crate::view) diff_visible_indices: Vec<usize>,
+    pub(in crate::view) diff_visible_inline_map: Option<super::diff_cache::PatchInlineVisibleMap>,
     pub(in crate::view) diff_visible_cache_len: usize,
     pub(in crate::view) diff_visible_view: DiffViewMode,
     pub(in crate::view) diff_visible_is_file_view: bool,
     pub(in crate::view) diff_scrollbar_markers_cache: Vec<components::ScrollbarMarker>,
     pub(in crate::view) diff_word_highlights: Vec<Option<Vec<Range<usize>>>>,
-    pub(in crate::view) diff_word_highlights_seq: u64,
     pub(in crate::view) diff_word_highlights_inflight: Option<u64>,
     pub(in crate::view) diff_file_stats: Vec<Option<(usize, usize)>>,
     pub(in crate::view) diff_text_segments_cache: Vec<Option<CachedDiffStyledText>>,
+    pub(in crate::view) diff_text_query_segments_cache: Vec<Option<CachedDiffStyledText>>,
+    pub(in crate::view) diff_text_query_cache_query: SharedString,
     pub(in crate::view) diff_selection_anchor: Option<usize>,
     pub(in crate::view) diff_selection_range: Option<(usize, usize)>,
     pub(in crate::view) diff_text_selecting: bool,
@@ -1513,6 +1720,9 @@ pub(in crate::view) struct MainPaneView {
     pub(in crate::view) file_diff_split_word_highlights_new: Vec<Option<Vec<Range<usize>>>>,
     pub(in crate::view) file_diff_cache_seq: u64,
     pub(in crate::view) file_diff_cache_inflight: Option<u64>,
+    pub(in crate::view) file_diff_syntax_generation: u64,
+    pub(in crate::view) prepared_syntax_documents:
+        HashMap<PreparedSyntaxDocumentKey, rows::PreparedDiffSyntaxDocument>,
 
     pub(in crate::view) file_image_diff_cache_repo_id: Option<RepoId>,
     pub(in crate::view) file_image_diff_cache_rev: u64,
@@ -1525,6 +1735,7 @@ pub(in crate::view) struct MainPaneView {
 
     pub(in crate::view) worktree_preview_path: Option<std::path::PathBuf>,
     pub(in crate::view) worktree_preview: Loadable<Arc<Vec<String>>>,
+    pub(in crate::view) worktree_preview_content_rev: u64,
     pub(in crate::view) worktree_preview_segments_cache_path: Option<std::path::PathBuf>,
     pub(in crate::view) worktree_preview_syntax_language: Option<rows::DiffSyntaxLanguage>,
     pub(in crate::view) worktree_preview_segments_cache: HashMap<usize, CachedDiffStyledText>,
@@ -1555,8 +1766,10 @@ pub(in crate::view) struct MainPaneView {
         HashMap<(usize, ThreeWayColumn), CachedDiffStyledText>,
     pub(in crate::view) conflict_resolved_preview_path: Option<std::path::PathBuf>,
     pub(in crate::view) conflict_resolved_preview_source_hash: Option<u64>,
+    pub(in crate::view) conflict_resolved_preview_text: SharedString,
     pub(in crate::view) conflict_resolved_preview_syntax_language: Option<rows::DiffSyntaxLanguage>,
-    pub(in crate::view) conflict_resolved_preview_lines: Vec<String>,
+    pub(in crate::view) conflict_resolved_preview_line_count: usize,
+    pub(in crate::view) conflict_resolved_preview_line_starts: Vec<usize>,
     pub(in crate::view) conflict_resolved_preview_segments_cache:
         HashMap<usize, CachedDiffStyledText>,
 

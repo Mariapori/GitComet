@@ -129,7 +129,11 @@ fn create_askpass_script() -> Result<AskPassScript> {
     Ok(AskPassScript { _dir: dir, path })
 }
 
-fn configure_git_auth_prompt(cmd: &mut Command, auth: &StagedGitAuth, askpass: &AskPassScript) {
+fn configure_git_auth_prompt(
+    cmd: &mut Command,
+    auth: Option<&StagedGitAuth>,
+    askpass: &AskPassScript,
+) {
     cmd.env("GIT_ASKPASS", &askpass.path);
     cmd.env("SSH_ASKPASS", &askpass.path);
     cmd.env("SSH_ASKPASS_REQUIRE", "force");
@@ -137,29 +141,32 @@ fn configure_git_auth_prompt(cmd: &mut Command, auth: &StagedGitAuth, askpass: &
         cmd.env("DISPLAY", "gitcomet:0");
     }
 
-    let kind = match auth.kind {
-        GitAuthKind::UsernamePassword => GITCOMET_AUTH_KIND_USERNAME_PASSWORD,
-        GitAuthKind::Passphrase => GITCOMET_AUTH_KIND_PASSPHRASE,
-    };
-    cmd.env(GITCOMET_AUTH_KIND_ENV, kind);
-    if let Some(username) = &auth.username {
-        cmd.env(GITCOMET_AUTH_USERNAME_ENV, username);
+    if let Some(auth) = auth {
+        let kind = match auth.kind {
+            GitAuthKind::UsernamePassword => GITCOMET_AUTH_KIND_USERNAME_PASSWORD,
+            GitAuthKind::Passphrase => GITCOMET_AUTH_KIND_PASSPHRASE,
+        };
+        cmd.env(GITCOMET_AUTH_KIND_ENV, kind);
+        if let Some(username) = &auth.username {
+            cmd.env(GITCOMET_AUTH_USERNAME_ENV, username);
+        } else {
+            cmd.env_remove(GITCOMET_AUTH_USERNAME_ENV);
+        }
+        cmd.env(GITCOMET_AUTH_SECRET_ENV, &auth.secret);
     } else {
+        cmd.env_remove(GITCOMET_AUTH_KIND_ENV);
         cmd.env_remove(GITCOMET_AUTH_USERNAME_ENV);
+        cmd.env_remove(GITCOMET_AUTH_SECRET_ENV);
     }
-    cmd.env(GITCOMET_AUTH_SECRET_ENV, &auth.secret);
 }
 
 fn run_git_output_with_timeout(mut cmd: Command, label: &str) -> Result<Output> {
     configure_non_interactive_git(&mut cmd);
     let askpass_script = if command_may_require_auth(&cmd) {
-        take_pending_git_auth()
-            .map(|auth| {
-                let script = create_askpass_script()?;
-                configure_git_auth_prompt(&mut cmd, &auth, &script);
-                Ok(script)
-            })
-            .transpose()?
+        let auth = take_pending_git_auth();
+        let script = create_askpass_script()?;
+        configure_git_auth_prompt(&mut cmd, auth.as_ref(), &script);
+        Some(script)
     } else {
         None
     };
@@ -1157,7 +1164,7 @@ mod tests {
             secret: "secret-token".to_string(),
         };
 
-        configure_git_auth_prompt(&mut cmd, &auth, &askpass);
+        configure_git_auth_prompt(&mut cmd, Some(&auth), &askpass);
 
         let askpass_path = askpass
             .path
@@ -1208,7 +1215,7 @@ mod tests {
             secret: "ssh-passphrase".to_string(),
         };
 
-        configure_git_auth_prompt(&mut cmd, &auth, &askpass);
+        configure_git_auth_prompt(&mut cmd, Some(&auth), &askpass);
 
         assert_eq!(
             command_env_value(&cmd, GITCOMET_AUTH_KIND_ENV).as_deref(),
@@ -1219,5 +1226,29 @@ mod tests {
             command_env_value(&cmd, GITCOMET_AUTH_SECRET_ENV).as_deref(),
             Some("ssh-passphrase")
         );
+    }
+
+    #[test]
+    fn configure_git_auth_prompt_without_staged_auth_clears_auth_env() {
+        let askpass = create_askpass_script().expect("askpass script creation");
+        let mut cmd = Command::new("git");
+        cmd.env(GITCOMET_AUTH_KIND_ENV, "legacy-kind");
+        cmd.env(GITCOMET_AUTH_USERNAME_ENV, "legacy-user");
+        cmd.env(GITCOMET_AUTH_SECRET_ENV, "legacy-secret");
+
+        configure_git_auth_prompt(&mut cmd, None, &askpass);
+
+        let askpass_path = askpass
+            .path
+            .to_str()
+            .expect("temporary askpass path should be unicode")
+            .to_string();
+        assert_eq!(
+            command_env_value(&cmd, "GIT_ASKPASS").as_deref(),
+            Some(askpass_path.as_str())
+        );
+        assert!(command_env_removed(&cmd, GITCOMET_AUTH_KIND_ENV));
+        assert!(command_env_removed(&cmd, GITCOMET_AUTH_USERNAME_ENV));
+        assert!(command_env_removed(&cmd, GITCOMET_AUTH_SECRET_ENV));
     }
 }

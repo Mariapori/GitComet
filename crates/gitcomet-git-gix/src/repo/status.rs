@@ -6,7 +6,7 @@ use gitcomet_core::domain::{
 use gitcomet_core::error::{Error, ErrorKind};
 use gitcomet_core::services::Result;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 impl GixRepo {
@@ -143,6 +143,8 @@ impl GixRepo {
                 });
             }
         }
+
+        supplement_gitlink_status_from_porcelain(&self.spec.workdir, &mut staged, &mut unstaged)?;
 
         fn kind_priority(kind: FileStatusKind) -> u8 {
             match kind {
@@ -318,10 +320,119 @@ fn map_directory_entry_status(status: gix::dir::entry::Status) -> Option<FileSta
     }
 }
 
+fn map_porcelain_v2_status_char(ch: char) -> Option<FileStatusKind> {
+    match ch {
+        'M' | 'T' => Some(FileStatusKind::Modified),
+        'A' => Some(FileStatusKind::Added),
+        'D' => Some(FileStatusKind::Deleted),
+        'R' => Some(FileStatusKind::Renamed),
+        'U' => Some(FileStatusKind::Conflicted),
+        _ => None,
+    }
+}
+
+fn push_status_entry(entries: &mut Vec<FileStatus>, path: PathBuf, kind: FileStatusKind) {
+    if entries.iter().any(|e| e.path == path && e.kind == kind) {
+        return;
+    }
+    entries.push(FileStatus {
+        path,
+        kind,
+        conflict: None,
+    });
+}
+
+fn apply_porcelain_v2_gitlink_status_record(
+    record: &str,
+    staged: &mut Vec<FileStatus>,
+    unstaged: &mut Vec<FileStatus>,
+) {
+    let mut parts = record.splitn(9, ' ');
+    let Some(kind) = parts.next() else {
+        return;
+    };
+    if kind != "1" {
+        return;
+    }
+
+    let xy = parts.next().unwrap_or_default();
+    let _sub = parts.next().unwrap_or_default();
+    let m_head = parts.next().unwrap_or_default();
+    let m_index = parts.next().unwrap_or_default();
+    let m_worktree = parts.next().unwrap_or_default();
+    let _h_head = parts.next().unwrap_or_default();
+    let _h_index = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or_default();
+
+    if path.is_empty() {
+        return;
+    }
+
+    let is_gitlink = m_head == "160000" || m_index == "160000" || m_worktree == "160000";
+    if !is_gitlink {
+        return;
+    }
+
+    let mut xy_chars = xy.chars();
+    let x = xy_chars.next().unwrap_or('.');
+    let y = xy_chars.next().unwrap_or('.');
+    let path = PathBuf::from(path);
+
+    if let Some(kind) = map_porcelain_v2_status_char(x) {
+        push_status_entry(staged, path.clone(), kind);
+    }
+    if let Some(kind) = map_porcelain_v2_status_char(y) {
+        push_status_entry(unstaged, path, kind);
+    }
+}
+
+fn supplement_gitlink_status_from_porcelain(
+    workdir: &Path,
+    staged: &mut Vec<FileStatus>,
+    unstaged: &mut Vec<FileStatus>,
+) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .arg("--no-optional-locks")
+        .arg("status")
+        .arg("--porcelain=v2")
+        .arg("-z")
+        .arg("--ignore-submodules=none")
+        .output()
+        .map_err(|e| Error::new(ErrorKind::Io(e.kind())))?;
+
+    if !output.status.success() {
+        return Ok(());
+    }
+
+    let mut records = output.stdout.split(|b| *b == 0).peekable();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        match record[0] {
+            b'1' => {
+                if let Ok(text) = std::str::from_utf8(record) {
+                    apply_porcelain_v2_gitlink_status_record(text, staged, unstaged);
+                }
+            }
+            b'2' => {
+                // Rename/copy records carry an additional NUL-separated path.
+                let _ = records.next();
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_unmerged_conflicts, conflict_kind_from_stage_mask, map_directory_entry_status,
+        apply_porcelain_v2_gitlink_status_record, collect_unmerged_conflicts,
+        conflict_kind_from_stage_mask, map_directory_entry_status,
     };
     use gitcomet_core::domain::{FileConflictKind, FileStatusKind};
     use rustc_hash::FxHashMap as HashMap;
@@ -446,5 +557,40 @@ mod tests {
             None
         );
         assert_eq!(map_directory_entry_status(Status::Pruned), None);
+    }
+
+    #[test]
+    fn porcelain_gitlink_record_maps_committed_unstaged_modification() {
+        let mut staged = Vec::new();
+        let mut unstaged = Vec::new();
+        apply_porcelain_v2_gitlink_status_record(
+            "1 .M SC.. 160000 160000 160000 1111111111111111111111111111111111111111 1111111111111111111111111111111111111111 chess3",
+            &mut staged,
+            &mut unstaged,
+        );
+
+        assert!(staged.is_empty());
+        assert_eq!(unstaged.len(), 1);
+        assert_eq!(unstaged[0].path, PathBuf::from("chess3"));
+        assert_eq!(unstaged[0].kind, FileStatusKind::Modified);
+    }
+
+    #[test]
+    fn porcelain_gitlink_record_maps_added_and_unstaged_modified() {
+        let mut staged = Vec::new();
+        let mut unstaged = Vec::new();
+        apply_porcelain_v2_gitlink_status_record(
+            "1 AM SC.. 000000 160000 160000 0000000000000000000000000000000000000000 2222222222222222222222222222222222222222 chess3",
+            &mut staged,
+            &mut unstaged,
+        );
+
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].path, PathBuf::from("chess3"));
+        assert_eq!(staged[0].kind, FileStatusKind::Added);
+
+        assert_eq!(unstaged.len(), 1);
+        assert_eq!(unstaged[0].path, PathBuf::from("chess3"));
+        assert_eq!(unstaged[0].kind, FileStatusKind::Modified);
     }
 }

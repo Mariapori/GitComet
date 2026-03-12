@@ -1,5 +1,5 @@
 use crate::msg::Msg;
-use gitcomet_core::domain::{Diff, DiffArea, DiffTarget, LogCursor, LogScope};
+use gitcomet_core::domain::{DiffArea, DiffTarget, LogCursor, LogScope};
 use gitcomet_core::error::{Error, ErrorKind};
 use gitcomet_core::services::decode_utf8_optional;
 use std::path::PathBuf;
@@ -631,9 +631,8 @@ pub(super) fn schedule_load_diff(
     target: DiffTarget,
 ) {
     spawn_with_repo(executor, repos, repo_id, msg_tx, move |repo, msg_tx| {
-        let result = repo
-            .diff_unified(&target)
-            .map(|text| Diff::from_unified(target.clone(), &text));
+        // UI consumes this parsed diff through paged/lazy row adapters.
+        let result = repo.diff_parsed(&target);
         send_or_log(
             &msg_tx,
             Msg::Internal(crate::msg::InternalMsg::DiffLoaded {

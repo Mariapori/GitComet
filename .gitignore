@@ -13,3 +13,5 @@ tmp/*
 feat/*
 .autoresearch/*
 dist/
+__pycache__/
+*.pyc

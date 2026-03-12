@@ -5,12 +5,24 @@ use std::sync::{Arc, OnceLock};
 mod syntax;
 
 pub(in crate::view) use syntax::{
-    DiffSyntaxLanguage, DiffSyntaxMode, diff_syntax_language_for_path,
+    DiffSyntaxBudget, DiffSyntaxLanguage, DiffSyntaxMode, diff_syntax_language_for_path,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct PreparedDiffSyntaxDocument {
+pub(in crate::view) struct PreparedDiffSyntaxDocument {
     inner: syntax::PreparedSyntaxDocument,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::view) struct BackgroundPreparedDiffSyntaxDocument {
+    inner: syntax::PreparedSyntaxDocumentData,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::view) enum PrepareDiffSyntaxDocumentResult {
+    Ready(PreparedDiffSyntaxDocument),
+    TimedOut,
+    Unsupported,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +47,134 @@ where
 {
     syntax::prepare_treesitter_document(language, syntax_mode, lines)
         .map(|inner| PreparedDiffSyntaxDocument { inner })
+}
+
+pub(in crate::view) fn prepare_diff_syntax_document_with_budget<'a, I>(
+    language: DiffSyntaxLanguage,
+    syntax_mode: DiffSyntaxMode,
+    lines: I,
+    budget: DiffSyntaxBudget,
+) -> PrepareDiffSyntaxDocumentResult
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    match syntax::prepare_treesitter_document_with_budget(language, syntax_mode, lines, budget) {
+        syntax::PrepareTreesitterDocumentResult::Ready(inner) => {
+            PrepareDiffSyntaxDocumentResult::Ready(PreparedDiffSyntaxDocument { inner })
+        }
+        syntax::PrepareTreesitterDocumentResult::TimedOut => {
+            PrepareDiffSyntaxDocumentResult::TimedOut
+        }
+        syntax::PrepareTreesitterDocumentResult::Unsupported => {
+            PrepareDiffSyntaxDocumentResult::Unsupported
+        }
+    }
+}
+
+pub(in crate::view) fn prepare_diff_syntax_document_with_budget_reuse<'a, I>(
+    language: DiffSyntaxLanguage,
+    syntax_mode: DiffSyntaxMode,
+    lines: I,
+    budget: DiffSyntaxBudget,
+    old_document: Option<PreparedDiffSyntaxDocument>,
+) -> PrepareDiffSyntaxDocumentResult
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    match syntax::prepare_treesitter_document_with_budget_reuse(
+        language,
+        syntax_mode,
+        lines,
+        budget,
+        old_document.map(|document| document.inner),
+    ) {
+        syntax::PrepareTreesitterDocumentResult::Ready(inner) => {
+            PrepareDiffSyntaxDocumentResult::Ready(PreparedDiffSyntaxDocument { inner })
+        }
+        syntax::PrepareTreesitterDocumentResult::TimedOut => {
+            PrepareDiffSyntaxDocumentResult::TimedOut
+        }
+        syntax::PrepareTreesitterDocumentResult::Unsupported => {
+            PrepareDiffSyntaxDocumentResult::Unsupported
+        }
+    }
+}
+
+pub(in crate::view) fn prepare_diff_syntax_document_in_background<'a, I>(
+    language: DiffSyntaxLanguage,
+    syntax_mode: DiffSyntaxMode,
+    lines: I,
+) -> Option<BackgroundPreparedDiffSyntaxDocument>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    syntax::prepare_treesitter_document_in_background(language, syntax_mode, lines)
+        .map(|inner| BackgroundPreparedDiffSyntaxDocument { inner })
+}
+
+pub(in crate::view) fn inject_background_prepared_diff_syntax_document(
+    document: BackgroundPreparedDiffSyntaxDocument,
+) -> PreparedDiffSyntaxDocument {
+    PreparedDiffSyntaxDocument {
+        inner: syntax::inject_prepared_document_data(document.inner),
+    }
+}
+
+pub(in crate::view) fn benchmark_diff_syntax_cache_replacement_drop_step(
+    lines: usize,
+    tokens_per_line: usize,
+    replacements: usize,
+    defer_drop: bool,
+) -> u64 {
+    syntax::benchmark_cache_replacement_drop_step(lines, tokens_per_line, replacements, defer_drop)
+}
+
+pub(in crate::view) fn benchmark_diff_syntax_cache_drop_payload_timed_step(
+    lines: usize,
+    tokens_per_line: usize,
+    seed: usize,
+    defer_drop: bool,
+) -> std::time::Duration {
+    syntax::benchmark_drop_payload_timed_step(lines, tokens_per_line, seed, defer_drop)
+}
+
+pub(in crate::view) fn benchmark_flush_diff_syntax_deferred_drop_queue() -> bool {
+    syntax::benchmark_flush_deferred_drop_queue()
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(in crate::view) struct PreparedDiffSyntaxCacheMetrics {
+    pub hit: u64,
+    pub miss: u64,
+    pub evict: u64,
+    pub chunk_build_ms: u64,
+}
+
+pub(in crate::view) fn benchmark_reset_diff_syntax_prepared_cache_metrics() {
+    syntax::benchmark_reset_prepared_syntax_cache_metrics();
+}
+
+pub(in crate::view) fn benchmark_diff_syntax_prepared_cache_metrics()
+-> PreparedDiffSyntaxCacheMetrics {
+    let (hit, miss, evict, chunk_build_ms) = syntax::benchmark_prepared_syntax_cache_metrics();
+    PreparedDiffSyntaxCacheMetrics {
+        hit,
+        miss,
+        evict,
+        chunk_build_ms,
+    }
+}
+
+pub(in crate::view) fn benchmark_diff_syntax_prepared_loaded_chunk_count(
+    document: PreparedDiffSyntaxDocument,
+) -> Option<usize> {
+    syntax::benchmark_prepared_syntax_loaded_chunk_count(document.inner)
+}
+
+pub(in crate::view) fn benchmark_diff_syntax_prepared_cache_contains_document(
+    document: PreparedDiffSyntaxDocument,
+) -> bool {
+    syntax::benchmark_prepared_syntax_cache_contains_document(document.inner)
 }
 
 fn maybe_expand_tabs(s: &str) -> SharedString {

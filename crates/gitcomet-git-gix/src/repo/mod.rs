@@ -1,8 +1,8 @@
 use gitcomet_core::conflict_session::ConflictSession;
 use gitcomet_core::domain::{
-    Branch, CommitDetails, CommitId, DiffTarget, FileDiffImage, FileDiffText, LogCursor, LogPage,
-    ReflogEntry, Remote, RemoteBranch, RemoteTag, RepoSpec, RepoStatus, StashEntry, Submodule, Tag,
-    UpstreamDivergence, Worktree,
+    Branch, CommitDetails, CommitId, Diff, DiffTarget, FileDiffImage, FileDiffText, LogCursor,
+    LogPage, ReflogEntry, Remote, RemoteBranch, RemoteTag, RepoSpec, RepoStatus, StashEntry,
+    Submodule, Tag, UpstreamDivergence, Worktree,
 };
 use gitcomet_core::services::{
     BlameLine, CommandOutput, ConflictFileStages, ConflictSide, GitRepository, MergetoolResult,
@@ -116,6 +116,10 @@ impl GitRepository for GixRepo {
 
     fn diff_unified(&self, target: &DiffTarget) -> Result<String> {
         self.diff_unified_impl(target)
+    }
+
+    fn diff_parsed(&self, target: &DiffTarget) -> Result<Diff> {
+        self.diff_parsed_impl(target)
     }
 
     fn diff_file_text(&self, target: &DiffTarget) -> Result<Option<FileDiffText>> {

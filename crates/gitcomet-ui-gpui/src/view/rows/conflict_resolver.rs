@@ -14,6 +14,26 @@ fn conflict_syntax_mode_for_total_rows(total_rows: usize) -> DiffSyntaxMode {
     }
 }
 
+fn resolved_output_line_text<'a>(text: &'a str, line_starts: &[usize], line_ix: usize) -> &'a str {
+    if text.is_empty() {
+        return "";
+    }
+    let text_len = text.len();
+    let start = line_starts.get(line_ix).copied().unwrap_or(text_len);
+    if start >= text_len {
+        return "";
+    }
+    let mut end = line_starts
+        .get(line_ix.saturating_add(1))
+        .copied()
+        .unwrap_or(text_len)
+        .min(text_len);
+    if end > start && text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\n') {
+        end = end.saturating_sub(1);
+    }
+    text.get(start..end).unwrap_or("")
+}
+
 fn build_conflict_cached_diff_styled_text(
     theme: AppTheme,
     text: &str,
@@ -104,24 +124,15 @@ impl MainPaneView {
                 let text = match col {
                     ThreeWayColumn::Base => this
                         .conflict_resolver
-                        .three_way_lines
-                        .base
-                        .get(ix)
-                        .map(|s| s.as_ref())
+                        .three_way_line_text(ThreeWayColumn::Base, ix)
                         .unwrap_or(""),
                     ThreeWayColumn::Ours => this
                         .conflict_resolver
-                        .three_way_lines
-                        .ours
-                        .get(ix)
-                        .map(|s| s.as_ref())
+                        .three_way_line_text(ThreeWayColumn::Ours, ix)
                         .unwrap_or(""),
                     ThreeWayColumn::Theirs => this
                         .conflict_resolver
-                        .three_way_lines
-                        .theirs
-                        .get(ix)
-                        .map(|s| s.as_ref())
+                        .three_way_line_text(ThreeWayColumn::Theirs, ix)
                         .unwrap_or(""),
                 };
                 if text.is_empty() {
@@ -240,9 +251,15 @@ impl MainPaneView {
                     elements.push(collapsed.into_any_element());
                 }
                 conflict_resolver::ThreeWayVisibleItem::Line(ix) => {
-                    let base_line = this.conflict_resolver.three_way_lines.base.get(ix);
-                    let ours_line = this.conflict_resolver.three_way_lines.ours.get(ix);
-                    let theirs_line = this.conflict_resolver.three_way_lines.theirs.get(ix);
+                    let base_line = this
+                        .conflict_resolver
+                        .three_way_line_text(ThreeWayColumn::Base, ix);
+                    let ours_line = this
+                        .conflict_resolver
+                        .three_way_line_text(ThreeWayColumn::Ours, ix);
+                    let theirs_line = this
+                        .conflict_resolver
+                        .three_way_line_text(ThreeWayColumn::Theirs, ix);
                     let base_range_ix = this
                         .conflict_resolver
                         .three_way_line_conflict_map
@@ -415,13 +432,17 @@ impl MainPaneView {
                                 line_no: base_line_no,
                                 bg: if base_is_chosen { chosen_bg } else { base_bg },
                                 fg: base_fg,
-                                text: base_line.cloned().unwrap_or_default(),
+                                text: base_line
+                                    .map(|line| SharedString::from(line.to_string()))
+                                    .unwrap_or_default(),
                             },
                             ThreeWayCanvasColumn {
                                 line_no: ours_line_no,
                                 bg: if ours_is_chosen { chosen_bg } else { ours_bg },
                                 fg: ours_fg,
-                                text: ours_line.cloned().unwrap_or_default(),
+                                text: ours_line
+                                    .map(|line| SharedString::from(line.to_string()))
+                                    .unwrap_or_default(),
                             },
                             ThreeWayCanvasColumn {
                                 line_no: theirs_line_no,
@@ -431,7 +452,9 @@ impl MainPaneView {
                                     theirs_bg
                                 },
                                 fg: theirs_fg,
-                                text: theirs_line.cloned().unwrap_or_default(),
+                                text: theirs_line
+                                    .map(|line| SharedString::from(line.to_string()))
+                                    .unwrap_or_default(),
                             },
                             base_styled,
                             ours_styled,
@@ -467,7 +490,9 @@ impl MainPaneView {
                                 .child(base_line_no),
                         )
                         .child(conflict_diff_text_cell(
-                            base_line.cloned().unwrap_or_default(),
+                            base_line
+                                .map(|line| SharedString::from(line.to_string()))
+                                .unwrap_or_default(),
                             base_styled,
                             show_ws,
                         ));
@@ -493,7 +518,9 @@ impl MainPaneView {
                                 .child(ours_line_no),
                         )
                         .child(conflict_diff_text_cell(
-                            ours_line.cloned().unwrap_or_default(),
+                            ours_line
+                                .map(|line| SharedString::from(line.to_string()))
+                                .unwrap_or_default(),
                             ours_styled,
                             show_ws,
                         ));
@@ -520,7 +547,9 @@ impl MainPaneView {
                                 .child(theirs_line_no),
                         )
                         .child(conflict_diff_text_cell(
-                            theirs_line.cloned().unwrap_or_default(),
+                            theirs_line
+                                .map(|line| SharedString::from(line.to_string()))
+                                .unwrap_or_default(),
                             theirs_styled,
                             show_ws,
                         ));
@@ -737,7 +766,7 @@ impl MainPaneView {
 
         let elements: Vec<AnyElement> = range
             .map(|ix| {
-                if this.conflict_resolved_preview_lines.get(ix).is_none() {
+                if ix >= this.conflict_resolved_preview_line_count {
                     return div()
                         .id(("conflict_resolved_preview_oob", ix))
                         .h(px(20.0))
@@ -889,6 +918,152 @@ impl MainPaneView {
                     );
                 }
                 row.into_any_element()
+            })
+            .collect();
+        perf::record_row_batch(
+            ConflictPerfRenderLane::ResolvedPreview,
+            requested_rows,
+            elements.len(),
+        );
+        elements
+    }
+
+    pub(in super::super) fn render_conflict_resolved_output_rows(
+        this: &mut Self,
+        range: Range<usize>,
+        _window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Vec<AnyElement> {
+        let _perf_scope = perf::span(ConflictPerfSpan::RenderResolvedPreviewRows);
+        let requested_rows = range.len();
+        let theme = this.theme;
+        let syntax_language = this.conflict_resolved_preview_syntax_language;
+        let syntax_mode =
+            conflict_syntax_mode_for_total_rows(this.conflict_resolved_preview_line_count);
+        let line_starts = &this.conflict_resolved_preview_line_starts;
+        let line_texts: Vec<SharedString> =
+            this.conflict_resolver_input.read_with(cx, |input, _| {
+                let text = input.text();
+                range
+                    .clone()
+                    .map(|ix| {
+                        resolved_output_line_text(text, line_starts, ix)
+                            .to_string()
+                            .into()
+                    })
+                    .collect()
+            });
+
+        let unresolved_row_bg =
+            with_alpha(theme.colors.danger, if theme.is_dark { 0.18 } else { 0.10 });
+        let resolved_row_bg = with_alpha(
+            theme.colors.success,
+            if theme.is_dark { 0.12 } else { 0.08 },
+        );
+
+        let elements: Vec<AnyElement> = range
+            .zip(line_texts)
+            .map(|(ix, line_text)| {
+                if ix >= this.conflict_resolved_preview_line_count {
+                    return div()
+                        .id(("conflict_resolved_output_oob", ix))
+                        .h(px(20.0))
+                        .px_2()
+                        .text_xs()
+                        .text_color(theme.colors.text_muted)
+                        .child("")
+                        .into_any_element();
+                }
+
+                let row_content = if syntax_language.is_some() && !line_text.is_empty() {
+                    let styled = this
+                        .conflict_resolved_preview_segments_cache
+                        .entry(ix)
+                        .or_insert_with(|| {
+                            build_cached_diff_styled_text(
+                                theme,
+                                line_text.as_ref(),
+                                &[],
+                                "",
+                                syntax_language,
+                                syntax_mode,
+                                None,
+                            )
+                        });
+                    if styled.text.as_ref() != line_text.as_ref() {
+                        *styled = build_cached_diff_styled_text(
+                            theme,
+                            line_text.as_ref(),
+                            &[],
+                            "",
+                            syntax_language,
+                            syntax_mode,
+                            None,
+                        );
+                    }
+                    if styled.highlights.is_empty() {
+                        div()
+                            .w_full()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .child(styled.text.clone())
+                            .into_any_element()
+                    } else {
+                        div()
+                            .w_full()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .child(
+                                gpui::StyledText::new(styled.text.clone())
+                                    .with_highlights(styled.highlights.iter().cloned()),
+                            )
+                            .into_any_element()
+                    }
+                } else {
+                    div()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .child(line_text)
+                        .into_any_element()
+                };
+
+                let conflict_marker = this
+                    .conflict_resolver
+                    .resolved_output_conflict_markers
+                    .get(ix)
+                    .copied()
+                    .flatten();
+                let row_bg = conflict_marker.map(|marker| {
+                    if marker.unresolved {
+                        unresolved_row_bg
+                    } else {
+                        resolved_row_bg
+                    }
+                });
+
+                div()
+                    .id(("conflict_resolved_output_row", ix))
+                    .h(px(20.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(theme.colors.text)
+                    .whitespace_nowrap()
+                    .when_some(row_bg, |d, bg| d.bg(bg))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_conflict_resolver_output_context_menu_for_line(
+                                ix, e.position, window, cx,
+                            );
+                        }),
+                    )
+                    .child(row_content)
+                    .into_any_element()
             })
             .collect();
         perf::record_row_batch(

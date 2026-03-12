@@ -35,15 +35,18 @@ impl MainPaneView {
             this.worktree_preview_segments_cache.clear();
         }
 
-        let syntax_mode = if lines.len() <= MAX_LINES_FOR_SYNTAX_HIGHLIGHTING {
+        let configured_syntax_mode = if lines.len() <= MAX_LINES_FOR_SYNTAX_HIGHLIGHTING {
             DiffSyntaxMode::Auto
         } else {
             DiffSyntaxMode::HeuristicOnly
         };
         let language = this.worktree_preview_syntax_language;
-        let syntax_document = language.and_then(|language| {
-            prepare_diff_syntax_document(language, syntax_mode, lines.iter().map(String::as_str))
-        });
+        let syntax_document = this.worktree_preview_prepared_syntax_document();
+        let syntax_mode = if syntax_document.is_some() {
+            configured_syntax_mode
+        } else {
+            DiffSyntaxMode::HeuristicOnly
+        };
 
         let highlight_deleted_file = this.deleted_file_preview_abs_path().is_some();
         let highlight_new_file = this.untracked_worktree_preview_path().is_some()
@@ -593,5 +596,27 @@ mod tests {
             let parsed = Timezone::from_key(&key);
             assert_eq!(parsed, Some(*tz), "round-trip failed for {key}");
         }
+    }
+
+    #[test]
+    fn worktree_preview_renderer_avoids_full_document_prepare_calls() {
+        let source = include_str!("history.rs");
+        let render_start = source
+            .find("fn render_worktree_preview_rows")
+            .expect("render_worktree_preview_rows should exist");
+        let render_end = source[render_start..]
+            .find("impl HistoryView")
+            .map(|offset| render_start + offset)
+            .expect("HistoryView impl should follow worktree preview renderer");
+        let render_source = &source[render_start..render_end];
+
+        assert!(
+            !render_source.contains("prepare_diff_syntax_document("),
+            "row renderer should not build prepared syntax documents"
+        );
+        assert!(
+            !render_source.contains("prepare_diff_syntax_document_with_budget("),
+            "row renderer should not run full-document parse prep"
+        );
     }
 }

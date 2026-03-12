@@ -1,6 +1,6 @@
 mod details;
 mod history;
-mod main;
+pub(in crate::view) mod main;
 mod sidebar;
 
 pub(super) use details::DetailsPaneView;

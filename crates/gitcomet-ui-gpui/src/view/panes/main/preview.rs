@@ -8,16 +8,75 @@ impl MainPaneView {
         )
     }
 
-    pub(super) fn is_file_preview_active(&self) -> bool {
-        let preview_path = self
-            .untracked_worktree_preview_path()
-            .or_else(|| self.added_file_preview_abs_path())
-            .or_else(|| self.deleted_file_preview_abs_path());
+    pub(in crate::view) fn is_file_preview_active(&self) -> bool {
+        let is_commit_file_target = self.active_repo().is_some_and(|repo| {
+            matches!(
+                repo.diff_state.diff_target.as_ref(),
+                Some(DiffTarget::Commit { path: Some(_), .. })
+            )
+        });
+        let has_untracked_preview = self.untracked_worktree_preview_path().is_some_and(|p| {
+            !crate::view::should_bypass_text_file_preview_for_path(&p)
+                && crate::view::is_existing_regular_file(&p)
+        });
+        let has_added_preview = self.added_file_preview_abs_path().is_some_and(|p| {
+            !crate::view::should_bypass_text_file_preview_for_path(&p)
+                && !crate::view::is_existing_directory(&p)
+                && (crate::view::is_existing_regular_file(&p) || is_commit_file_target)
+        });
+        let has_deleted_preview = self.deleted_file_preview_abs_path().is_some_and(|p| {
+            !crate::view::should_bypass_text_file_preview_for_path(&p)
+                && !crate::view::is_existing_directory(&p)
+        });
+        has_untracked_preview || has_added_preview || has_deleted_preview
+    }
 
-        let Some(path) = preview_path else {
-            return false;
+    pub(in crate::view) fn is_worktree_target_directory(&self) -> bool {
+        self.active_repo().is_some_and(|repo| {
+            let Some(DiffTarget::WorkingTree { path, .. }) = repo.diff_state.diff_target.as_ref()
+            else {
+                return false;
+            };
+            let abs_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                repo.spec.workdir.join(path)
+            };
+            crate::view::is_existing_directory(&abs_path)
+        })
+    }
+
+    pub(in crate::view) fn untracked_directory_notice(&self) -> Option<SharedString> {
+        let repo = self.active_repo()?;
+        let DiffTarget::WorkingTree { path, area } = repo.diff_state.diff_target.as_ref()? else {
+            return None;
         };
-        !crate::view::should_bypass_text_file_preview_for_path(&path)
+        let abs_path = if path.is_absolute() {
+            path.clone()
+        } else {
+            repo.spec.workdir.join(path)
+        };
+        if !crate::view::is_existing_directory(&abs_path) {
+            return None;
+        }
+
+        let is_untracked = *area == DiffArea::Unstaged
+            && matches!(&repo.status, Loadable::Ready(status) if status
+                .unstaged
+                .iter()
+                .any(|e| e.kind == FileStatusKind::Untracked && &e.path == path));
+
+        if is_untracked {
+            Some(
+                "Folder is untracked. Select a file inside it, or stage the folder to inspect tracked changes."
+                    .into(),
+            )
+        } else {
+            Some(
+                "Selected path is a directory. Select a file inside it to preview its contents."
+                    .into(),
+            )
+        }
     }
 
     pub(super) fn worktree_preview_line_count(&self) -> Option<usize> {
@@ -169,15 +228,13 @@ impl MainPaneView {
         if should_reset {
             self.worktree_preview_scroll
                 .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
+            self.worktree_preview_syntax_language = rows::diff_syntax_language_for_path(&path);
             self.worktree_preview_path = Some(path);
             self.worktree_preview = Loadable::Loading;
             self.diff_horizontal_min_width = px(0.0);
             self.worktree_preview_segments_cache_path = None;
             self.worktree_preview_segments_cache.clear();
-        } else if matches!(
-            self.worktree_preview,
-            Loadable::NotLoaded | Loadable::Error(_)
-        ) {
+        } else if matches!(self.worktree_preview, Loadable::NotLoaded) {
             self.worktree_preview = Loadable::Loading;
             self.diff_horizontal_min_width = px(0.0);
         }
@@ -191,14 +248,12 @@ impl MainPaneView {
         let should_reload = match self.worktree_preview_path.as_ref() {
             Some(p) => p != &path,
             None => true,
-        } || matches!(
-            self.worktree_preview,
-            Loadable::Error(_) | Loadable::NotLoaded
-        );
+        } || matches!(self.worktree_preview, Loadable::NotLoaded);
         if !should_reload {
             return;
         }
 
+        self.worktree_preview_syntax_language = rows::diff_syntax_language_for_path(&path);
         self.worktree_preview_path = Some(path.clone());
         self.worktree_preview = Loadable::Loading;
         self.diff_horizontal_min_width = px(0.0);
@@ -239,17 +294,24 @@ impl MainPaneView {
                 }
                 this.worktree_preview_scroll
                     .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
-                this.worktree_preview = match result {
-                    Ok(lines) => Loadable::Ready(lines),
-                    Err(e) => Loadable::Error(e),
-                };
+                match result {
+                    Ok(lines) => this.set_worktree_preview_ready_lines(path.clone(), lines, cx),
+                    Err(e) => {
+                        this.worktree_preview = Loadable::Error(e);
+                        this.worktree_preview_segments_cache_path = None;
+                        this.worktree_preview_segments_cache.clear();
+                    }
+                }
                 cx.notify();
             });
         })
         .detach();
     }
 
-    pub(in super::super::super) fn try_populate_worktree_preview_from_diff_file(&mut self) {
+    pub(in super::super::super) fn try_populate_worktree_preview_from_diff_file(
+        &mut self,
+        cx: &mut gpui::Context<Self>,
+    ) {
         let Some((abs_path, preview_result)) = (|| {
             let repo = self.active_repo()?;
             let path_from_target = match repo.diff_state.diff_target.as_ref()? {
@@ -362,11 +424,8 @@ impl MainPaneView {
             Ok(lines) => {
                 self.worktree_preview_scroll
                     .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
-                self.worktree_preview_path = Some(abs_path);
-                self.worktree_preview = Loadable::Ready(lines);
+                self.set_worktree_preview_ready_lines(abs_path, lines, cx);
                 self.diff_horizontal_min_width = px(0.0);
-                self.worktree_preview_segments_cache_path = None;
-                self.worktree_preview_segments_cache.clear();
             }
             Err(e) => {
                 if self.worktree_preview_path.as_ref() != Some(&abs_path)
@@ -381,6 +440,7 @@ impl MainPaneView {
                     self.worktree_preview = Loadable::Error(e);
                     self.diff_horizontal_min_width = px(0.0);
                     self.worktree_preview_segments_cache_path = None;
+                    self.worktree_preview_syntax_language = None;
                     self.worktree_preview_segments_cache.clear();
                 }
             }

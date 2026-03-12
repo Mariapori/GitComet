@@ -68,9 +68,21 @@ impl MainPaneView {
                         diff_mode: self.conflict_resolver.diff_mode,
                         marker_segments: &self.conflict_resolver.marker_segments,
                         three_way_visible_map: &self.conflict_resolver.three_way_visible_map,
-                        three_way_base_lines: &self.conflict_resolver.three_way_lines.base,
-                        three_way_ours_lines: &self.conflict_resolver.three_way_lines.ours,
-                        three_way_theirs_lines: &self.conflict_resolver.three_way_lines.theirs,
+                        three_way_base_text: &self.conflict_resolver.three_way_text.base,
+                        three_way_base_line_starts: &self
+                            .conflict_resolver
+                            .three_way_line_starts
+                            .base,
+                        three_way_ours_text: &self.conflict_resolver.three_way_text.ours,
+                        three_way_ours_line_starts: &self
+                            .conflict_resolver
+                            .three_way_line_starts
+                            .ours,
+                        three_way_theirs_text: &self.conflict_resolver.three_way_text.theirs,
+                        three_way_theirs_line_starts: &self
+                            .conflict_resolver
+                            .three_way_line_starts
+                            .theirs,
                         diff_visible_row_indices: &self.conflict_resolver.diff_visible_row_indices,
                         inline_visible_row_indices: &self
                             .conflict_resolver
@@ -104,7 +116,7 @@ impl MainPaneView {
                 }
             }
         } else {
-            let total = self.diff_visible_indices.len();
+            let total = self.diff_visible_len();
             for visible_ix in 0..total {
                 match self.diff_view {
                     DiffViewMode::Inline => {
@@ -236,9 +248,12 @@ struct ConflictResolverSearchContext<'a> {
     diff_mode: ConflictDiffMode,
     marker_segments: &'a [conflict_resolver::ConflictSegment],
     three_way_visible_map: &'a [conflict_resolver::ThreeWayVisibleItem],
-    three_way_base_lines: &'a [gpui::SharedString],
-    three_way_ours_lines: &'a [gpui::SharedString],
-    three_way_theirs_lines: &'a [gpui::SharedString],
+    three_way_base_text: &'a str,
+    three_way_base_line_starts: &'a [usize],
+    three_way_ours_text: &'a str,
+    three_way_ours_line_starts: &'a [usize],
+    three_way_theirs_text: &'a str,
+    three_way_theirs_line_starts: &'a [usize],
     diff_visible_row_indices: &'a [usize],
     inline_visible_row_indices: &'a [usize],
     diff_rows: &'a [gitcomet_core::file_diff::FileDiffRow],
@@ -319,23 +334,35 @@ fn three_way_visible_item_matches_query(
     ctx: &ConflictResolverSearchContext<'_>,
     query: &str,
 ) -> bool {
+    fn line_text<'a>(text: &'a str, line_starts: &[usize], line_ix: usize) -> &'a str {
+        if text.is_empty() {
+            return "";
+        }
+        let text_len = text.len();
+        let start = line_starts.get(line_ix).copied().unwrap_or(text_len);
+        if start >= text_len {
+            return "";
+        }
+        let mut end = line_starts
+            .get(line_ix.saturating_add(1))
+            .copied()
+            .unwrap_or(text_len)
+            .min(text_len);
+        if end > start && text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\n') {
+            end = end.saturating_sub(1);
+        }
+        text.get(start..end).unwrap_or("")
+    }
+
     match item {
         conflict_resolver::ThreeWayVisibleItem::Line(ix) => {
-            let base = ctx
-                .three_way_base_lines
-                .get(ix)
-                .map(|s| s.as_ref())
-                .unwrap_or("");
-            let ours = ctx
-                .three_way_ours_lines
-                .get(ix)
-                .map(|s| s.as_ref())
-                .unwrap_or("");
-            let theirs = ctx
-                .three_way_theirs_lines
-                .get(ix)
-                .map(|s| s.as_ref())
-                .unwrap_or("");
+            let base = line_text(ctx.three_way_base_text, ctx.three_way_base_line_starts, ix);
+            let ours = line_text(ctx.three_way_ours_text, ctx.three_way_ours_line_starts, ix);
+            let theirs = line_text(
+                ctx.three_way_theirs_text,
+                ctx.three_way_theirs_line_starts,
+                ix,
+            );
 
             contains_ascii_case_insensitive(base, query)
                 || contains_ascii_case_insensitive(ours, query)
@@ -363,7 +390,6 @@ mod tests {
     };
     use gitcomet_core::domain::DiffLineKind;
     use gitcomet_core::file_diff::{FileDiffRow, FileDiffRowKind};
-    use gpui::SharedString;
 
     #[test]
     fn matches_empty_needle() {
@@ -407,18 +433,24 @@ mod tests {
             content: "inline-only".into(),
         }];
         let three_way_visible_map = vec![ThreeWayVisibleItem::Line(0)];
-        let three_way_base_lines = vec![SharedString::from("base text")];
-        let three_way_ours_lines = vec![SharedString::from("needle")];
-        let three_way_theirs_lines = vec![SharedString::from("remote text")];
+        let three_way_base_text = "base text\n";
+        let three_way_ours_text = "needle\n";
+        let three_way_theirs_text = "remote text\n";
+        let three_way_base_line_starts = vec![0];
+        let three_way_ours_line_starts = vec![0];
+        let three_way_theirs_line_starts = vec![0];
 
         let three_way_ctx = ConflictResolverSearchContext {
             view_mode: ConflictResolverViewMode::ThreeWay,
             diff_mode: ConflictDiffMode::Split,
             marker_segments: &marker_segments,
             three_way_visible_map: &three_way_visible_map,
-            three_way_base_lines: &three_way_base_lines,
-            three_way_ours_lines: &three_way_ours_lines,
-            three_way_theirs_lines: &three_way_theirs_lines,
+            three_way_base_text,
+            three_way_base_line_starts: &three_way_base_line_starts,
+            three_way_ours_text,
+            three_way_ours_line_starts: &three_way_ours_line_starts,
+            three_way_theirs_text,
+            three_way_theirs_line_starts: &three_way_theirs_line_starts,
             diff_visible_row_indices: &[0],
             inline_visible_row_indices: &[0],
             diff_rows: &diff_rows,
@@ -439,9 +471,12 @@ mod tests {
             diff_mode: ConflictDiffMode::Split,
             marker_segments: &marker_segments,
             three_way_visible_map: &three_way_visible_map,
-            three_way_base_lines: &three_way_base_lines,
-            three_way_ours_lines: &three_way_ours_lines,
-            three_way_theirs_lines: &three_way_theirs_lines,
+            three_way_base_text,
+            three_way_base_line_starts: &three_way_base_line_starts,
+            three_way_ours_text,
+            three_way_ours_line_starts: &three_way_ours_line_starts,
+            three_way_theirs_text,
+            three_way_theirs_line_starts: &three_way_theirs_line_starts,
             diff_visible_row_indices: &[0],
             inline_visible_row_indices: &[0],
             diff_rows: &diff_rows,
@@ -463,16 +498,18 @@ mod tests {
             resolved: true,
         })];
         let three_way_visible_map = vec![ThreeWayVisibleItem::CollapsedBlock(0)];
-        let empty_lines: Vec<SharedString> = Vec::new();
 
         let ctx = ConflictResolverSearchContext {
             view_mode: ConflictResolverViewMode::ThreeWay,
             diff_mode: ConflictDiffMode::Split,
             marker_segments: &marker_segments,
             three_way_visible_map: &three_way_visible_map,
-            three_way_base_lines: &empty_lines,
-            three_way_ours_lines: &empty_lines,
-            three_way_theirs_lines: &empty_lines,
+            three_way_base_text: "",
+            three_way_base_line_starts: &[],
+            three_way_ours_text: "",
+            three_way_ours_line_starts: &[],
+            three_way_theirs_text: "",
+            three_way_theirs_line_starts: &[],
             diff_visible_row_indices: &[],
             inline_visible_row_indices: &[],
             diff_rows: &[],

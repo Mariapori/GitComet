@@ -1,14 +1,34 @@
-use super::diff_text::{DiffSyntaxMode, diff_syntax_language_for_path};
+use super::diff_text::{
+    DiffSyntaxBudget, DiffSyntaxLanguage, DiffSyntaxMode, PrepareDiffSyntaxDocumentResult,
+    benchmark_diff_syntax_cache_drop_payload_timed_step,
+    benchmark_diff_syntax_cache_replacement_drop_step,
+    benchmark_diff_syntax_prepared_cache_contains_document,
+    benchmark_diff_syntax_prepared_cache_metrics,
+    benchmark_diff_syntax_prepared_loaded_chunk_count,
+    benchmark_flush_diff_syntax_deferred_drop_queue,
+    benchmark_reset_diff_syntax_prepared_cache_metrics, diff_syntax_language_for_path,
+    inject_background_prepared_diff_syntax_document, prepare_diff_syntax_document,
+    prepare_diff_syntax_document_in_background, prepare_diff_syntax_document_with_budget,
+    prepare_diff_syntax_document_with_budget_reuse,
+};
 use super::*;
+use crate::kit::text_model::TextModel;
+use crate::kit::{
+    benchmark_text_input_runs_legacy_visible_window,
+    benchmark_text_input_runs_streamed_visible_window,
+};
 use crate::theme::AppTheme;
 use crate::view::conflict_resolver::{
     self, ConflictBlock, ConflictChoice, ConflictSegment, ThreeWayVisibleItem,
 };
 use crate::view::history_graph;
+use crate::view::panes::main::diff_cache::{
+    PagedPatchDiffRows, PagedPatchSplitRows, PatchInlineVisibleMap,
+};
 use gitcomet_core::domain::{
-    Branch, Commit, CommitDetails, CommitFileChange, CommitId, FileStatusKind, Remote,
-    RemoteBranch, RepoSpec, StashEntry, Submodule, SubmoduleStatus, Upstream, UpstreamDivergence,
-    Worktree,
+    Branch, Commit, CommitDetails, CommitFileChange, CommitId, Diff, DiffArea, DiffRowProvider,
+    DiffTarget, FileStatusKind, Remote, RemoteBranch, RepoSpec, StashEntry, Submodule,
+    SubmoduleStatus, Upstream, UpstreamDivergence, Worktree,
 };
 use gitcomet_state::model::{Loadable, RepoId, RepoState};
 use std::collections::hash_map::DefaultHasher;
@@ -332,6 +352,1654 @@ impl LargeFileDiffScrollFixture {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TextInputShapeCacheKey {
+    line_ix: usize,
+    wrap_width_key: i32,
+    style_epoch: u64,
+    text_hash_slice: u64,
+}
+
+pub struct TextInputPrepaintWindowedFixture {
+    lines: Vec<String>,
+    wrap_width_key: i32,
+    style_epoch: u64,
+    guard_rows: usize,
+    max_shape_bytes: usize,
+    shape_cache: HashMap<TextInputShapeCacheKey, u64>,
+}
+
+impl TextInputPrepaintWindowedFixture {
+    pub fn new(lines: usize, line_bytes: usize, wrap_width_px: usize) -> Self {
+        Self {
+            lines: build_synthetic_source_lines(lines.max(1), line_bytes),
+            wrap_width_key: wrap_width_px.max(1) as i32,
+            style_epoch: 1,
+            guard_rows: 2,
+            max_shape_bytes: 4 * 1024,
+            shape_cache: HashMap::default(),
+        }
+    }
+
+    pub fn run_windowed_step(&mut self, start_row: usize, viewport_rows: usize) -> u64 {
+        if self.lines.is_empty() || viewport_rows == 0 {
+            return 0;
+        }
+
+        let line_count = self.lines.len();
+        let total_rows = viewport_rows
+            .saturating_add(self.guard_rows.saturating_mul(2))
+            .max(1);
+        let mut h = DefaultHasher::new();
+
+        for row in 0..total_rows {
+            let line_ix = start_row.wrapping_add(row) % line_count;
+            let (slice_hash, capped_len) = hash_text_input_shaping_slice(
+                self.lines.get(line_ix).map(String::as_str).unwrap_or(""),
+                self.max_shape_bytes,
+            );
+            let key = TextInputShapeCacheKey {
+                line_ix,
+                wrap_width_key: self.wrap_width_key,
+                style_epoch: self.style_epoch,
+                text_hash_slice: slice_hash,
+            };
+            let shaped = *self.shape_cache.entry(key).or_insert_with(|| {
+                let mut shaped_hash = DefaultHasher::new();
+                line_ix.hash(&mut shaped_hash);
+                capped_len.hash(&mut shaped_hash);
+                slice_hash.hash(&mut shaped_hash);
+                shaped_hash.finish()
+            });
+            shaped.hash(&mut h);
+        }
+
+        self.shape_cache.len().hash(&mut h);
+        h.finish()
+    }
+
+    pub fn run_full_document_step(&mut self) -> u64 {
+        self.run_windowed_step(0, self.lines.len())
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.lines.len()
+    }
+
+    #[cfg(test)]
+    fn cache_entries(&self) -> usize {
+        self.shape_cache.len()
+    }
+}
+
+pub struct TextInputLongLineCapFixture {
+    line: String,
+}
+
+impl TextInputLongLineCapFixture {
+    pub fn new(bytes: usize) -> Self {
+        let bytes = bytes.max(1);
+        let mut line = String::with_capacity(bytes.saturating_add(16));
+        let token = "let very_long_identifier = \"token\"; ";
+        while line.len() < bytes {
+            line.push_str(token);
+        }
+        line.truncate(bytes);
+        Self { line }
+    }
+
+    pub fn run_with_cap(&self, max_bytes: usize) -> u64 {
+        let mut h = DefaultHasher::new();
+        for nonce in 0..64usize {
+            let (slice_hash, capped_len) =
+                hash_text_input_shaping_slice(self.line.as_str(), max_bytes.max(1));
+            nonce.hash(&mut h);
+            slice_hash.hash(&mut h);
+            capped_len.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    pub fn run_without_cap(&self) -> u64 {
+        self.run_with_cap(self.line.len().saturating_add(8))
+    }
+
+    #[cfg(test)]
+    fn capped_len(&self, max_bytes: usize) -> usize {
+        let (_hash, len) = hash_text_input_shaping_slice(self.line.as_str(), max_bytes.max(1));
+        len
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextInputHighlightDensity {
+    Dense,
+    Sparse,
+}
+
+pub struct TextInputRunsStreamedHighlightFixture {
+    text: String,
+    line_starts: Vec<usize>,
+    highlights: Vec<(Range<usize>, gpui::HighlightStyle)>,
+    visible_rows: usize,
+    scroll_step: usize,
+}
+
+impl TextInputRunsStreamedHighlightFixture {
+    pub fn new(
+        lines: usize,
+        line_bytes: usize,
+        visible_rows: usize,
+        density: TextInputHighlightDensity,
+    ) -> Self {
+        let source_lines = build_synthetic_source_lines(lines.max(1), line_bytes.max(24));
+        let text = source_lines.join("\n");
+        let line_starts = line_starts_for_text(text.as_str());
+        let highlights =
+            build_text_input_streamed_highlights(text.as_str(), line_starts.as_slice(), density);
+        let visible_rows = visible_rows.max(1).min(line_starts.len().max(1));
+        let scroll_step = (visible_rows / 2).max(1);
+        Self {
+            text,
+            line_starts,
+            highlights,
+            visible_rows,
+            scroll_step,
+        }
+    }
+
+    fn max_start_row(&self) -> usize {
+        self.line_starts.len().saturating_sub(self.visible_rows)
+    }
+
+    fn visible_range(&self, start_row: usize) -> Range<usize> {
+        if self.line_starts.is_empty() {
+            return 0..0;
+        }
+        let max_start = self.max_start_row();
+        let start = if max_start == 0 {
+            0
+        } else {
+            start_row % (max_start + 1)
+        };
+        start..start.saturating_add(self.visible_rows)
+    }
+
+    pub fn run_legacy_step(&self, start_row: usize) -> u64 {
+        benchmark_text_input_runs_legacy_visible_window(
+            self.text.as_str(),
+            self.line_starts.as_slice(),
+            self.visible_range(start_row),
+            self.highlights.as_slice(),
+        )
+    }
+
+    pub fn run_streamed_step(&self, start_row: usize) -> u64 {
+        benchmark_text_input_runs_streamed_visible_window(
+            self.text.as_str(),
+            self.line_starts.as_slice(),
+            self.visible_range(start_row),
+            self.highlights.as_slice(),
+        )
+    }
+
+    pub fn next_start_row(&self, start_row: usize) -> usize {
+        let max_start = self.max_start_row().max(1);
+        start_row.wrapping_add(self.scroll_step) % (max_start + 1)
+    }
+
+    #[cfg(test)]
+    fn highlights_len(&self) -> usize {
+        self.highlights.len()
+    }
+}
+
+pub struct TextInputWrapIncrementalTabsFixture {
+    lines: Vec<String>,
+    row_counts: Vec<usize>,
+    wrap_columns: usize,
+    edit_nonce: usize,
+}
+
+impl TextInputWrapIncrementalTabsFixture {
+    pub fn new(lines: usize, line_bytes: usize, wrap_width_px: usize) -> Self {
+        let lines = build_synthetic_tabbed_source_lines(lines.max(1), line_bytes.max(8));
+        let wrap_columns = wrap_columns_for_benchmark_width(wrap_width_px.max(1));
+        let row_counts = lines
+            .iter()
+            .map(|line| estimate_tabbed_wrap_rows(line.as_str(), wrap_columns))
+            .collect::<Vec<_>>();
+        Self {
+            lines,
+            row_counts,
+            wrap_columns,
+            edit_nonce: 0,
+        }
+    }
+
+    pub fn run_full_recompute_step(&mut self, edit_line_ix: usize) -> u64 {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let line_ix = edit_line_ix % self.lines.len();
+        let _ = mutate_tabbed_line_for_wrap_patch(
+            self.lines.get_mut(line_ix).expect("line index must exist"),
+            self.edit_nonce,
+        );
+        self.edit_nonce = self.edit_nonce.wrapping_add(1);
+        self.row_counts = self
+            .lines
+            .iter()
+            .map(|line| estimate_tabbed_wrap_rows(line.as_str(), self.wrap_columns))
+            .collect();
+        hash_wrap_rows(self.row_counts.as_slice())
+    }
+
+    pub fn run_incremental_step(&mut self, edit_line_ix: usize) -> u64 {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let line_ix = edit_line_ix % self.lines.len();
+        let edit_col = mutate_tabbed_line_for_wrap_patch(
+            self.lines.get_mut(line_ix).expect("line index must exist"),
+            self.edit_nonce,
+        );
+        self.edit_nonce = self.edit_nonce.wrapping_add(1);
+        let dirty = expand_tabbed_dirty_line_range(
+            self.lines.as_slice(),
+            line_ix,
+            edit_col,
+            self.wrap_columns,
+        );
+        for ix in dirty {
+            if let Some(slot) = self.row_counts.get_mut(ix) {
+                *slot = estimate_tabbed_wrap_rows(
+                    self.lines.get(ix).map(String::as_str).unwrap_or(""),
+                    self.wrap_columns,
+                );
+            }
+        }
+        hash_wrap_rows(self.row_counts.as_slice())
+    }
+
+    #[cfg(test)]
+    fn row_counts(&self) -> &[usize] {
+        self.row_counts.as_slice()
+    }
+}
+
+pub struct TextInputWrapIncrementalBurstEditsFixture {
+    lines: Vec<String>,
+    row_counts: Vec<usize>,
+    wrap_columns: usize,
+    edit_nonce: usize,
+}
+
+impl TextInputWrapIncrementalBurstEditsFixture {
+    pub fn new(lines: usize, line_bytes: usize, wrap_width_px: usize) -> Self {
+        let lines = build_synthetic_tabbed_source_lines(lines.max(1), line_bytes.max(8));
+        let wrap_columns = wrap_columns_for_benchmark_width(wrap_width_px.max(1));
+        let row_counts = lines
+            .iter()
+            .map(|line| estimate_tabbed_wrap_rows(line.as_str(), wrap_columns))
+            .collect::<Vec<_>>();
+        Self {
+            lines,
+            row_counts,
+            wrap_columns,
+            edit_nonce: 0,
+        }
+    }
+
+    pub fn run_full_recompute_burst_step(&mut self, edits_per_burst: usize) -> u64 {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let edits_per_burst = edits_per_burst.max(1);
+        for step in 0..edits_per_burst {
+            let line_ix = self.edit_nonce.wrapping_add(step).wrapping_mul(17) % self.lines.len();
+            let _ = mutate_tabbed_line_for_wrap_patch(
+                self.lines.get_mut(line_ix).expect("line index must exist"),
+                self.edit_nonce.wrapping_add(step),
+            );
+            self.row_counts = self
+                .lines
+                .iter()
+                .map(|line| estimate_tabbed_wrap_rows(line.as_str(), self.wrap_columns))
+                .collect();
+        }
+        self.edit_nonce = self.edit_nonce.wrapping_add(edits_per_burst);
+        hash_wrap_rows(self.row_counts.as_slice())
+    }
+
+    pub fn run_incremental_burst_step(&mut self, edits_per_burst: usize) -> u64 {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let edits_per_burst = edits_per_burst.max(1);
+        for step in 0..edits_per_burst {
+            let line_ix = self.edit_nonce.wrapping_add(step).wrapping_mul(17) % self.lines.len();
+            let edit_col = mutate_tabbed_line_for_wrap_patch(
+                self.lines.get_mut(line_ix).expect("line index must exist"),
+                self.edit_nonce.wrapping_add(step),
+            );
+            let dirty = expand_tabbed_dirty_line_range(
+                self.lines.as_slice(),
+                line_ix,
+                edit_col,
+                self.wrap_columns,
+            );
+            for ix in dirty {
+                if let Some(slot) = self.row_counts.get_mut(ix) {
+                    *slot = estimate_tabbed_wrap_rows(
+                        self.lines.get(ix).map(String::as_str).unwrap_or(""),
+                        self.wrap_columns,
+                    );
+                }
+            }
+        }
+        self.edit_nonce = self.edit_nonce.wrapping_add(edits_per_burst);
+        hash_wrap_rows(self.row_counts.as_slice())
+    }
+
+    #[cfg(test)]
+    fn row_counts(&self) -> &[usize] {
+        self.row_counts.as_slice()
+    }
+}
+
+pub struct TextModelSnapshotCloneCostFixture {
+    model: TextModel,
+    string_control: SharedString,
+}
+
+impl TextModelSnapshotCloneCostFixture {
+    pub fn new(min_bytes: usize) -> Self {
+        let text = build_text_model_document(min_bytes.max(1));
+        let model = TextModel::from_large_text(text.as_str());
+        let string_control = model.as_shared_string();
+        Self {
+            model,
+            string_control,
+        }
+    }
+
+    pub fn run_snapshot_clone_step(&self, clones: usize) -> u64 {
+        let clones = clones.max(1);
+        let snapshot = self.model.snapshot();
+        let mut h = DefaultHasher::new();
+        self.model.model_id().hash(&mut h);
+        self.model.revision().hash(&mut h);
+
+        for nonce in 0..clones {
+            let cloned = snapshot.clone();
+            nonce.hash(&mut h);
+            cloned.len().hash(&mut h);
+            cloned.line_starts().len().hash(&mut h);
+            let prefix_end = cloned.clamp_to_char_boundary(cloned.len().min(96));
+            let prefix = cloned.slice_to_string(0..prefix_end);
+            prefix.len().hash(&mut h);
+        }
+        h.finish()
+    }
+
+    pub fn run_string_clone_control_step(&self, clones: usize) -> u64 {
+        let clones = clones.max(1);
+        let mut h = DefaultHasher::new();
+        for nonce in 0..clones {
+            let cloned = self.string_control.clone();
+            nonce.hash(&mut h);
+            cloned.len().hash(&mut h);
+            cloned.as_ref().bytes().take(96).count().hash(&mut h);
+        }
+        h.finish()
+    }
+}
+
+pub struct TextModelBulkLoadLargeFixture {
+    text: String,
+}
+
+impl TextModelBulkLoadLargeFixture {
+    pub fn new(lines: usize, line_bytes: usize) -> Self {
+        let mut text = String::new();
+        let synthetic_lines = build_synthetic_source_lines(lines.max(1), line_bytes.max(32));
+        for line in synthetic_lines {
+            text.push_str(line.as_str());
+            text.push('\n');
+        }
+        Self { text }
+    }
+
+    pub fn run_piece_table_bulk_load_step(&self) -> u64 {
+        if self.text.is_empty() {
+            return 0;
+        }
+
+        let mut model = TextModel::new();
+        let mut split = self.text.len() / 2;
+        while split > 0 && !self.text.is_char_boundary(split) {
+            split = split.saturating_sub(1);
+        }
+
+        let _ = model.append_large(&self.text[..split]);
+        let _ = model.append_large(&self.text[split..]);
+        let snapshot = model.snapshot();
+
+        let mut h = DefaultHasher::new();
+        snapshot.len().hash(&mut h);
+        snapshot.line_starts().len().hash(&mut h);
+        let suffix_start = snapshot.clamp_to_char_boundary(snapshot.len().saturating_sub(96));
+        let suffix = snapshot.slice_to_string(suffix_start..snapshot.len());
+        suffix.len().hash(&mut h);
+        h.finish()
+    }
+
+    pub fn run_piece_table_from_large_text_step(&self) -> u64 {
+        if self.text.is_empty() {
+            return 0;
+        }
+
+        let model = TextModel::from_large_text(self.text.as_str());
+        let snapshot = model.snapshot();
+        let mut h = DefaultHasher::new();
+        snapshot.len().hash(&mut h);
+        snapshot.line_starts().len().hash(&mut h);
+        let prefix_end = snapshot.clamp_to_char_boundary(snapshot.len().min(96));
+        let prefix = snapshot.slice_to_string(0..prefix_end);
+        prefix.len().hash(&mut h);
+        h.finish()
+    }
+
+    pub fn run_string_bulk_load_control_step(&self) -> u64 {
+        if self.text.is_empty() {
+            return 0;
+        }
+
+        let mut loaded = String::with_capacity(self.text.len());
+        for chunk in self.text.as_bytes().chunks(32 * 1024) {
+            if let Ok(chunk_text) = std::str::from_utf8(chunk) {
+                loaded.push_str(chunk_text);
+            }
+        }
+        let mut h = DefaultHasher::new();
+        loaded.len().hash(&mut h);
+        loaded.bytes().take(96).count().hash(&mut h);
+        h.finish()
+    }
+}
+
+fn build_text_model_document(min_bytes: usize) -> String {
+    let mut out = String::with_capacity(min_bytes.saturating_add(64));
+    let mut ix = 0usize;
+    while out.len() < min_bytes {
+        out.push_str(
+            format!("line_{ix:06}: fn synthetic_{ix}() {{ let value = {ix}; }}\n").as_str(),
+        );
+        ix = ix.wrapping_add(1);
+    }
+    out
+}
+
+fn build_synthetic_tabbed_source_lines(lines: usize, min_line_bytes: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines.max(1));
+    let target = min_line_bytes.max(8);
+    for ix in 0..lines.max(1) {
+        let mut line = String::new();
+        line.push('\t');
+        line.push_str(&format!("section_{ix:05}\t"));
+        line.push_str("value = ");
+        while line.len() < target {
+            line.push_str("token\t");
+        }
+        out.push(line);
+    }
+    out
+}
+
+fn wrap_columns_for_benchmark_width(wrap_width_px: usize) -> usize {
+    let estimated_char_px = (13.0f32 * 0.6).max(1.0);
+    ((wrap_width_px as f32) / estimated_char_px)
+        .floor()
+        .max(1.0) as usize
+}
+
+fn estimate_tabbed_wrap_rows(line: &str, wrap_columns: usize) -> usize {
+    if line.is_empty() {
+        return 1;
+    }
+    let wrap_columns = wrap_columns.max(1);
+    let mut rows = 1usize;
+    let mut column = 0usize;
+    for ch in line.chars() {
+        let width = if ch == '\t' {
+            let rem = column % 4;
+            if rem == 0 { 4 } else { 4 - rem }
+        } else {
+            1
+        };
+
+        if width >= wrap_columns {
+            if column > 0 {
+                rows = rows.saturating_add(1);
+            }
+            rows = rows.saturating_add(width / wrap_columns);
+            column = width % wrap_columns;
+            if column == 0 {
+                column = wrap_columns;
+            }
+            continue;
+        }
+
+        if column + width > wrap_columns {
+            rows = rows.saturating_add(1);
+            column = width;
+        } else {
+            column += width;
+        }
+    }
+    rows.max(1)
+}
+
+fn mutate_tabbed_line_for_wrap_patch(line: &mut String, nonce: usize) -> usize {
+    if line.is_empty() {
+        line.push('\t');
+    }
+    let mut insert_ix = line.find('\t').unwrap_or(0);
+    insert_ix = insert_ix.min(line.len());
+    let ch = (b'a' + (nonce % 26) as u8) as char;
+    line.insert(insert_ix, ch);
+
+    if line.chars().count() > 1 {
+        let remove_ix = line
+            .char_indices()
+            .next_back()
+            .map(|(ix, _)| ix)
+            .unwrap_or(0);
+        let _ = line.remove(remove_ix);
+    }
+    insert_ix
+}
+
+fn expand_tabbed_dirty_line_range(
+    lines: &[String],
+    line_ix: usize,
+    edit_column: usize,
+    _wrap_columns: usize,
+) -> Range<usize> {
+    if lines.is_empty() {
+        return 0..0;
+    }
+    let line_ix = line_ix.min(lines.len().saturating_sub(1));
+    let mut end = (line_ix + 1).min(lines.len());
+    if let Some(line) = lines.get(line_ix)
+        && line
+            .get(edit_column.min(line.len())..)
+            .is_some_and(|suffix| suffix.contains('\t'))
+    {
+        end = end.max((line_ix + 1).min(lines.len()));
+    }
+    if end < lines.len() && lines.get(end).is_some_and(|line| line.starts_with('\t')) {
+        end = (end + 1).min(lines.len());
+    }
+    line_ix..end
+}
+
+fn hash_wrap_rows(row_counts: &[usize]) -> u64 {
+    let mut h = DefaultHasher::new();
+    row_counts.len().hash(&mut h);
+    for rows in row_counts.iter().take(512) {
+        rows.hash(&mut h);
+    }
+    h.finish()
+}
+
+fn hash_text_input_shaping_slice(text: &str, max_bytes: usize) -> (u64, usize) {
+    if text.len() <= max_bytes {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        return (hasher.finish(), text.len());
+    }
+
+    let suffix = "…";
+    let suffix_len = suffix.len();
+    let mut end = max_bytes.saturating_sub(suffix_len).min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+
+    let mut truncated = String::with_capacity(end.saturating_add(suffix_len));
+    if end > 0 {
+        truncated.push_str(&text[..end]);
+    }
+    truncated.push_str(suffix);
+
+    let mut hasher = DefaultHasher::new();
+    truncated.hash(&mut hasher);
+    (hasher.finish(), truncated.len())
+}
+
+fn build_synthetic_unified_patch(line_count: usize) -> String {
+    let line_count = line_count.max(1);
+    let mut out = String::new();
+    out.push_str("diff --git a/src/lib.rs b/src/lib.rs\n");
+    out.push_str("index 1111111..2222222 100644\n");
+    out.push_str("--- a/src/lib.rs\n");
+    out.push_str("+++ b/src/lib.rs\n");
+    out.push_str(&format!(
+        "@@ -1,{} +1,{} @@ fn synthetic() {{\n",
+        line_count.saturating_mul(2),
+        line_count.saturating_mul(2)
+    ));
+
+    for ix in 0..line_count {
+        if ix % 7 == 0 {
+            out.push_str(&format!("-let old_{ix} = old_call({ix});\n"));
+            out.push_str(&format!("+let new_{ix} = new_call({ix});\n"));
+        } else {
+            out.push_str(&format!(" let shared_{ix} = keep({ix});\n"));
+        }
+    }
+    out
+}
+
+fn should_hide_unified_diff_header_for_bench(
+    kind: gitcomet_core::domain::DiffLineKind,
+    text: &str,
+) -> bool {
+    matches!(kind, gitcomet_core::domain::DiffLineKind::Header)
+        && (text.starts_with("index ") || text.starts_with("--- ") || text.starts_with("+++ "))
+}
+
+pub struct PatchDiffPagedRowsFixture {
+    diff: Arc<Diff>,
+}
+
+impl PatchDiffPagedRowsFixture {
+    pub fn new(lines: usize) -> Self {
+        let target = DiffTarget::WorkingTree {
+            path: std::path::PathBuf::from("src/lib.rs"),
+            area: DiffArea::Unstaged,
+        };
+        let text = build_synthetic_unified_patch(lines);
+        Self {
+            diff: Arc::new(Diff::from_unified(target, text.as_str())),
+        }
+    }
+
+    pub fn run_eager_full_materialize_step(&self) -> u64 {
+        let annotated = annotate_unified(&self.diff);
+        let split = build_patch_split_rows(&annotated);
+        let theme = AppTheme::zed_ayu_dark();
+        let language = diff_syntax_language_for_path("src/lib.rs");
+        let mut hasher = DefaultHasher::new();
+        annotated.len().hash(&mut hasher);
+        split.len().hash(&mut hasher);
+        for line in annotated.iter().take(256) {
+            let kind_key: u8 = match line.kind {
+                gitcomet_core::domain::DiffLineKind::Header => 0,
+                gitcomet_core::domain::DiffLineKind::Hunk => 1,
+                gitcomet_core::domain::DiffLineKind::Add => 2,
+                gitcomet_core::domain::DiffLineKind::Remove => 3,
+                gitcomet_core::domain::DiffLineKind::Context => 4,
+            };
+            kind_key.hash(&mut hasher);
+            line.text.len().hash(&mut hasher);
+            line.old_line.hash(&mut hasher);
+            line.new_line.hash(&mut hasher);
+        }
+        for row in split.iter().take(256) {
+            match row {
+                PatchSplitRow::Raw { src_ix, click_kind } => {
+                    src_ix.hash(&mut hasher);
+                    let click_kind_key: u8 = match click_kind {
+                        DiffClickKind::Line => 0,
+                        DiffClickKind::HunkHeader => 1,
+                        DiffClickKind::FileHeader => 2,
+                    };
+                    click_kind_key.hash(&mut hasher);
+                }
+                PatchSplitRow::Aligned {
+                    row,
+                    old_src_ix,
+                    new_src_ix,
+                } => {
+                    let kind_key: u8 = match row.kind {
+                        gitcomet_core::file_diff::FileDiffRowKind::Context => 0,
+                        gitcomet_core::file_diff::FileDiffRowKind::Add => 1,
+                        gitcomet_core::file_diff::FileDiffRowKind::Remove => 2,
+                        gitcomet_core::file_diff::FileDiffRowKind::Modify => 3,
+                    };
+                    kind_key.hash(&mut hasher);
+                    row.old_line.hash(&mut hasher);
+                    row.new_line.hash(&mut hasher);
+                    row.old.as_ref().map(|s| s.len()).hash(&mut hasher);
+                    row.new.as_ref().map(|s| s.len()).hash(&mut hasher);
+                    old_src_ix.hash(&mut hasher);
+                    new_src_ix.hash(&mut hasher);
+                }
+            }
+        }
+        for line in &annotated {
+            if !matches!(
+                line.kind,
+                gitcomet_core::domain::DiffLineKind::Add
+                    | gitcomet_core::domain::DiffLineKind::Remove
+                    | gitcomet_core::domain::DiffLineKind::Context
+            ) {
+                continue;
+            }
+            let styled = super::diff_text::build_cached_diff_styled_text(
+                theme,
+                diff_content_text(line),
+                &[],
+                "",
+                language,
+                DiffSyntaxMode::HeuristicOnly,
+                None,
+            );
+            styled.text.len().hash(&mut hasher);
+            styled.highlights.len().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    pub fn run_paged_first_window_step(&self, window: usize) -> u64 {
+        let window = window.max(1);
+        let rows_provider = Arc::new(PagedPatchDiffRows::new(Arc::clone(&self.diff), 256));
+        let split_provider = PagedPatchSplitRows::new(Arc::clone(&rows_provider));
+        let theme = AppTheme::zed_ayu_dark();
+        let language = diff_syntax_language_for_path("src/lib.rs");
+
+        let mut hasher = DefaultHasher::new();
+        rows_provider.len_hint().hash(&mut hasher);
+        split_provider.len_hint().hash(&mut hasher);
+
+        for line in rows_provider.slice(0, window).take(window) {
+            let kind_key: u8 = match line.kind {
+                gitcomet_core::domain::DiffLineKind::Header => 0,
+                gitcomet_core::domain::DiffLineKind::Hunk => 1,
+                gitcomet_core::domain::DiffLineKind::Add => 2,
+                gitcomet_core::domain::DiffLineKind::Remove => 3,
+                gitcomet_core::domain::DiffLineKind::Context => 4,
+            };
+            kind_key.hash(&mut hasher);
+            line.text.len().hash(&mut hasher);
+            line.old_line.hash(&mut hasher);
+            line.new_line.hash(&mut hasher);
+            if matches!(
+                line.kind,
+                gitcomet_core::domain::DiffLineKind::Add
+                    | gitcomet_core::domain::DiffLineKind::Remove
+                    | gitcomet_core::domain::DiffLineKind::Context
+            ) {
+                let styled = super::diff_text::build_cached_diff_styled_text(
+                    theme,
+                    diff_content_text(&line),
+                    &[],
+                    "",
+                    language,
+                    DiffSyntaxMode::HeuristicOnly,
+                    None,
+                );
+                styled.text.len().hash(&mut hasher);
+                styled.highlights.len().hash(&mut hasher);
+            }
+        }
+        for row in split_provider.slice(0, window).take(window) {
+            match row {
+                PatchSplitRow::Raw { src_ix, click_kind } => {
+                    src_ix.hash(&mut hasher);
+                    let click_kind_key: u8 = match click_kind {
+                        DiffClickKind::Line => 0,
+                        DiffClickKind::HunkHeader => 1,
+                        DiffClickKind::FileHeader => 2,
+                    };
+                    click_kind_key.hash(&mut hasher);
+                }
+                PatchSplitRow::Aligned {
+                    row,
+                    old_src_ix,
+                    new_src_ix,
+                } => {
+                    let kind_key: u8 = match row.kind {
+                        gitcomet_core::file_diff::FileDiffRowKind::Context => 0,
+                        gitcomet_core::file_diff::FileDiffRowKind::Add => 1,
+                        gitcomet_core::file_diff::FileDiffRowKind::Remove => 2,
+                        gitcomet_core::file_diff::FileDiffRowKind::Modify => 3,
+                    };
+                    kind_key.hash(&mut hasher);
+                    row.old_line.hash(&mut hasher);
+                    row.new_line.hash(&mut hasher);
+                    row.old.as_ref().map(|s| s.len()).hash(&mut hasher);
+                    row.new.as_ref().map(|s| s.len()).hash(&mut hasher);
+                    old_src_ix.hash(&mut hasher);
+                    new_src_ix.hash(&mut hasher);
+                }
+            }
+        }
+
+        hasher.finish()
+    }
+
+    pub fn run_inline_visible_eager_scan_step(&self) -> u64 {
+        let rows_provider = PagedPatchDiffRows::new(Arc::clone(&self.diff), 256);
+        let mut visible_indices = Vec::new();
+        for (src_ix, line) in rows_provider.slice(0, rows_provider.len_hint()).enumerate() {
+            if !should_hide_unified_diff_header_for_bench(line.kind, line.text.as_ref()) {
+                visible_indices.push(src_ix);
+            }
+        }
+
+        let mut hasher = DefaultHasher::new();
+        visible_indices.len().hash(&mut hasher);
+        for src_ix in visible_indices.into_iter().take(512) {
+            src_ix.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    pub fn run_inline_visible_hidden_map_step(&self) -> u64 {
+        let hidden_flags = self
+            .diff
+            .lines
+            .iter()
+            .map(|line| should_hide_unified_diff_header_for_bench(line.kind, line.text.as_ref()))
+            .collect::<Vec<_>>();
+        let visible_map = PatchInlineVisibleMap::from_hidden_flags(hidden_flags.as_slice());
+
+        let mut hasher = DefaultHasher::new();
+        visible_map.visible_len().hash(&mut hasher);
+        for visible_ix in 0..visible_map.visible_len().min(512) {
+            visible_map
+                .src_ix_for_visible_ix(visible_ix)
+                .hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    #[cfg(test)]
+    fn inline_visible_indices_eager(&self) -> Vec<usize> {
+        self.diff
+            .lines
+            .iter()
+            .enumerate()
+            .filter_map(|(src_ix, line)| {
+                (!should_hide_unified_diff_header_for_bench(line.kind, line.text.as_ref()))
+                    .then_some(src_ix)
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn inline_visible_indices_map(&self) -> Vec<usize> {
+        let hidden_flags = self
+            .diff
+            .lines
+            .iter()
+            .map(|line| should_hide_unified_diff_header_for_bench(line.kind, line.text.as_ref()))
+            .collect::<Vec<_>>();
+        let visible_map = PatchInlineVisibleMap::from_hidden_flags(hidden_flags.as_slice());
+        (0..visible_map.visible_len())
+            .filter_map(|visible_ix| visible_map.src_ix_for_visible_ix(visible_ix))
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn total_rows(&self) -> usize {
+        self.diff.lines.len()
+    }
+}
+
+pub struct PatchDiffSearchQueryUpdateFixture {
+    diff_rows: Vec<AnnotatedDiffLine>,
+    click_kinds: Vec<DiffClickKind>,
+    word_highlights: Vec<Option<Vec<Range<usize>>>>,
+    language_for_src_ix: Vec<Option<DiffSyntaxLanguage>>,
+    visible_row_indices: Vec<usize>,
+    theme: AppTheme,
+    syntax_mode: DiffSyntaxMode,
+    stable_cache: Vec<Option<CachedDiffStyledText>>,
+    query_cache: Vec<Option<CachedDiffStyledText>>,
+    query_cache_query: SharedString,
+}
+
+impl PatchDiffSearchQueryUpdateFixture {
+    pub fn new(lines: usize) -> Self {
+        let theme = AppTheme::zed_ayu_dark();
+        let language = diff_syntax_language_for_path("src/lib.rs");
+        let target_lines = lines.max(1);
+        let mut diff_rows = Vec::with_capacity(target_lines);
+        let mut click_kinds = Vec::with_capacity(target_lines);
+        let mut word_highlights = Vec::with_capacity(target_lines);
+        let mut language_for_src_ix = Vec::with_capacity(target_lines);
+
+        let mut file_ix = 0usize;
+        while diff_rows.len() < target_lines {
+            diff_rows.push(AnnotatedDiffLine {
+                kind: gitcomet_core::domain::DiffLineKind::Header,
+                text: format!("diff --git a/src/file_{file_ix}.rs b/src/file_{file_ix}.rs").into(),
+                old_line: None,
+                new_line: None,
+            });
+            click_kinds.push(DiffClickKind::FileHeader);
+            word_highlights.push(None);
+            language_for_src_ix.push(None);
+            if diff_rows.len() >= target_lines {
+                break;
+            }
+
+            diff_rows.push(AnnotatedDiffLine {
+                kind: gitcomet_core::domain::DiffLineKind::Hunk,
+                text: format!("@@ -1,12 +1,12 @@ fn synthetic_{file_ix}() {{").into(),
+                old_line: None,
+                new_line: None,
+            });
+            click_kinds.push(DiffClickKind::HunkHeader);
+            word_highlights.push(None);
+            language_for_src_ix.push(None);
+            if diff_rows.len() >= target_lines {
+                break;
+            }
+
+            for line_in_file in 0..12 {
+                if diff_rows.len() >= target_lines {
+                    break;
+                }
+
+                let content = format!(
+                    "let shared_{file_ix}_{line_in_file} = compute_shared({line_in_file});"
+                );
+                let (kind, text) = match line_in_file % 3 {
+                    0 => (
+                        gitcomet_core::domain::DiffLineKind::Add,
+                        format!("+{content}"),
+                    ),
+                    1 => (
+                        gitcomet_core::domain::DiffLineKind::Remove,
+                        format!("-{content}"),
+                    ),
+                    _ => (
+                        gitcomet_core::domain::DiffLineKind::Context,
+                        format!(" {content}"),
+                    ),
+                };
+
+                let word_start = content.find("shared").unwrap_or(0);
+                let word_end = (word_start + "shared".len()).min(content.len());
+
+                diff_rows.push(AnnotatedDiffLine {
+                    kind,
+                    text: text.into(),
+                    old_line: None,
+                    new_line: None,
+                });
+                click_kinds.push(DiffClickKind::Line);
+                let ranges = std::iter::once(word_start..word_end).collect::<Vec<_>>();
+                word_highlights.push(Some(ranges));
+                language_for_src_ix.push(language);
+            }
+
+            file_ix = file_ix.saturating_add(1);
+        }
+
+        let syntax_mode = if diff_rows.len() > 4_000 {
+            DiffSyntaxMode::HeuristicOnly
+        } else {
+            DiffSyntaxMode::Auto
+        };
+        let mut fixture = Self {
+            visible_row_indices: (0..diff_rows.len()).collect(),
+            stable_cache: vec![None; diff_rows.len()],
+            query_cache: vec![None; diff_rows.len()],
+            query_cache_query: SharedString::default(),
+            diff_rows,
+            click_kinds,
+            word_highlights,
+            language_for_src_ix,
+            theme,
+            syntax_mode,
+        };
+        fixture.prewarm_stable_cache();
+        fixture
+    }
+
+    fn prewarm_stable_cache(&mut self) {
+        for src_ix in 0..self.diff_rows.len() {
+            let click_kind = self
+                .click_kinds
+                .get(src_ix)
+                .copied()
+                .unwrap_or(DiffClickKind::Line);
+            if !matches!(click_kind, DiffClickKind::Line) {
+                continue;
+            }
+            let _ = self.row_styled(src_ix, "");
+        }
+        self.query_cache.fill(None);
+        self.query_cache_query = SharedString::default();
+    }
+
+    fn sync_query_cache(&mut self, query: &str) {
+        if self.query_cache_query.as_ref() != query {
+            self.query_cache_query = query.to_string().into();
+            self.query_cache.fill(None);
+        }
+    }
+
+    fn row_styled(&mut self, src_ix: usize, query: &str) -> Option<CachedDiffStyledText> {
+        let query = query.trim();
+        let query_active = !query.is_empty();
+        let click_kind = self
+            .click_kinds
+            .get(src_ix)
+            .copied()
+            .unwrap_or(DiffClickKind::Line);
+        let should_style = matches!(click_kind, DiffClickKind::Line) || query_active;
+        if !should_style {
+            return None;
+        }
+
+        if self
+            .stable_cache
+            .get(src_ix)
+            .and_then(Option::as_ref)
+            .is_none()
+        {
+            let line = self.diff_rows.get(src_ix)?;
+            let stable = if matches!(click_kind, DiffClickKind::Line) {
+                let word_ranges = self
+                    .word_highlights
+                    .get(src_ix)
+                    .and_then(|ranges| ranges.as_deref())
+                    .unwrap_or(&[]);
+                let language = self.language_for_src_ix.get(src_ix).copied().flatten();
+                let word_color = match line.kind {
+                    gitcomet_core::domain::DiffLineKind::Add => Some(self.theme.colors.success),
+                    gitcomet_core::domain::DiffLineKind::Remove => Some(self.theme.colors.danger),
+                    _ => None,
+                };
+
+                super::diff_text::build_cached_diff_styled_text(
+                    self.theme,
+                    diff_content_text(line),
+                    word_ranges,
+                    "",
+                    language,
+                    self.syntax_mode,
+                    word_color,
+                )
+            } else {
+                super::diff_text::build_cached_diff_styled_text(
+                    self.theme,
+                    line.text.as_ref(),
+                    &[],
+                    "",
+                    None,
+                    self.syntax_mode,
+                    None,
+                )
+            };
+            if let Some(slot) = self.stable_cache.get_mut(src_ix) {
+                *slot = Some(stable);
+            }
+        }
+
+        if query_active {
+            if self
+                .query_cache
+                .get(src_ix)
+                .and_then(Option::as_ref)
+                .is_none()
+            {
+                let base = self.stable_cache.get(src_ix).and_then(Option::as_ref)?;
+                let overlay = super::diff_text::build_cached_diff_query_overlay_styled_text(
+                    self.theme, base, query,
+                );
+                if let Some(slot) = self.query_cache.get_mut(src_ix) {
+                    *slot = Some(overlay);
+                }
+            }
+            return self
+                .query_cache
+                .get(src_ix)
+                .and_then(Option::as_ref)
+                .cloned();
+        }
+
+        self.stable_cache
+            .get(src_ix)
+            .and_then(Option::as_ref)
+            .cloned()
+    }
+
+    pub fn run_query_update_step(&mut self, query: &str, start: usize, window: usize) -> u64 {
+        if self.visible_row_indices.is_empty() || window == 0 {
+            return 0;
+        }
+
+        self.sync_query_cache(query);
+        let start = start % self.visible_row_indices.len();
+        let end = (start + window).min(self.visible_row_indices.len());
+        let query = self.query_cache_query.clone();
+
+        let mut h = DefaultHasher::new();
+        for visible_ix in start..end {
+            let src_ix = self.visible_row_indices[visible_ix];
+            src_ix.hash(&mut h);
+            if let Some(styled) = self.row_styled(src_ix, query.as_ref()) {
+                styled.text_hash.hash(&mut h);
+                styled.highlights_hash.hash(&mut h);
+            }
+        }
+        self.stable_cache_entries().hash(&mut h);
+        self.query_cache_entries().hash(&mut h);
+        h.finish()
+    }
+
+    pub fn visible_rows(&self) -> usize {
+        self.visible_row_indices.len()
+    }
+
+    fn stable_cache_entries(&self) -> usize {
+        self.stable_cache
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count()
+    }
+
+    fn query_cache_entries(&self) -> usize {
+        self.query_cache
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count()
+    }
+}
+
+pub struct FileDiffSyntaxPrepareFixture {
+    lines: Vec<String>,
+    language: DiffSyntaxLanguage,
+    theme: AppTheme,
+    budget: DiffSyntaxBudget,
+}
+
+impl FileDiffSyntaxPrepareFixture {
+    pub fn new(lines: usize, line_bytes: usize) -> Self {
+        let language =
+            diff_syntax_language_for_path("src/lib.rs").unwrap_or(DiffSyntaxLanguage::Rust);
+        Self {
+            lines: build_synthetic_source_lines(lines, line_bytes),
+            language,
+            theme: AppTheme::zed_ayu_dark(),
+            budget: DiffSyntaxBudget::default(),
+        }
+    }
+
+    pub fn new_query_stress(lines: usize, line_bytes: usize, nesting_depth: usize) -> Self {
+        let language =
+            diff_syntax_language_for_path("src/lib.rs").unwrap_or(DiffSyntaxLanguage::Rust);
+        Self {
+            lines: build_synthetic_nested_query_stress_lines(lines, line_bytes, nesting_depth),
+            language,
+            theme: AppTheme::zed_ayu_dark(),
+            budget: DiffSyntaxBudget::default(),
+        }
+    }
+
+    pub fn prewarm(&self) {
+        let _ = self.prepare_document(&self.lines);
+    }
+
+    pub fn run_prepare_cold(&self, nonce: u64) -> u64 {
+        let lines = self
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(ix, line)| format!("{line} // cold_{nonce}_{ix}"))
+            .collect::<Vec<_>>();
+        let document = self.prepare_document(&lines);
+        self.hash_prepared(&lines, document)
+    }
+
+    pub fn run_prepare_warm(&self) -> u64 {
+        let document = self.prepare_document(&self.lines);
+        self.hash_prepared(&self.lines, document)
+    }
+
+    pub fn run_prepared_syntax_multidoc_cache_hit_rate_step(&self, docs: usize, nonce: u64) -> u64 {
+        let docs = docs.clamp(3, 6);
+        benchmark_reset_diff_syntax_prepared_cache_metrics();
+
+        let mut prepared = Vec::with_capacity(docs);
+        for doc_ix in 0..docs {
+            let lines = self
+                .lines
+                .iter()
+                .enumerate()
+                .map(|(line_ix, line)| format!("{line} // multidoc_{nonce}_{doc_ix}_{line_ix}"))
+                .collect::<Vec<_>>();
+            if let Some(document) = self.prepare_document(&lines) {
+                prepared.push((lines, document));
+            }
+        }
+
+        for (lines, document) in &prepared {
+            let _ = self.hash_prepared_line(lines, Some(*document), 0);
+        }
+        for _ in 0..4 {
+            for (lines, document) in &prepared {
+                let _ = self.hash_prepared_line(lines, Some(*document), 0);
+            }
+        }
+
+        let metrics = benchmark_diff_syntax_prepared_cache_metrics();
+        let total = metrics.hit.saturating_add(metrics.miss);
+        let hit_rate_per_mille = if total == 0 {
+            0
+        } else {
+            metrics.hit.saturating_mul(1000) / total
+        };
+
+        let mut h = DefaultHasher::new();
+        prepared.len().hash(&mut h);
+        metrics.hit.hash(&mut h);
+        metrics.miss.hash(&mut h);
+        metrics.evict.hash(&mut h);
+        metrics.chunk_build_ms.hash(&mut h);
+        hit_rate_per_mille.hash(&mut h);
+        h.finish()
+    }
+
+    pub fn run_prepared_syntax_chunk_miss_cost_step(&self, nonce: u64) -> Duration {
+        let lines = self
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(ix, line)| {
+                if ix == 0 {
+                    format!("{line} // chunk_miss_{nonce}")
+                } else {
+                    line.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let Some(document) = self.prepare_document(&lines) else {
+            return Duration::ZERO;
+        };
+
+        benchmark_reset_diff_syntax_prepared_cache_metrics();
+        let line_count = lines.len().max(1);
+        let chunk_rows = 64usize;
+        let chunk_count = line_count.div_ceil(chunk_rows).max(1);
+        let chunk_ix = (nonce as usize) % chunk_count;
+        let line_ix = chunk_ix
+            .saturating_mul(chunk_rows)
+            .min(line_count.saturating_sub(1));
+
+        let start = std::time::Instant::now();
+        let _ = self.hash_prepared_line(&lines, Some(document), line_ix);
+        let elapsed = start.elapsed();
+
+        let metrics = benchmark_diff_syntax_prepared_cache_metrics();
+        let _loaded_chunks = benchmark_diff_syntax_prepared_loaded_chunk_count(document);
+        let _is_cached = benchmark_diff_syntax_prepared_cache_contains_document(document);
+        if metrics.miss == 0 {
+            return Duration::ZERO.max(elapsed);
+        }
+        elapsed
+    }
+
+    fn prepare_document(
+        &self,
+        lines: &[String],
+    ) -> Option<super::diff_text::PreparedDiffSyntaxDocument> {
+        match prepare_diff_syntax_document_with_budget(
+            self.language,
+            DiffSyntaxMode::Auto,
+            lines.iter().map(String::as_str),
+            self.budget,
+        ) {
+            PrepareDiffSyntaxDocumentResult::Ready(document) => Some(document),
+            PrepareDiffSyntaxDocumentResult::TimedOut => {
+                prepare_diff_syntax_document_in_background(
+                    self.language,
+                    DiffSyntaxMode::Auto,
+                    lines.iter().map(String::as_str),
+                )
+                .map(inject_background_prepared_diff_syntax_document)
+            }
+            PrepareDiffSyntaxDocumentResult::Unsupported => None,
+        }
+    }
+
+    fn hash_prepared(
+        &self,
+        lines: &[String],
+        document: Option<super::diff_text::PreparedDiffSyntaxDocument>,
+    ) -> u64 {
+        self.hash_prepared_line(lines, document, 0)
+    }
+
+    fn hash_prepared_line(
+        &self,
+        lines: &[String],
+        document: Option<super::diff_text::PreparedDiffSyntaxDocument>,
+        line_ix: usize,
+    ) -> u64 {
+        let line_ix = line_ix.min(lines.len().saturating_sub(1));
+        let text = lines.get(line_ix).map(String::as_str).unwrap_or("");
+        let styled = super::diff_text::build_cached_diff_styled_text_for_prepared_document_line(
+            self.theme,
+            text,
+            &[],
+            "",
+            super::diff_text::DiffSyntaxConfig {
+                language: Some(self.language),
+                mode: DiffSyntaxMode::Auto,
+            },
+            None,
+            super::diff_text::PreparedDiffSyntaxLine { document, line_ix },
+        );
+
+        let mut h = DefaultHasher::new();
+        lines.len().hash(&mut h);
+        line_ix.hash(&mut h);
+        styled.text_hash.hash(&mut h);
+        styled.highlights_hash.hash(&mut h);
+        h.finish()
+    }
+}
+
+pub struct FileDiffSyntaxReparseFixture {
+    lines: Vec<String>,
+    language: DiffSyntaxLanguage,
+    theme: AppTheme,
+    budget: DiffSyntaxBudget,
+    nonce: u64,
+    prepared_document: Option<super::diff_text::PreparedDiffSyntaxDocument>,
+}
+
+impl FileDiffSyntaxReparseFixture {
+    pub fn new(lines: usize, line_bytes: usize) -> Self {
+        let language =
+            diff_syntax_language_for_path("src/lib.rs").unwrap_or(DiffSyntaxLanguage::Rust);
+        Self {
+            lines: build_synthetic_source_lines(lines, line_bytes),
+            language,
+            theme: AppTheme::zed_ayu_dark(),
+            budget: DiffSyntaxBudget::default(),
+            nonce: 0,
+            prepared_document: None,
+        }
+    }
+
+    pub fn run_small_edit_step(&mut self) -> u64 {
+        self.ensure_prepared_document();
+        let mut next_lines = self.lines.clone();
+        if next_lines.is_empty() {
+            next_lines.push(String::new());
+        }
+        let line_ix = (self.nonce as usize) % next_lines.len();
+        let marker = format!(" tiny_reparse_{}", self.nonce);
+        next_lines[line_ix].push_str(marker.as_str());
+        self.nonce = self.nonce.wrapping_add(1);
+
+        let next_document = self.prepare_document_with_reuse(&next_lines, self.prepared_document);
+        if next_document.is_some() {
+            self.lines = next_lines;
+            self.prepared_document = next_document;
+        }
+
+        self.hash_prepared(&self.lines, self.prepared_document)
+    }
+
+    pub fn run_large_edit_step(&mut self) -> u64 {
+        self.ensure_prepared_document();
+        let mut next_lines = self.lines.clone();
+        if next_lines.is_empty() {
+            next_lines.push(String::new());
+        }
+
+        let total_lines = next_lines.len();
+        let changed_lines = total_lines.saturating_mul(3) / 5;
+        let changed_lines = changed_lines.max(1).min(total_lines);
+        let start = if total_lines == 0 {
+            0
+        } else {
+            (self.nonce as usize).wrapping_mul(13) % total_lines
+        };
+        for offset in 0..changed_lines {
+            let ix = (start + offset) % total_lines;
+            next_lines[ix] = format!(
+                "pub fn fallback_edit_{}_{offset}() {{ let value = {}; }}",
+                self.nonce,
+                offset.wrapping_mul(17)
+            );
+        }
+        self.nonce = self.nonce.wrapping_add(1);
+
+        let next_document = self.prepare_document_with_reuse(&next_lines, self.prepared_document);
+        if next_document.is_some() {
+            self.lines = next_lines;
+            self.prepared_document = next_document;
+        }
+
+        self.hash_prepared(&self.lines, self.prepared_document)
+    }
+
+    fn ensure_prepared_document(&mut self) {
+        if self.prepared_document.is_some() {
+            return;
+        }
+        self.prepared_document = self.prepare_document_with_reuse(&self.lines, None);
+    }
+
+    fn prepare_document_with_reuse(
+        &self,
+        lines: &[String],
+        old_document: Option<super::diff_text::PreparedDiffSyntaxDocument>,
+    ) -> Option<super::diff_text::PreparedDiffSyntaxDocument> {
+        match prepare_diff_syntax_document_with_budget_reuse(
+            self.language,
+            DiffSyntaxMode::Auto,
+            lines.iter().map(String::as_str),
+            self.budget,
+            old_document,
+        ) {
+            PrepareDiffSyntaxDocumentResult::Ready(document) => Some(document),
+            PrepareDiffSyntaxDocumentResult::TimedOut => {
+                prepare_diff_syntax_document_in_background(
+                    self.language,
+                    DiffSyntaxMode::Auto,
+                    lines.iter().map(String::as_str),
+                )
+                .map(inject_background_prepared_diff_syntax_document)
+            }
+            PrepareDiffSyntaxDocumentResult::Unsupported => None,
+        }
+    }
+
+    fn hash_prepared(
+        &self,
+        lines: &[String],
+        document: Option<super::diff_text::PreparedDiffSyntaxDocument>,
+    ) -> u64 {
+        let text = lines.first().map(String::as_str).unwrap_or("");
+        let styled = super::diff_text::build_cached_diff_styled_text_for_prepared_document_line(
+            self.theme,
+            text,
+            &[],
+            "",
+            super::diff_text::DiffSyntaxConfig {
+                language: Some(self.language),
+                mode: DiffSyntaxMode::Auto,
+            },
+            None,
+            super::diff_text::PreparedDiffSyntaxLine {
+                document,
+                line_ix: 0,
+            },
+        );
+
+        let mut h = DefaultHasher::new();
+        lines.len().hash(&mut h);
+        styled.text_hash.hash(&mut h);
+        styled.highlights_hash.hash(&mut h);
+        h.finish()
+    }
+}
+
+pub struct FileDiffSyntaxCacheDropFixture {
+    lines: usize,
+    tokens_per_line: usize,
+    replacements: usize,
+}
+
+impl FileDiffSyntaxCacheDropFixture {
+    pub fn new(lines: usize, tokens_per_line: usize, replacements: usize) -> Self {
+        Self {
+            lines: lines.max(1),
+            tokens_per_line: tokens_per_line.max(1),
+            replacements: replacements.max(1),
+        }
+    }
+
+    pub fn run_deferred_drop_step(&self) -> u64 {
+        benchmark_diff_syntax_cache_replacement_drop_step(
+            self.lines,
+            self.tokens_per_line,
+            self.replacements,
+            true,
+        )
+    }
+
+    pub fn run_inline_drop_control_step(&self) -> u64 {
+        benchmark_diff_syntax_cache_replacement_drop_step(
+            self.lines,
+            self.tokens_per_line,
+            self.replacements,
+            false,
+        )
+    }
+
+    pub fn run_deferred_drop_timed_step(&self, seed: usize) -> Duration {
+        let mut total = Duration::ZERO;
+        for step in 0..self.replacements {
+            total = total.saturating_add(benchmark_diff_syntax_cache_drop_payload_timed_step(
+                self.lines,
+                self.tokens_per_line,
+                seed.wrapping_add(step),
+                true,
+            ));
+        }
+        total
+    }
+
+    pub fn run_inline_drop_control_timed_step(&self, seed: usize) -> Duration {
+        let mut total = Duration::ZERO;
+        for step in 0..self.replacements {
+            total = total.saturating_add(benchmark_diff_syntax_cache_drop_payload_timed_step(
+                self.lines,
+                self.tokens_per_line,
+                seed.wrapping_add(step),
+                false,
+            ));
+        }
+        total
+    }
+
+    pub fn flush_deferred_drop_queue(&self) -> bool {
+        benchmark_flush_diff_syntax_deferred_drop_queue()
+    }
+}
+
+pub struct WorktreePreviewRenderFixture {
+    lines: Vec<String>,
+    language: Option<DiffSyntaxLanguage>,
+    syntax_mode: DiffSyntaxMode,
+    prepared_document: Option<super::diff_text::PreparedDiffSyntaxDocument>,
+    theme: AppTheme,
+}
+
+impl WorktreePreviewRenderFixture {
+    pub fn new(lines: usize, line_bytes: usize) -> Self {
+        let generated_lines = build_synthetic_source_lines(lines, line_bytes);
+        let language = diff_syntax_language_for_path("src/lib.rs");
+        let syntax_mode = if generated_lines.len() <= 4_000 {
+            DiffSyntaxMode::Auto
+        } else {
+            DiffSyntaxMode::HeuristicOnly
+        };
+        let prepared_document = language.and_then(|language| {
+            prepare_diff_syntax_document(
+                language,
+                syntax_mode,
+                generated_lines.iter().map(String::as_str),
+            )
+        });
+
+        Self {
+            lines: generated_lines,
+            language,
+            syntax_mode,
+            prepared_document,
+            theme: AppTheme::zed_ayu_dark(),
+        }
+    }
+
+    pub fn run_cached_lookup_step(&self, start: usize, window: usize) -> u64 {
+        self.hash_window(start, window, self.prepared_document)
+    }
+
+    pub fn run_render_time_prepare_step(&self, start: usize, window: usize) -> u64 {
+        let prepared_document = self.language.and_then(|language| {
+            prepare_diff_syntax_document(
+                language,
+                self.syntax_mode,
+                self.lines.iter().map(String::as_str),
+            )
+        });
+        self.hash_window(start, window, prepared_document)
+    }
+
+    fn hash_window(
+        &self,
+        start: usize,
+        window: usize,
+        prepared_document: Option<super::diff_text::PreparedDiffSyntaxDocument>,
+    ) -> u64 {
+        if self.lines.is_empty() || window == 0 {
+            return 0;
+        }
+
+        let start = start % self.lines.len();
+        let end = (start + window).min(self.lines.len());
+        let mut h = DefaultHasher::new();
+        for line_ix in start..end {
+            let line = self.lines.get(line_ix).map(String::as_str).unwrap_or("");
+            let styled = super::diff_text::build_cached_diff_styled_text_for_prepared_document_line(
+                self.theme,
+                line,
+                &[],
+                "",
+                super::diff_text::DiffSyntaxConfig {
+                    language: self.language,
+                    mode: self.syntax_mode,
+                },
+                None,
+                super::diff_text::PreparedDiffSyntaxLine {
+                    document: prepared_document,
+                    line_ix,
+                },
+            );
+            line_ix.hash(&mut h);
+            styled.text_hash.hash(&mut h);
+            styled.highlights_hash.hash(&mut h);
+        }
+        h.finish()
+    }
+}
+
 pub struct ConflictThreeWayScrollFixture {
     base_lines: Vec<SharedString>,
     ours_lines: Vec<SharedString>,
@@ -357,6 +2025,9 @@ impl ConflictThreeWayScrollFixture {
         let base_lines = split_lines_shared(&base_text);
         let ours_lines = split_lines_shared(&ours_text);
         let theirs_lines = split_lines_shared(&theirs_text);
+        let base_line_starts = line_starts_for_text(&base_text);
+        let ours_line_starts = line_starts_for_text(&ours_text);
+        let theirs_line_starts = line_starts_for_text(&theirs_text);
         let three_way_len = base_lines
             .len()
             .max(ours_lines.len())
@@ -375,9 +2046,12 @@ impl ConflictThreeWayScrollFixture {
         );
         let (base_word_highlights, ours_word_highlights, theirs_word_highlights) =
             conflict_resolver::compute_three_way_word_highlights(
-                &base_lines,
-                &ours_lines,
-                &theirs_lines,
+                &base_text,
+                &base_line_starts,
+                &ours_text,
+                &ours_line_starts,
+                &theirs_text,
+                &theirs_line_starts,
                 &segments,
             );
         let syntax_mode = if three_way_len > 4_000 {
@@ -487,6 +2161,156 @@ impl ConflictThreeWayScrollFixture {
 
     pub fn conflict_count(&self) -> usize {
         self.conflict_count
+    }
+}
+
+fn hash_three_way_visible_map_items(items: &[ThreeWayVisibleItem]) -> u64 {
+    let mut h = DefaultHasher::new();
+    items.len().hash(&mut h);
+
+    let mut hash_item = |item: &ThreeWayVisibleItem| match *item {
+        ThreeWayVisibleItem::Line(ix) => {
+            0u8.hash(&mut h);
+            ix.hash(&mut h);
+        }
+        ThreeWayVisibleItem::CollapsedBlock(conflict_ix) => {
+            1u8.hash(&mut h);
+            conflict_ix.hash(&mut h);
+        }
+    };
+
+    if let Some(first) = items.first() {
+        hash_item(first);
+    }
+    if let Some(mid) = items.get(items.len() / 2) {
+        hash_item(mid);
+    }
+    if let Some(last) = items.last() {
+        hash_item(last);
+    }
+
+    h.finish()
+}
+
+fn build_three_way_visible_map_legacy(
+    total_lines: usize,
+    conflict_ranges: &[Range<usize>],
+    segments: &[ConflictSegment],
+    hide_resolved: bool,
+) -> Vec<ThreeWayVisibleItem> {
+    if !hide_resolved {
+        return (0..total_lines).map(ThreeWayVisibleItem::Line).collect();
+    }
+
+    let resolved_blocks: Vec<bool> = segments
+        .iter()
+        .filter_map(|s| match s {
+            ConflictSegment::Block(b) => Some(b.resolved),
+            _ => None,
+        })
+        .collect();
+
+    let mut visible = Vec::with_capacity(total_lines);
+    let mut line = 0usize;
+    while line < total_lines {
+        if let Some((range_ix, range)) = conflict_ranges
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.contains(&line))
+            .filter(|(ri, _)| resolved_blocks.get(*ri).copied().unwrap_or(false))
+        {
+            visible.push(ThreeWayVisibleItem::CollapsedBlock(range_ix));
+            line = range.end;
+            continue;
+        }
+        visible.push(ThreeWayVisibleItem::Line(line));
+        line += 1;
+    }
+    visible
+}
+
+pub struct ConflictThreeWayVisibleMapBuildFixture {
+    total_lines: usize,
+    conflict_ranges: Vec<Range<usize>>,
+    segments: Vec<ConflictSegment>,
+    conflict_count: usize,
+}
+
+impl ConflictThreeWayVisibleMapBuildFixture {
+    pub fn new(lines: usize, conflict_blocks: usize) -> Self {
+        let segments = build_synthetic_three_way_segments(lines, conflict_blocks);
+        let (base_text, ours_text, theirs_text) = materialize_three_way_side_texts(&segments);
+        let base_lines = split_lines_shared(&base_text);
+        let ours_lines = split_lines_shared(&ours_text);
+        let theirs_lines = split_lines_shared(&theirs_text);
+        let total_lines = base_lines
+            .len()
+            .max(ours_lines.len())
+            .max(theirs_lines.len());
+        let conflict_maps = conflict_resolver::build_three_way_conflict_maps(
+            &segments,
+            base_lines.len(),
+            ours_lines.len(),
+            theirs_lines.len(),
+        );
+        let conflict_count = conflict_maps.conflict_ranges.len();
+
+        Self {
+            total_lines,
+            conflict_ranges: conflict_maps.conflict_ranges,
+            segments,
+            conflict_count,
+        }
+    }
+
+    pub fn run_linear_step(&self) -> u64 {
+        let visible_map = conflict_resolver::build_three_way_visible_map(
+            self.total_lines,
+            &self.conflict_ranges,
+            &self.segments,
+            true,
+        );
+        std::hint::black_box(visible_map.as_slice());
+        hash_three_way_visible_map_items(&visible_map)
+    }
+
+    pub fn run_legacy_step(&self) -> u64 {
+        let visible_map = build_three_way_visible_map_legacy(
+            self.total_lines,
+            &self.conflict_ranges,
+            &self.segments,
+            true,
+        );
+        std::hint::black_box(visible_map.as_slice());
+        hash_three_way_visible_map_items(&visible_map)
+    }
+
+    pub fn visible_rows(&self) -> usize {
+        self.total_lines
+    }
+
+    pub fn conflict_count(&self) -> usize {
+        self.conflict_count
+    }
+
+    #[cfg(test)]
+    fn build_linear_map(&self) -> Vec<ThreeWayVisibleItem> {
+        conflict_resolver::build_three_way_visible_map(
+            self.total_lines,
+            &self.conflict_ranges,
+            &self.segments,
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    fn build_legacy_map(&self) -> Vec<ThreeWayVisibleItem> {
+        build_three_way_visible_map_legacy(
+            self.total_lines,
+            &self.conflict_ranges,
+            &self.segments,
+            true,
+        )
     }
 }
 
@@ -1021,6 +2845,412 @@ impl ConflictResolvedOutputGutterScrollFixture {
     }
 }
 
+pub struct ResolvedOutputRecomputeIncrementalFixture {
+    base_text: String,
+    ours_text: String,
+    theirs_text: String,
+    base_line_starts: Vec<usize>,
+    ours_line_starts: Vec<usize>,
+    theirs_line_starts: Vec<usize>,
+    block_ranges: Vec<Range<usize>>,
+    block_unresolved: Vec<bool>,
+    output_text: String,
+    output_line_starts: Vec<usize>,
+    meta: Vec<conflict_resolver::ResolvedLineMeta>,
+    markers: Vec<Option<ResolvedOutputGutterMarker>>,
+    edit_line_ix: usize,
+    edit_nonce: u64,
+}
+
+impl ResolvedOutputRecomputeIncrementalFixture {
+    pub fn new(lines: usize, conflict_blocks: usize) -> Self {
+        let marker_segments = build_synthetic_three_way_segments(lines, conflict_blocks);
+        let (output_text, block_ranges) =
+            materialize_resolved_output_with_block_ranges(&marker_segments);
+        let (base_text, ours_text, theirs_text) =
+            materialize_three_way_side_texts(&marker_segments);
+        let base_line_starts = line_starts_for_text(&base_text);
+        let ours_line_starts = line_starts_for_text(&ours_text);
+        let theirs_line_starts = line_starts_for_text(&theirs_text);
+        let output_line_starts = line_starts_for_text(&output_text);
+        let line_count = conflict_resolver::split_output_lines_for_outline(&output_text).len();
+        let block_unresolved = marker_segments
+            .iter()
+            .filter_map(|segment| match segment {
+                ConflictSegment::Block(block) => Some(!block.resolved),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let mut fixture = Self {
+            base_text,
+            ours_text,
+            theirs_text,
+            base_line_starts,
+            ours_line_starts,
+            theirs_line_starts,
+            block_ranges,
+            block_unresolved,
+            output_text,
+            output_line_starts,
+            meta: Vec::new(),
+            markers: Vec::new(),
+            edit_line_ix: 0,
+            edit_nonce: 0,
+        };
+        fixture.meta = fixture.recompute_meta_full(fixture.output_text.as_str());
+        fixture.markers = fixture.rebuild_markers(line_count);
+        fixture.edit_line_ix = fixture
+            .output_line_starts
+            .len()
+            .saturating_sub(1)
+            .min(lines / 2);
+        fixture
+    }
+
+    fn recompute_meta_full(&self, output_text: &str) -> Vec<conflict_resolver::ResolvedLineMeta> {
+        conflict_resolver::compute_resolved_line_provenance_from_text_with_indexed_sources(
+            output_text,
+            self.base_text.as_str(),
+            self.base_line_starts.as_slice(),
+            self.ours_text.as_str(),
+            self.ours_line_starts.as_slice(),
+            self.theirs_text.as_str(),
+            self.theirs_line_starts.as_slice(),
+        )
+    }
+
+    fn insert_lookup_from_text<'a>(
+        lookup: &mut HashMap<&'a str, (conflict_resolver::ResolvedLineSource, Option<u32>)>,
+        source: conflict_resolver::ResolvedLineSource,
+        text: &'a str,
+        line_starts: &[usize],
+    ) {
+        let line_count = if text.is_empty() {
+            0
+        } else {
+            line_starts.len().max(1)
+        };
+        for line_ix in (0..line_count).rev() {
+            let line = if text.is_empty() {
+                ""
+            } else {
+                let text_len = text.len();
+                let start = line_starts.get(line_ix).copied().unwrap_or(text_len);
+                let mut end = line_starts
+                    .get(line_ix.saturating_add(1))
+                    .copied()
+                    .unwrap_or(text_len)
+                    .min(text_len);
+                if end > start && text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\n') {
+                    end = end.saturating_sub(1);
+                }
+                text.get(start..end).unwrap_or("")
+            };
+            lookup.insert(
+                line,
+                (
+                    source,
+                    Some(u32::try_from(line_ix.saturating_add(1)).unwrap_or(u32::MAX)),
+                ),
+            );
+        }
+    }
+
+    fn build_source_lookup(
+        &self,
+    ) -> HashMap<&str, (conflict_resolver::ResolvedLineSource, Option<u32>)> {
+        let mut lookup = HashMap::default();
+        Self::insert_lookup_from_text(
+            &mut lookup,
+            conflict_resolver::ResolvedLineSource::C,
+            self.theirs_text.as_str(),
+            self.theirs_line_starts.as_slice(),
+        );
+        Self::insert_lookup_from_text(
+            &mut lookup,
+            conflict_resolver::ResolvedLineSource::B,
+            self.ours_text.as_str(),
+            self.ours_line_starts.as_slice(),
+        );
+        Self::insert_lookup_from_text(
+            &mut lookup,
+            conflict_resolver::ResolvedLineSource::A,
+            self.base_text.as_str(),
+            self.base_line_starts.as_slice(),
+        );
+        lookup
+    }
+
+    fn rebuild_markers(&self, output_line_count: usize) -> Vec<Option<ResolvedOutputGutterMarker>> {
+        let mut markers = vec![None; output_line_count];
+        if output_line_count == 0 {
+            return markers;
+        }
+        for (conflict_ix, range) in self.block_ranges.iter().enumerate() {
+            let unresolved = self
+                .block_unresolved
+                .get(conflict_ix)
+                .copied()
+                .unwrap_or(false);
+            if range.start < range.end {
+                let end = range.end.min(output_line_count);
+                for (line_ix, marker_slot) in
+                    markers.iter_mut().enumerate().take(end).skip(range.start)
+                {
+                    *marker_slot = Some(ResolvedOutputGutterMarker {
+                        conflict_ix,
+                        is_start: line_ix == range.start,
+                        is_end: line_ix + 1 == range.end,
+                        unresolved,
+                    });
+                }
+            } else {
+                let anchor = range.start.min(output_line_count.saturating_sub(1));
+                markers[anchor] = Some(ResolvedOutputGutterMarker {
+                    conflict_ix,
+                    is_start: true,
+                    is_end: true,
+                    unresolved,
+                });
+            }
+        }
+        markers
+    }
+
+    fn line_text<'a>(&self, text: &'a str, line_starts: &[usize], line_ix: usize) -> &'a str {
+        if text.is_empty() {
+            return "";
+        }
+        let text_len = text.len();
+        let start = line_starts.get(line_ix).copied().unwrap_or(text_len);
+        if start >= text_len {
+            return "";
+        }
+        let mut end = line_starts
+            .get(line_ix.saturating_add(1))
+            .copied()
+            .unwrap_or(text_len)
+            .min(text_len);
+        if end > start && text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\n') {
+            end = end.saturating_sub(1);
+        }
+        text.get(start..end).unwrap_or("")
+    }
+
+    fn dirty_line_range(
+        line_starts: &[usize],
+        text_len: usize,
+        byte_range: Range<usize>,
+    ) -> Range<usize> {
+        let line_count = line_starts.len().max(1);
+        let start = line_starts
+            .partition_point(|&line_start| line_start <= byte_range.start.min(text_len))
+            .saturating_sub(1)
+            .min(line_count.saturating_sub(1));
+        let end = if byte_range.is_empty() {
+            start.saturating_add(1)
+        } else {
+            line_starts
+                .partition_point(|&line_start| {
+                    line_start <= byte_range.end.min(text_len).saturating_sub(1)
+                })
+                .saturating_sub(1)
+                .saturating_add(1)
+        }
+        .min(line_count)
+        .max(start.saturating_add(1));
+        start..end
+    }
+
+    fn next_single_line_edit(&mut self) -> (String, Range<usize>, Range<usize>) {
+        self.edit_nonce = self.edit_nonce.wrapping_add(1);
+        let line_ix = self
+            .edit_line_ix
+            .min(self.output_line_starts.len().saturating_sub(1));
+        let text_len = self.output_text.len();
+        let start = self
+            .output_line_starts
+            .get(line_ix)
+            .copied()
+            .unwrap_or(text_len)
+            .min(text_len);
+        let mut end = self
+            .output_line_starts
+            .get(line_ix.saturating_add(1))
+            .copied()
+            .unwrap_or(text_len)
+            .min(text_len);
+        if end > start && self.output_text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\n') {
+            end = end.saturating_sub(1);
+        }
+
+        let replacement = format!(
+            "let bench_manual_{}_{} = {};",
+            line_ix,
+            self.edit_nonce,
+            self.edit_nonce % 31
+        );
+        let mut next = String::with_capacity(
+            self.output_text
+                .len()
+                .saturating_sub(end.saturating_sub(start))
+                .saturating_add(replacement.len()),
+        );
+        next.push_str(self.output_text.get(0..start).unwrap_or_default());
+        next.push_str(replacement.as_str());
+        next.push_str(self.output_text.get(end..).unwrap_or_default());
+        let old_range = start..end;
+        let new_range = start..start.saturating_add(replacement.len());
+        (next, old_range, new_range)
+    }
+
+    fn hash_outline_state(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.meta.len().hash(&mut h);
+        self.markers.len().hash(&mut h);
+        self.output_line_starts.len().hash(&mut h);
+        self.meta
+            .iter()
+            .take(32)
+            .map(|m| (m.output_line, m.source, m.input_line))
+            .collect::<Vec<_>>()
+            .hash(&mut h);
+        h.finish()
+    }
+
+    pub fn run_full_recompute_step(&mut self) -> u64 {
+        let (next_output, _old_range, _new_range) = self.next_single_line_edit();
+        let next_line_starts = line_starts_for_text(&next_output);
+        let line_count = conflict_resolver::split_output_lines_for_outline(&next_output).len();
+        let next_meta = self.recompute_meta_full(next_output.as_str());
+        let next_markers = self.rebuild_markers(line_count);
+
+        self.output_text = next_output;
+        self.output_line_starts = next_line_starts;
+        self.meta = next_meta;
+        self.markers = next_markers;
+
+        self.hash_outline_state()
+    }
+
+    pub fn run_incremental_recompute_step(&mut self) -> u64 {
+        let old_text = self.output_text.clone();
+        let old_line_starts = self.output_line_starts.clone();
+
+        let (next_output, old_byte_range, new_byte_range) = self.next_single_line_edit();
+        let next_line_starts = line_starts_for_text(&next_output);
+        let next_line_count = conflict_resolver::split_output_lines_for_outline(&next_output).len();
+        let source_lookup = self.build_source_lookup();
+
+        let mut old_dirty =
+            Self::dirty_line_range(old_line_starts.as_slice(), old_text.len(), old_byte_range);
+        let mut new_dirty = Self::dirty_line_range(
+            next_line_starts.as_slice(),
+            next_output.len(),
+            new_byte_range,
+        );
+        old_dirty.start = old_dirty.start.saturating_sub(1);
+        old_dirty.end = old_dirty.end.saturating_add(1).min(self.meta.len());
+        new_dirty.start = new_dirty.start.saturating_sub(1);
+        new_dirty.end = new_dirty.end.saturating_add(1).min(next_line_count);
+        if old_dirty.start != new_dirty.start {
+            // Keep this fixture conservative; fall back to full for odd shifts.
+            self.output_text = next_output;
+            self.output_line_starts = next_line_starts;
+            self.meta = self.recompute_meta_full(self.output_text.as_str());
+            self.markers = self.rebuild_markers(next_line_count);
+            return self.hash_outline_state();
+        }
+
+        let line_delta = new_dirty.len() as isize - old_dirty.len() as isize;
+        let mut next_meta = Vec::with_capacity(next_line_count);
+        next_meta.extend(
+            self.meta
+                .iter()
+                .take(old_dirty.start.min(self.meta.len()))
+                .cloned(),
+        );
+        for line_ix in new_dirty.clone() {
+            let line = self.line_text(next_output.as_str(), next_line_starts.as_slice(), line_ix);
+            let (source, input_line) = source_lookup
+                .get(line)
+                .copied()
+                .unwrap_or((conflict_resolver::ResolvedLineSource::Manual, None));
+            next_meta.push(conflict_resolver::ResolvedLineMeta {
+                output_line: u32::try_from(line_ix).unwrap_or(u32::MAX),
+                source,
+                input_line,
+            });
+        }
+        for meta in self.meta.iter().skip(old_dirty.end.min(self.meta.len())) {
+            let mut shifted = meta.clone();
+            let shifted_ix = if line_delta >= 0 {
+                (meta.output_line as usize).saturating_add(line_delta as usize)
+            } else {
+                (meta.output_line as usize).saturating_sub((-line_delta) as usize)
+            };
+            shifted.output_line = u32::try_from(shifted_ix).unwrap_or(u32::MAX);
+            next_meta.push(shifted);
+        }
+        if next_meta.len() != next_line_count {
+            self.output_text = next_output;
+            self.output_line_starts = next_line_starts;
+            self.meta = self.recompute_meta_full(self.output_text.as_str());
+            self.markers = self.rebuild_markers(next_line_count);
+            return self.hash_outline_state();
+        }
+
+        let mut next_markers = if self.markers.len() == next_line_count {
+            self.markers.clone()
+        } else {
+            self.rebuild_markers(next_line_count)
+        };
+        for line_ix in new_dirty.clone() {
+            if let Some(slot) = next_markers.get_mut(line_ix) {
+                *slot = None;
+            }
+        }
+        for (conflict_ix, range) in self.block_ranges.iter().enumerate() {
+            if range.start >= range.end || range.end > next_line_count {
+                continue;
+            }
+            if range.start >= new_dirty.end || new_dirty.start >= range.end {
+                continue;
+            }
+            let unresolved = self
+                .block_unresolved
+                .get(conflict_ix)
+                .copied()
+                .unwrap_or(false);
+            for (line_ix, marker_slot) in next_markers
+                .iter_mut()
+                .enumerate()
+                .take(range.end)
+                .skip(range.start)
+            {
+                *marker_slot = Some(ResolvedOutputGutterMarker {
+                    conflict_ix,
+                    is_start: line_ix == range.start,
+                    is_end: line_ix + 1 == range.end,
+                    unresolved,
+                });
+            }
+        }
+
+        self.output_text = next_output;
+        self.output_line_starts = next_line_starts;
+        self.meta = next_meta;
+        self.markers = next_markers;
+
+        self.hash_outline_state()
+    }
+
+    pub fn visible_rows(&self) -> usize {
+        self.output_line_starts.len().max(1)
+    }
+}
+
 fn build_synthetic_repo_state(
     local_branches: usize,
     remote_branches: usize,
@@ -1248,6 +3478,34 @@ fn build_synthetic_source_lines(count: usize, target_line_bytes: usize) -> Vec<S
                 line.push_str(" token_");
                 line.push_str(&(ix % 997).to_string());
             }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+fn build_synthetic_nested_query_stress_lines(
+    count: usize,
+    target_line_bytes: usize,
+    nesting_depth: usize,
+) -> Vec<String> {
+    let target_line_bytes = target_line_bytes.max(256);
+    let nesting_depth = nesting_depth.max(32);
+    let mut lines = Vec::with_capacity(count);
+    for ix in 0..count {
+        let mut line = String::with_capacity(target_line_bytes.saturating_add(nesting_depth * 2));
+        line.push_str("let stress_");
+        line.push_str(&ix.to_string());
+        line.push_str(" = ");
+        line.push_str(&"(".repeat(nesting_depth));
+        line.push_str("value_");
+        line.push_str(&(ix % 97).to_string());
+        line.push_str(&")".repeat(nesting_depth));
+        line.push_str("; // nested");
+        while line.len() < target_line_bytes {
+            line.push_str(" (deep_token_");
+            line.push_str(&(ix % 101).to_string());
+            line.push(')');
         }
         lines.push(line);
     }
@@ -1510,6 +3768,96 @@ fn split_lines_shared(text: &str) -> Vec<SharedString> {
     out
 }
 
+fn line_starts_for_text(text: &str) -> Vec<usize> {
+    let mut line_starts =
+        Vec::with_capacity(text.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1);
+    line_starts.push(0);
+    for (ix, byte) in text.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            line_starts.push(ix + 1);
+        }
+    }
+    line_starts
+}
+
+fn build_text_input_streamed_highlights(
+    text: &str,
+    line_starts: &[usize],
+    density: TextInputHighlightDensity,
+) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
+    let theme = AppTheme::zed_ayu_dark();
+    let style_primary = gpui::HighlightStyle {
+        color: Some(theme.colors.accent.into()),
+        ..gpui::HighlightStyle::default()
+    };
+    let style_secondary = gpui::HighlightStyle {
+        color: Some(theme.colors.warning.into()),
+        ..gpui::HighlightStyle::default()
+    };
+    let style_overlay = gpui::HighlightStyle {
+        color: Some(theme.colors.success.into()),
+        ..gpui::HighlightStyle::default()
+    };
+
+    let mut highlights = Vec::new();
+    for line_ix in 0..line_starts.len() {
+        let line_start = line_starts.get(line_ix).copied().unwrap_or(0);
+        let mut line_end = line_starts.get(line_ix + 1).copied().unwrap_or(text.len());
+        if line_end > line_start && text.as_bytes().get(line_end - 1) == Some(&b'\n') {
+            line_end = line_end.saturating_sub(1);
+        }
+        if line_end <= line_start {
+            continue;
+        }
+        let line_len = line_end.saturating_sub(line_start);
+
+        match density {
+            TextInputHighlightDensity::Dense => {
+                let mut local = 0usize;
+                while local + 2 < line_len {
+                    let start = line_start + local;
+                    let end = (start + 20).min(line_end);
+                    if start < end {
+                        let style = if local.is_multiple_of(24) {
+                            style_primary
+                        } else {
+                            style_secondary
+                        };
+                        highlights.push((start..end, style));
+                    }
+
+                    let overlap_start = start.saturating_add(4).min(line_end);
+                    let overlap_end = (overlap_start + 14).min(line_end);
+                    if overlap_start < overlap_end {
+                        highlights.push((overlap_start..overlap_end, style_overlay));
+                    }
+
+                    local = local.saturating_add(12);
+                }
+            }
+            TextInputHighlightDensity::Sparse => {
+                if line_ix % 8 == 0 {
+                    let start = line_start.saturating_add(2).min(line_end);
+                    let end = (start + 26).min(line_end);
+                    if start < end {
+                        highlights.push((start..end, style_primary));
+                    }
+                }
+                if line_ix % 24 == 0 {
+                    let start = line_start.saturating_add(10).min(line_end);
+                    let end = (start + 18).min(line_end);
+                    if start < end {
+                        highlights.push((start..end, style_overlay));
+                    }
+                }
+            }
+        }
+    }
+
+    highlights.sort_by(|(a, _), (b, _)| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
+    highlights
+}
+
 fn word_ranges_for_line(
     highlights: &conflict_resolver::WordHighlights,
     line_ix: usize,
@@ -1548,6 +3896,20 @@ mod tests {
         let hash_a = fixture.run_scroll_step(17, 40);
         let hash_b = fixture.run_scroll_step(17 + fixture.visible_rows() * 3, 40);
         assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn conflict_three_way_visible_map_fixture_tracks_requested_conflict_blocks() {
+        let fixture = ConflictThreeWayVisibleMapBuildFixture::new(120, 12);
+        assert_eq!(fixture.conflict_count(), 12);
+        assert!(fixture.visible_rows() > 0);
+    }
+
+    #[test]
+    fn conflict_three_way_visible_map_fixture_linear_matches_legacy_scan() {
+        let fixture = ConflictThreeWayVisibleMapBuildFixture::new(240, 24);
+        assert_eq!(fixture.build_linear_map(), fixture.build_legacy_map());
+        assert_eq!(fixture.run_linear_step(), fixture.run_legacy_step());
     }
 
     #[test]
@@ -1596,6 +3958,74 @@ mod tests {
         let hash_a = fixture.run_query_update_step("shared", 17, 40);
         let hash_b = fixture.run_query_update_step("shared", 17 + fixture.visible_rows() * 3, 40);
         assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn patch_diff_search_query_fixture_tracks_requested_rows() {
+        let fixture = PatchDiffSearchQueryUpdateFixture::new(240);
+        assert_eq!(fixture.visible_rows(), 240);
+        assert!(fixture.stable_cache_entries() > 0);
+        assert_eq!(fixture.query_cache_entries(), 0);
+    }
+
+    #[test]
+    fn patch_diff_search_query_fixture_reuses_stable_cache_across_queries() {
+        let mut fixture = PatchDiffSearchQueryUpdateFixture::new(360);
+        let stable_before = fixture.stable_cache_entries();
+        assert_eq!(fixture.query_cache_entries(), 0);
+
+        let _ = fixture.run_query_update_step("shared", 20, 80);
+        let stable_after_first = fixture.stable_cache_entries();
+        let first_query_entries = fixture.query_cache_entries();
+        assert!(first_query_entries > 0);
+        assert!(stable_after_first >= stable_before);
+
+        let _ = fixture.run_query_update_step("compute_shared", 20, 80);
+        let stable_after_second = fixture.stable_cache_entries();
+        let second_query_entries = fixture.query_cache_entries();
+        assert!(second_query_entries > 0);
+        assert_eq!(stable_after_second, stable_after_first);
+    }
+
+    #[test]
+    fn patch_diff_search_query_fixture_wraps_start_offsets() {
+        let mut fixture = PatchDiffSearchQueryUpdateFixture::new(420);
+        let hash_a = fixture.run_query_update_step("shared", 31, 120);
+        let hash_b = fixture.run_query_update_step("shared", 31 + fixture.visible_rows() * 2, 120);
+        assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn patch_diff_paged_rows_fixture_builds_requested_line_count() {
+        let fixture = PatchDiffPagedRowsFixture::new(1_024);
+        assert!(fixture.total_rows() >= 1_024);
+    }
+
+    #[test]
+    fn patch_diff_paged_rows_fixture_runs_eager_and_paged_paths() {
+        let fixture = PatchDiffPagedRowsFixture::new(2_048);
+        let eager = fixture.run_eager_full_materialize_step();
+        let paged = fixture.run_paged_first_window_step(160);
+        assert_ne!(eager, 0);
+        assert_ne!(paged, 0);
+    }
+
+    #[test]
+    fn patch_diff_paged_rows_fixture_inline_visible_map_matches_eager_scan() {
+        let fixture = PatchDiffPagedRowsFixture::new(2_048);
+        assert_eq!(
+            fixture.inline_visible_indices_map(),
+            fixture.inline_visible_indices_eager()
+        );
+    }
+
+    #[test]
+    fn patch_diff_paged_rows_fixture_runs_inline_visible_paths() {
+        let fixture = PatchDiffPagedRowsFixture::new(2_048);
+        let eager = fixture.run_inline_visible_eager_scan_step();
+        let mapped = fixture.run_inline_visible_hidden_map_step();
+        assert_ne!(eager, 0);
+        assert_ne!(mapped, 0);
     }
 
     #[test]
@@ -1651,6 +4081,21 @@ mod tests {
     }
 
     #[test]
+    fn resolved_output_recompute_incremental_fixture_tracks_rows() {
+        let fixture = ResolvedOutputRecomputeIncrementalFixture::new(240, 24);
+        assert!(fixture.visible_rows() > 0);
+    }
+
+    #[test]
+    fn resolved_output_recompute_incremental_fixture_runs_full_and_incremental_steps() {
+        let mut fixture = ResolvedOutputRecomputeIncrementalFixture::new(240, 24);
+        let full_hash = fixture.run_full_recompute_step();
+        let incremental_hash = fixture.run_incremental_recompute_step();
+        assert_ne!(full_hash, 0);
+        assert_ne!(incremental_hash, 0);
+    }
+
+    #[test]
     fn branch_sidebar_fixture_scales_with_more_entries() {
         let small = BranchSidebarFixture::new(8, 16, 2, 0, 0, 0);
         let large = BranchSidebarFixture::new(120, 600, 6, 40, 40, 80);
@@ -1676,5 +4121,178 @@ mod tests {
     fn large_file_fixture_handles_very_long_lines() {
         let fixture = LargeFileDiffScrollFixture::new_with_line_bytes(512, 4_096);
         assert_ne!(fixture.run_scroll_step(0, 64), 0);
+    }
+
+    #[test]
+    fn text_input_prepaint_windowed_fixture_wraps_start_offsets() {
+        let mut fixture = TextInputPrepaintWindowedFixture::new(512, 96, 640);
+        let hash_a = fixture.run_windowed_step(17, 48);
+        let hash_b = fixture.run_windowed_step(17 + fixture.total_rows() * 3, 48);
+        assert_eq!(hash_a, hash_b);
+        assert!(fixture.cache_entries() > 0);
+    }
+
+    #[test]
+    fn text_input_runs_streamed_highlight_fixture_matches_legacy_dense() {
+        let fixture = TextInputRunsStreamedHighlightFixture::new(
+            512,
+            112,
+            96,
+            TextInputHighlightDensity::Dense,
+        );
+        assert!(fixture.highlights_len() > 0);
+
+        let mut start = 0usize;
+        for _ in 0..8 {
+            let legacy = fixture.run_legacy_step(start);
+            let streamed = fixture.run_streamed_step(start);
+            assert_eq!(legacy, streamed);
+            start = fixture.next_start_row(start);
+        }
+    }
+
+    #[test]
+    fn text_input_runs_streamed_highlight_fixture_matches_legacy_sparse() {
+        let fixture = TextInputRunsStreamedHighlightFixture::new(
+            512,
+            112,
+            96,
+            TextInputHighlightDensity::Sparse,
+        );
+        assert!(fixture.highlights_len() > 0);
+
+        let mut start = 0usize;
+        for _ in 0..8 {
+            let legacy = fixture.run_legacy_step(start);
+            let streamed = fixture.run_streamed_step(start);
+            assert_eq!(legacy, streamed);
+            start = fixture.next_start_row(start);
+        }
+    }
+
+    #[test]
+    fn text_input_long_line_cap_fixture_bounds_shaping_slice() {
+        let fixture = TextInputLongLineCapFixture::new(128 * 1024);
+        let capped_len = fixture.capped_len(4 * 1024);
+        let uncapped_len = fixture.capped_len(256 * 1024);
+        assert!(capped_len < uncapped_len);
+        assert_ne!(fixture.run_with_cap(4 * 1024), 0);
+        assert_ne!(fixture.run_without_cap(), 0);
+    }
+
+    #[test]
+    fn text_input_wrap_incremental_tabs_fixture_matches_full_recompute() {
+        let mut full = TextInputWrapIncrementalTabsFixture::new(512, 96, 680);
+        let mut incremental = TextInputWrapIncrementalTabsFixture::new(512, 96, 680);
+        for step in 0..48usize {
+            let line_ix = step.wrapping_mul(17);
+            let full_hash = full.run_full_recompute_step(line_ix);
+            let incremental_hash = incremental.run_incremental_step(line_ix);
+            assert_eq!(full_hash, incremental_hash);
+        }
+        assert_eq!(full.row_counts(), incremental.row_counts());
+    }
+
+    #[test]
+    fn text_input_wrap_incremental_burst_fixture_matches_full_recompute() {
+        let mut full = TextInputWrapIncrementalBurstEditsFixture::new(768, 112, 720);
+        let mut incremental = TextInputWrapIncrementalBurstEditsFixture::new(768, 112, 720);
+        for burst in [1usize, 3, 6, 9, 12] {
+            let full_hash = full.run_full_recompute_burst_step(burst);
+            let incremental_hash = incremental.run_incremental_burst_step(burst);
+            assert_eq!(full_hash, incremental_hash);
+        }
+        assert_eq!(full.row_counts(), incremental.row_counts());
+    }
+
+    #[test]
+    fn text_model_snapshot_clone_fixture_runs_model_and_string_control_paths() {
+        let fixture = TextModelSnapshotCloneCostFixture::new(512 * 1024);
+        let model_hash = fixture.run_snapshot_clone_step(2_048);
+        let string_hash = fixture.run_string_clone_control_step(2_048);
+        assert_ne!(model_hash, 0);
+        assert_ne!(string_hash, 0);
+    }
+
+    #[test]
+    fn text_model_bulk_load_fixture_runs_piece_table_and_control_paths() {
+        let fixture = TextModelBulkLoadLargeFixture::new(4_096, 96);
+        let piece_table_hash = fixture.run_piece_table_bulk_load_step();
+        let piece_table_from_large_hash = fixture.run_piece_table_from_large_text_step();
+        let control_hash = fixture.run_string_bulk_load_control_step();
+        assert_ne!(piece_table_hash, 0);
+        assert_ne!(piece_table_from_large_hash, 0);
+        assert_ne!(control_hash, 0);
+    }
+
+    #[test]
+    fn nested_query_stress_source_lines_honor_requested_min_line_bytes() {
+        let lines = build_synthetic_nested_query_stress_lines(32, 2_048, 64);
+        assert_eq!(lines.len(), 32);
+        assert!(lines.iter().all(|line| line.len() >= 2_048));
+        assert!(lines.iter().all(|line| line.contains("nested")));
+    }
+
+    #[test]
+    fn file_diff_syntax_stress_fixture_has_bounded_latency_distribution() {
+        let fixture = FileDiffSyntaxPrepareFixture::new_query_stress(64, 1_536, 96);
+        let mut samples = Vec::new();
+        for nonce in 0..10u64 {
+            let start = std::time::Instant::now();
+            let _ = fixture.run_prepare_cold(nonce);
+            samples.push(start.elapsed().as_secs_f64());
+        }
+        samples.sort_by(|a, b| a.total_cmp(b));
+        let median = samples[samples.len() / 2].max(f64::EPSILON);
+        let p95 = samples[samples.len() - 1];
+        assert!(
+            p95 <= median * 12.0,
+            "query stress latency distribution widened too far: median={median:.6}s p95={p95:.6}s"
+        );
+    }
+
+    #[test]
+    fn file_diff_syntax_reparse_fixture_runs_small_and_large_edit_steps() {
+        let mut fixture = FileDiffSyntaxReparseFixture::new(512, 128);
+        let small = fixture.run_small_edit_step();
+        let large = fixture.run_large_edit_step();
+        assert_ne!(small, 0);
+        assert_ne!(large, 0);
+    }
+
+    #[test]
+    fn file_diff_syntax_cache_drop_fixture_runs_both_modes() {
+        let fixture = FileDiffSyntaxCacheDropFixture::new(1_024, 8, 4);
+        assert_ne!(fixture.run_deferred_drop_step(), 0);
+        assert_ne!(fixture.run_inline_drop_control_step(), 0);
+    }
+
+    #[test]
+    fn prepared_syntax_multidoc_cache_hit_rate_fixture_runs() {
+        let fixture = FileDiffSyntaxPrepareFixture::new(512, 96);
+        let hash = fixture.run_prepared_syntax_multidoc_cache_hit_rate_step(4, 1);
+        assert_ne!(hash, 0);
+    }
+
+    #[test]
+    fn prepared_syntax_chunk_miss_cost_fixture_runs() {
+        let fixture = FileDiffSyntaxPrepareFixture::new(1_024, 96);
+        let elapsed = fixture.run_prepared_syntax_chunk_miss_cost_step(1);
+        assert!(elapsed >= Duration::ZERO);
+    }
+
+    #[test]
+    fn worktree_preview_render_fixture_preserves_output_with_cached_lookup() {
+        let fixture = WorktreePreviewRenderFixture::new(1_024, 128);
+        let cached = fixture.run_cached_lookup_step(96, 160);
+        let render_time_prepare = fixture.run_render_time_prepare_step(96, 160);
+        assert_eq!(cached, render_time_prepare);
+    }
+
+    #[test]
+    fn worktree_preview_render_fixture_handles_long_windows() {
+        let fixture = WorktreePreviewRenderFixture::new(2_048, 192);
+        assert_ne!(fixture.run_cached_lookup_step(0, 256), 0);
+        assert_ne!(fixture.run_render_time_prepare_step(0, 256), 0);
     }
 }

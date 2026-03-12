@@ -1110,6 +1110,16 @@ fn diff_file_text_returns_none_for_directories() {
         .unwrap();
 
     assert!(result.is_none());
+
+    run_git(repo, &["add", "dir/a.txt"]);
+    let staged_result = opened
+        .diff_file_text(&DiffTarget::WorkingTree {
+            path: PathBuf::from("dir"),
+            area: DiffArea::Staged,
+        })
+        .unwrap();
+
+    assert!(staged_result.is_none());
 }
 
 #[test]
@@ -1209,6 +1219,160 @@ fn diff_file_image_returns_none_for_directories() {
         .unwrap();
 
     assert!(result.is_none());
+
+    run_git(repo, &["add", "dir/a.png"]);
+    let staged_result = opened
+        .diff_file_image(&DiffTarget::WorkingTree {
+            path: PathBuf::from("dir"),
+            area: DiffArea::Staged,
+        })
+        .unwrap();
+
+    assert!(staged_result.is_none());
+}
+
+#[test]
+fn gitlink_added_and_unstaged_modified_reports_expected_status_and_diff() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let nested = repo.join("chess3");
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    std::fs::create_dir_all(&nested).expect("create nested repo path");
+    run_git(&nested, &["init"]);
+    run_git(&nested, &["config", "user.email", "you@example.com"]);
+    run_git(&nested, &["config", "user.name", "You"]);
+    run_git(&nested, &["config", "commit.gpgsign", "false"]);
+
+    write(&nested, "file.txt", "one\n");
+    run_git(&nested, &["add", "file.txt"]);
+    run_git(
+        &nested,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "nested c1"],
+    );
+
+    run_git(repo, &["add", "chess3"]);
+
+    write(&nested, "file.txt", "one\ntwo\n");
+    run_git(&nested, &["add", "file.txt"]);
+    run_git(
+        &nested,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "nested c2"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    let status = opened.status().unwrap();
+    assert!(
+        status
+            .staged
+            .iter()
+            .any(|e| e.path == Path::new("chess3") && e.kind == FileStatusKind::Added),
+        "expected staged Added gitlink entry; status={status:?}"
+    );
+    assert!(
+        status
+            .unstaged
+            .iter()
+            .any(|e| e.path == Path::new("chess3") && e.kind == FileStatusKind::Modified),
+        "expected unstaged Modified gitlink entry; status={status:?}"
+    );
+
+    let diff = opened
+        .diff_unified(&DiffTarget::WorkingTree {
+            path: PathBuf::from("chess3"),
+            area: DiffArea::Unstaged,
+        })
+        .unwrap();
+    assert!(
+        diff.contains("Subproject commit"),
+        "expected unstaged gitlink unified diff to include subproject commit line; diff={diff}"
+    );
+
+    let file_text = opened
+        .diff_file_text(&DiffTarget::WorkingTree {
+            path: PathBuf::from("chess3"),
+            area: DiffArea::Unstaged,
+        })
+        .unwrap();
+    assert!(
+        file_text.is_none(),
+        "expected no direct file text payload for directory-backed gitlink target"
+    );
+}
+
+#[test]
+fn committed_gitlink_unstaged_modified_reports_modified_status_and_diff() {
+    if !require_git_shell_for_status_integration_tests() {
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let nested = repo.join("chess3");
+
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "you@example.com"]);
+    run_git(repo, &["config", "user.name", "You"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+
+    std::fs::create_dir_all(&nested).expect("create nested repo path");
+    run_git(&nested, &["init"]);
+    run_git(&nested, &["config", "user.email", "you@example.com"]);
+    run_git(&nested, &["config", "user.name", "You"]);
+    run_git(&nested, &["config", "commit.gpgsign", "false"]);
+
+    write(&nested, "file.txt", "one\n");
+    run_git(&nested, &["add", "file.txt"]);
+    run_git(
+        &nested,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "nested c1"],
+    );
+
+    run_git(repo, &["add", "chess3"]);
+    run_git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "add gitlink"],
+    );
+
+    write(&nested, "file.txt", "one\ntwo\n");
+    run_git(&nested, &["add", "file.txt"]);
+    run_git(
+        &nested,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "nested c2"],
+    );
+
+    let backend = GixBackend;
+    let opened = backend.open(repo).unwrap();
+
+    let status = opened.status().unwrap();
+    assert!(
+        status
+            .unstaged
+            .iter()
+            .any(|e| e.path == Path::new("chess3") && e.kind == FileStatusKind::Modified),
+        "expected unstaged Modified gitlink entry after nested repo advances; status={status:?}"
+    );
+
+    let diff = opened
+        .diff_unified(&DiffTarget::WorkingTree {
+            path: PathBuf::from("chess3"),
+            area: DiffArea::Unstaged,
+        })
+        .unwrap();
+    assert!(
+        diff.contains("Subproject commit"),
+        "expected unstaged gitlink unified diff to include subproject commit line; diff={diff}"
+    );
 }
 
 #[test]

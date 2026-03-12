@@ -70,6 +70,14 @@ pub(super) fn is_svg_path(path: &std::path::Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
 }
 
+pub(super) fn is_existing_directory(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_dir())
+}
+
+pub(super) fn is_existing_regular_file(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+}
+
 pub(super) fn should_bypass_text_file_preview_for_path(path: &std::path::Path) -> bool {
     let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
         return false;
@@ -212,6 +220,23 @@ mod resize_drag_ghost_tests {
     }
 }
 
+#[cfg(test)]
+mod directory_path_tests {
+    use super::is_existing_directory;
+
+    #[test]
+    fn detects_existing_directory_paths() {
+        let tmp = std::env::temp_dir().join(format!("gitcomet_is_dir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp directory");
+
+        assert!(is_existing_directory(&tmp));
+        assert!(!is_existing_directory(&tmp.join("missing")));
+
+        std::fs::remove_dir_all(&tmp).expect("cleanup temp directory");
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(super) enum DiffTextRegion {
     Inline,
@@ -351,7 +376,10 @@ pub(super) struct ConflictResolverUiState {
     pub(super) view_mode: ConflictResolverViewMode,
     pub(super) diff_rows: Vec<FileDiffRow>,
     pub(super) inline_rows: Vec<ConflictInlineRow>,
-    pub(super) three_way_lines: ThreeWaySides<Vec<SharedString>>,
+    /// Backing text for each three-way source side.
+    pub(super) three_way_text: ThreeWaySides<SharedString>,
+    /// Per-side line start offsets into `three_way_text`.
+    pub(super) three_way_line_starts: ThreeWaySides<Vec<usize>>,
     pub(super) three_way_len: usize,
     pub(super) three_way_conflict_ranges: Vec<Range<usize>>,
     pub(super) three_way_line_conflict_map: ThreeWaySides<Vec<Option<usize>>>,
@@ -407,7 +435,8 @@ impl Default for ConflictResolverUiState {
             view_mode: ConflictResolverViewMode::TwoWayDiff,
             diff_rows: Vec::new(),
             inline_rows: Vec::new(),
-            three_way_lines: ThreeWaySides::default(),
+            three_way_text: ThreeWaySides::default(),
+            three_way_line_starts: ThreeWaySides::default(),
             three_way_len: 0,
             three_way_conflict_ranges: Vec::new(),
             three_way_line_conflict_map: ThreeWaySides::default(),
@@ -437,6 +466,75 @@ impl Default for ConflictResolverUiState {
     }
 }
 
+fn indexed_line_count(text: &str, line_starts: &[usize]) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        line_starts.len()
+    }
+}
+
+fn indexed_line_text<'a>(text: &'a str, line_starts: &[usize], line_ix: usize) -> Option<&'a str> {
+    if text.is_empty() {
+        return None;
+    }
+    let text_len = text.len();
+    let start = line_starts.get(line_ix).copied().unwrap_or(text_len);
+    if start >= text_len {
+        return None;
+    }
+    let mut end = line_starts
+        .get(line_ix.saturating_add(1))
+        .copied()
+        .unwrap_or(text_len)
+        .min(text_len);
+    if end > start && text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\n') {
+        end = end.saturating_sub(1);
+    }
+    Some(text.get(start..end).unwrap_or(""))
+}
+
+impl ConflictResolverUiState {
+    pub(super) fn three_way_line_count(&self, side: ThreeWayColumn) -> usize {
+        match side {
+            ThreeWayColumn::Base => {
+                indexed_line_count(&self.three_way_text.base, &self.three_way_line_starts.base)
+            }
+            ThreeWayColumn::Ours => {
+                indexed_line_count(&self.three_way_text.ours, &self.three_way_line_starts.ours)
+            }
+            ThreeWayColumn::Theirs => indexed_line_count(
+                &self.three_way_text.theirs,
+                &self.three_way_line_starts.theirs,
+            ),
+        }
+    }
+
+    pub(super) fn three_way_line_text(&self, side: ThreeWayColumn, line_ix: usize) -> Option<&str> {
+        match side {
+            ThreeWayColumn::Base => indexed_line_text(
+                &self.three_way_text.base,
+                &self.three_way_line_starts.base,
+                line_ix,
+            ),
+            ThreeWayColumn::Ours => indexed_line_text(
+                &self.three_way_text.ours,
+                &self.three_way_line_starts.ours,
+                line_ix,
+            ),
+            ThreeWayColumn::Theirs => indexed_line_text(
+                &self.three_way_text.theirs,
+                &self.three_way_line_starts.theirs,
+                line_ix,
+            ),
+        }
+    }
+
+    pub(super) fn three_way_has_line(&self, side: ThreeWayColumn, line_ix: usize) -> bool {
+        self.three_way_line_text(side, line_ix).is_some()
+    }
+}
+
 #[cfg(test)]
 mod conflict_resolver_ui_state_tests {
     use super::{ConflictResolverUiState, ThreeWaySides};
@@ -445,9 +543,12 @@ mod conflict_resolver_ui_state_tests {
     fn default_groups_three_way_side_fields() {
         let state = ConflictResolverUiState::default();
 
-        assert!(state.three_way_lines.base.is_empty());
-        assert!(state.three_way_lines.ours.is_empty());
-        assert!(state.three_way_lines.theirs.is_empty());
+        assert!(state.three_way_text.base.is_empty());
+        assert!(state.three_way_text.ours.is_empty());
+        assert!(state.three_way_text.theirs.is_empty());
+        assert!(state.three_way_line_starts.base.is_empty());
+        assert!(state.three_way_line_starts.ours.is_empty());
+        assert!(state.three_way_line_starts.theirs.is_empty());
 
         assert!(state.three_way_line_conflict_map.base.is_empty());
         assert!(state.three_way_line_conflict_map.ours.is_empty());

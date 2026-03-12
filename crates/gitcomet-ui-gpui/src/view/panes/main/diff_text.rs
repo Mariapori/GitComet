@@ -284,7 +284,7 @@ impl MainPaneView {
                 .unwrap_or(fallback);
         }
 
-        let Some(&mapped_ix) = self.diff_visible_indices.get(visible_ix) else {
+        let Some(mapped_ix) = self.diff_mapped_ix_for_visible_ix(visible_ix) else {
             return fallback;
         };
 
@@ -306,7 +306,7 @@ impl MainPaneView {
             if let Some(styled) = self.diff_text_segments_cache_get(mapped_ix) {
                 return styled.text.clone();
             }
-            let Some(line) = self.diff_cache.get(mapped_ix) else {
+            let Some(line) = self.patch_diff_row(mapped_ix) else {
                 return fallback;
             };
             let click_kind = self
@@ -346,18 +346,18 @@ impl MainPaneView {
             return expand_tabs(text);
         }
 
-        let Some(split_row) = self.diff_split_cache.get(mapped_ix) else {
+        let Some(split_row) = self.patch_diff_split_row(mapped_ix) else {
             return fallback;
         };
         match split_row {
             PatchSplitRow::Raw { src_ix, click_kind } => {
-                let Some(line) = self.diff_cache.get(*src_ix) else {
+                let Some(line) = self.patch_diff_row(src_ix) else {
                     return fallback;
                 };
                 if matches!(
                     click_kind,
                     DiffClickKind::HunkHeader | DiffClickKind::FileHeader
-                ) && let Some(display) = self.diff_header_display_cache.get(src_ix)
+                ) && let Some(display) = self.diff_header_display_cache.get(&src_ix)
                 {
                     return display.clone();
                 }
@@ -513,7 +513,7 @@ impl MainPaneView {
         let list_len = if is_file_preview {
             self.worktree_preview_line_count().unwrap_or(0)
         } else {
-            self.diff_visible_indices.len()
+            self.diff_visible_len()
         };
         let clicked_visible_ix = if list_len == 0 {
             visible_ix
@@ -568,7 +568,10 @@ impl MainPaneView {
                 let mut context_by_old_line: HashMap<u32, usize> =
                     HashMap::with_capacity_and_hasher(approx_map_len, Default::default());
 
-                for (ix, line) in self.diff_cache.iter().enumerate() {
+                for ix in 0..self.patch_diff_row_len() {
+                    let Some(line) = self.patch_diff_row(ix) else {
+                        continue;
+                    };
                     if self.diff_file_for_src_ix.get(ix).and_then(|p| p.as_deref())
                         != rel_str.as_deref()
                     {
@@ -608,7 +611,7 @@ impl MainPaneView {
 
         let src_ixs_for_visible_ix = |visible_ix: usize| -> Vec<usize> {
             if let Some(lookup) = file_diff_lookup.as_ref() {
-                let Some(&mapped_ix) = self.diff_visible_indices.get(visible_ix) else {
+                let Some(mapped_ix) = self.diff_mapped_ix_for_visible_ix(visible_ix) else {
                     return Vec::new();
                 };
                 match self.diff_view {
@@ -724,7 +727,7 @@ impl MainPaneView {
 
                 for vix in sel_a..=sel_b {
                     for src_ix in src_ixs_for_visible_ix(vix) {
-                        let Some(line) = self.diff_cache.get(src_ix) else {
+                        let Some(line) = self.patch_diff_row(src_ix) else {
                             continue;
                         };
                         selected_src_ixs.insert(src_ix);
@@ -745,19 +748,20 @@ impl MainPaneView {
                 selected_hunks.sort_unstable();
                 selected_hunks.dedup();
 
-                let hunk_patch = build_unified_patch_for_hunks(&self.diff_cache, &selected_hunks);
+                let materialized_diff = self.patch_diff_rows_slice(0, self.patch_diff_row_len());
+                let hunk_patch = build_unified_patch_for_hunks(&materialized_diff, &selected_hunks);
                 let hunks_count = hunk_patch
                     .as_ref()
                     .map(|_| selected_hunks.len())
                     .unwrap_or(0);
 
                 let lines_patch = build_unified_patch_for_selected_lines_across_hunks(
-                    &self.diff_cache,
+                    &materialized_diff,
                     &selected_change_src_ixs,
                 );
                 let discard_lines_patch = if area == DiffArea::Unstaged {
                     build_unified_patch_for_selected_lines_across_hunks_for_worktree_discard(
-                        &self.diff_cache,
+                        &materialized_diff,
                         &selected_change_src_ixs,
                     )
                 } else {

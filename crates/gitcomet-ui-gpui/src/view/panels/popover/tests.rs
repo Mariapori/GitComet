@@ -339,6 +339,8 @@ fn file_preview_context_menu_matches_diff_editor_actions(cx: &mut gpui::TestAppC
         std::process::id()
     ));
     let path = std::path::PathBuf::from("added.txt");
+    std::fs::create_dir_all(&workdir).expect("create preview test workdir");
+    std::fs::write(workdir.join(&path), "alpha\nbeta\n").expect("write preview test file");
 
     cx.update(|_window, app| {
         view.update(app, |this, cx| {
@@ -384,7 +386,7 @@ fn file_preview_context_menu_matches_diff_editor_actions(cx: &mut gpui::TestAppC
     cx.update(|window, app| {
         let main_pane = view.read(app).main_pane.clone();
         main_pane.update(app, |pane, cx| {
-            pane.try_populate_worktree_preview_from_diff_file();
+            pane.try_populate_worktree_preview_from_diff_file(cx);
             pane.open_diff_editor_context_menu(
                 1,
                 DiffTextRegion::Inline,

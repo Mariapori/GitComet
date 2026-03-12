@@ -137,6 +137,7 @@ pub(super) fn rasterize_svg_preview_image(svg_bytes: &[u8]) -> Option<Arc<gpui::
     )))
 }
 
+#[allow(dead_code)]
 pub(super) fn compute_diff_word_highlights(
     diff: &[AnnotatedDiffLine],
 ) -> Vec<Option<Vec<Range<usize>>>> {
@@ -238,7 +239,9 @@ pub(super) fn parse_unified_hunk_header_for_display(text: &str) -> Option<Parsed
     })
 }
 
-pub(super) fn compute_diff_file_stats(diff: &[AnnotatedDiffLine]) -> Vec<Option<(usize, usize)>> {
+pub(super) fn compute_diff_file_stats(
+    diff: &[impl UnifiedDiffLine],
+) -> Vec<Option<(usize, usize)>> {
     let mut stats: Vec<Option<(usize, usize)>> = vec![None; diff.len()];
 
     let mut current_file_header_ix: Option<usize> = None;
@@ -246,8 +249,8 @@ pub(super) fn compute_diff_file_stats(diff: &[AnnotatedDiffLine]) -> Vec<Option<
     let mut removes = 0usize;
 
     for (ix, line) in diff.iter().enumerate() {
-        let is_file_header = matches!(line.kind, gitcomet_core::domain::DiffLineKind::Header)
-            && line.text.starts_with("diff --git ");
+        let is_file_header = matches!(line.kind(), gitcomet_core::domain::DiffLineKind::Header)
+            && line.text().starts_with("diff --git ");
 
         if is_file_header {
             if let Some(header_ix) = current_file_header_ix.take() {
@@ -259,7 +262,7 @@ pub(super) fn compute_diff_file_stats(diff: &[AnnotatedDiffLine]) -> Vec<Option<
             continue;
         }
 
-        match line.kind {
+        match line.kind() {
             gitcomet_core::domain::DiffLineKind::Add => adds += 1,
             gitcomet_core::domain::DiffLineKind::Remove => removes += 1,
             _ => {}
@@ -273,15 +276,15 @@ pub(super) fn compute_diff_file_stats(diff: &[AnnotatedDiffLine]) -> Vec<Option<
     stats
 }
 
-pub(super) fn compute_diff_file_for_src_ix(diff: &[AnnotatedDiffLine]) -> Vec<Option<Arc<str>>> {
+pub(super) fn compute_diff_file_for_src_ix(diff: &[impl UnifiedDiffLine]) -> Vec<Option<Arc<str>>> {
     let mut out: Vec<Option<Arc<str>>> = Vec::with_capacity(diff.len());
     let mut current_file: Option<Arc<str>> = None;
 
     for line in diff {
-        let is_file_header = matches!(line.kind, gitcomet_core::domain::DiffLineKind::Header)
-            && line.text.starts_with("diff --git ");
+        let is_file_header = matches!(line.kind(), gitcomet_core::domain::DiffLineKind::Header)
+            && line.text().starts_with("diff --git ");
         if is_file_header {
-            current_file = parse_diff_git_header_path(&line.text).map(Arc::<str>::from);
+            current_file = parse_diff_git_header_path(line.text()).map(Arc::<str>::from);
         }
         out.push(current_file.clone());
     }

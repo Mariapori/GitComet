@@ -4,7 +4,7 @@ impl MainPaneView {
     fn toggle_show_whitespace(&mut self) {
         self.show_whitespace = !self.show_whitespace;
         // Clear styled text caches so they rebuild with new whitespace setting.
-        self.diff_text_segments_cache.clear();
+        self.clear_diff_text_style_caches();
         self.clear_conflict_diff_style_caches();
         self.conflict_three_way_segments_cache.clear();
     }
@@ -20,13 +20,9 @@ impl MainPaneView {
         let untracked_preview_path = self.untracked_worktree_preview_path();
         let added_preview_path = self.added_file_preview_abs_path();
         let deleted_preview_path = self.deleted_file_preview_abs_path();
+        let untracked_directory_notice = self.untracked_directory_notice();
 
-        let preview_path = untracked_preview_path
-            .as_deref()
-            .or(added_preview_path.as_deref())
-            .or(deleted_preview_path.as_deref());
-        let is_file_preview = preview_path
-            .is_some_and(|p| !super::super::should_bypass_text_file_preview_for_path(p));
+        let is_file_preview = self.is_file_preview_active() && untracked_directory_notice.is_none();
 
         if is_file_preview {
             if let Some(path) = untracked_preview_path.clone() {
@@ -34,8 +30,17 @@ impl MainPaneView {
             } else if let Some(path) = added_preview_path.clone().or(deleted_preview_path.clone()) {
                 self.ensure_preview_loading(path);
             }
+        } else if untracked_directory_notice.is_some()
+            && matches!(self.worktree_preview, Loadable::Loading)
+        {
+            self.worktree_preview_path = None;
+            self.worktree_preview = Loadable::NotLoaded;
+            self.worktree_preview_segments_cache_path = None;
+            self.worktree_preview_segments_cache.clear();
+            self.diff_horizontal_min_width = px(0.0);
         }
         let wants_file_diff = !is_file_preview
+            && !self.is_worktree_target_directory()
             && self
                 .active_repo()
                 .is_some_and(|r| Self::is_file_diff_target(r.diff_state.diff_target.as_ref()));
@@ -330,7 +335,7 @@ impl MainPaneView {
                     .selected_bg(view_toggle_selected_bg)
                     .on_click(theme, cx, |this, _e, _w, cx| {
                         this.diff_view = DiffViewMode::Inline;
-                        this.diff_text_segments_cache.clear();
+                        this.clear_diff_text_style_caches();
                         if this.diff_search_active
                             && !this.diff_search_query.as_ref().trim().is_empty()
                         {
@@ -358,7 +363,7 @@ impl MainPaneView {
                     .selected_bg(view_toggle_selected_bg)
                     .on_click(theme, cx, |this, _e, _w, cx| {
                         this.diff_view = DiffViewMode::Split;
-                        this.diff_text_segments_cache.clear();
+                        this.clear_diff_text_style_caches();
                         if this.diff_search_active
                             && !this.diff_search_query.as_ref().trim().is_empty()
                         {
@@ -531,7 +536,7 @@ impl MainPaneView {
                             this.diff_search_active = false;
                             this.diff_search_matches.clear();
                             this.diff_search_match_ix = None;
-                            this.diff_text_segments_cache.clear();
+                            this.clear_diff_text_query_overlay_cache();
                             this.worktree_preview_segments_cache_path = None;
                             this.worktree_preview_segments_cache.clear();
                             this.clear_conflict_diff_query_overlay_caches();
@@ -558,9 +563,11 @@ impl MainPaneView {
             )
             .child(controls);
 
-        let body: AnyElement = if is_file_preview {
+        let body: AnyElement = if let Some(message) = untracked_directory_notice {
+            components::empty_state(theme, "Directory", message).into_any_element()
+        } else if is_file_preview {
             if added_preview_path.is_some() || deleted_preview_path.is_some() {
-                self.try_populate_worktree_preview_from_diff_file();
+                self.try_populate_worktree_preview_from_diff_file(cx);
             }
             match &self.worktree_preview {
                 Loadable::NotLoaded | Loadable::Loading => {
@@ -1575,33 +1582,6 @@ impl MainPaneView {
                                 .child(start_controls);
                             let autosolve_summary =
                                 self.conflict_resolver.last_autosolve_summary.clone();
-                            let merge_conflict_markers = self
-                                .conflict_resolver
-                                .resolved_output_conflict_markers
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(line_ix, marker)| {
-                                    marker
-                                        .as_ref()
-                                        .copied()
-                                        .map(|m| (line_ix, m))
-                                })
-                                .collect::<Vec<_>>();
-                            let has_merge_conflict_marker =
-                                !merge_conflict_markers.is_empty();
-                            let unresolved_merge_conflict_row_bg = {
-                                let mut color = theme.colors.danger;
-                                let t = if theme.is_dark { 0.72 } else { 0.82 };
-                                color.r = color.r + (theme.colors.surface_bg_elevated.r - color.r) * t;
-                                color.g = color.g + (theme.colors.surface_bg_elevated.g - color.g) * t;
-                                color.b = color.b + (theme.colors.surface_bg_elevated.b - color.b) * t;
-                                color.a = if theme.is_dark { 0.72 } else { 0.58 };
-                                color
-                            };
-                            let resolved_merge_conflict_row_bg = with_alpha(
-                                theme.colors.surface_bg_elevated,
-                                if theme.is_dark { 0.54 } else { 0.74 },
-                            );
 
                             // Vertical resize handle between merge inputs and resolved output
                             let vsplit_ratio = self.conflict_resolver_vsplit_ratio;
@@ -1737,7 +1717,7 @@ impl MainPaneView {
                                                         .base_handle
                                                         .clone();
                                                     let outline_len =
-                                                        self.conflict_resolved_preview_lines.len();
+                                                        self.conflict_resolved_preview_line_count;
                                                     let outline_list = uniform_list(
                                                         "conflict_resolved_preview_gutter_list",
                                                         outline_len,
@@ -1750,101 +1730,6 @@ impl MainPaneView {
                                                     .track_scroll(
                                                         self.conflict_resolved_preview_scroll.clone(),
                                                     );
-                                                    let merge_conflict_overlay =
-                                                        has_merge_conflict_marker.then(|| {
-                                                            div()
-                                                                .absolute()
-                                                                .top(px(0.0))
-                                                                .left(px(0.0))
-                                                                .right(px(0.0))
-                                                                .children(
-                                                                    merge_conflict_markers
-                                                                        .iter()
-                                                                        .copied()
-                                                                        .map(
-                                                                            |(line_ix, marker)| {
-                                                                                let conflict_ix =
-                                                                                    marker.conflict_ix;
-                                                                                let top = px(
-                                                                                    (line_ix as f32)
-                                                                                        * 20.0,
-                                                                                );
-                                                                                let has_base = self
-                                                                                    .conflict_resolver_has_base_for_conflict_ix(
-                                                                                        conflict_ix,
-                                                                                    );
-                                                                                let is_three_way = self
-                                                                                    .conflict_resolver
-                                                                                    .view_mode
-                                                                                    == ConflictResolverViewMode::ThreeWay;
-                                                                                let selected_choices = self
-                                                                                    .conflict_resolver_selected_choices_for_conflict_ix(
-                                                                                        conflict_ix,
-                                                                                    );
-                                                                                let context_menu_invoker: SharedString = format!(
-                                                                                    "resolver_output_merge_conflict_row_{}_{}",
-                                                                                    conflict_ix, line_ix
-                                                                                )
-                                                                                .into();
-                                                                                let row_bg = if marker.unresolved {
-                                                                                    unresolved_merge_conflict_row_bg
-                                                                                } else {
-                                                                                    resolved_merge_conflict_row_bg
-                                                                                };
-                                                                                div()
-                                                                                    .absolute()
-                                                                                    .left(px(0.0))
-                                                                                    .right(px(0.0))
-                                                                                    .top(top)
-                                                                                    .h(px(20.0))
-                                                                                    .bg(row_bg)
-                                                                                    .on_mouse_down(
-                                                                                        MouseButton::Right,
-                                                                                        cx.listener(
-                                                                                            move |this, e: &MouseDownEvent, window, cx| {
-                                                                                                cx.stop_propagation();
-                                                                                                this.open_conflict_resolver_chunk_context_menu(
-                                                                                                    context_menu_invoker.clone(),
-                                                                                                    conflict_ix,
-                                                                                                    has_base,
-                                                                                                    is_three_way,
-                                                                                                    selected_choices.clone(),
-                                                                                                    Some(line_ix),
-                                                                                                    e.position,
-                                                                                                    window,
-                                                                                                    cx,
-                                                                                                );
-                                                                                            },
-                                                                                        ),
-                                                                                    )
-                                                                                    .child({
-                                                                                        let label = div()
-                                                                                            .flex()
-                                                                                            .w_full()
-                                                                                            .h_full()
-                                                                                            .items_center()
-                                                                                            .px_2()
-                                                                                            .text_size(px(10.0))
-                                                                                            .font_family("monospace")
-                                                                                            .font_weight(FontWeight::BOLD)
-                                                                                            .text_color(with_alpha(
-                                                                                                theme.colors.text,
-                                                                                                0.0,
-                                                                                            ))
-                                                                                            .hover(move |s| {
-                                                                                                s.text_color(theme.colors.text)
-                                                                                            });
-                                                                                        if marker.is_start {
-                                                                                            label.child("<Merge conflict>")
-                                                                                        } else {
-                                                                                            label
-                                                                                        }
-                                                                                    })
-                                                                                    .into_any_element()
-                                                                            },
-                                                                        ),
-                                                                )
-                                                        });
 
                                                     div()
                                                         .id("conflict_resolver_output_body")
@@ -1906,39 +1791,25 @@ impl MainPaneView {
                                                                                 .min_h(px(0.0))
                                                                                 .pl_2()
                                                                                 .child(
-                                                                                    div()
-                                                                                        .id(
-                                                                                            "conflict_resolver_output_scroll",
-                                                                                        )
-                                                                                        .relative()
-                                                                                        .h_full()
-                                                                                        .overflow_y_scroll()
-                                                                                        .track_scroll(
-                                                                                            &output_scroll_handle,
-                                                                                        )
-                                                                                        .child(
-                                                                                            div()
-                                                                                                .id(
-                                                                                                    "conflict_resolver_output_editor_content",
-                                                                                                )
-                                                                                                .relative()
-                                                                                                .min_w_full()
-                                                                                                .child(
-                                                                                                    div()
-                                                                                                        .h_full()
-                                                                                                        .child(
-                                                                                                            self.conflict_resolver_input
-                                                                                                                .clone(),
-                                                                                                        ),
-                                                                                                )
-                                                                                                .when_some(
-                                                                                                    merge_conflict_overlay,
-                                                                                                    |d, overlay| d.child(overlay),
-                                                                                                ),
+                                                                                    uniform_list(
+                                                                                        "conflict_resolved_output_list",
+                                                                                        outline_len,
+                                                                                        cx.processor(
+                                                                                            Self::render_conflict_resolved_output_rows,
+                                                                                        ),
+                                                                                    )
+                                                                                    .h_full()
+                                                                                    .min_h(px(0.0))
+                                                                                    .track_scroll(
+                                                                                        self.conflict_resolved_preview_scroll.clone(),
+                                                                                    )
+                                                                                    .with_horizontal_sizing_behavior(
+                                                                                        gpui::ListHorizontalSizingBehavior::Unconstrained,
+                                                                                    )
+                                                                                    .into_any_element(),
                                                                                 ),
                                                                         ),
                                                                 ),
-                                                        )
                                                         )
                                                         .child(
                                                             components::Scrollbar::new(
@@ -2146,17 +2017,17 @@ impl MainPaneView {
                                 if self.diff_cache_repo_id != Some(repo.id)
                                     || self.diff_cache_rev != repo.diff_state.diff_rev
                                     || self.diff_cache_target != repo.diff_state.diff_target
-                                    || self.diff_cache.len() != diff.lines.len()
+                                    || self.patch_diff_row_len() != diff.lines.len()
                                 {
                                     self.rebuild_diff_cache(cx);
                                 }
 
                                 self.ensure_diff_visible_indices();
                                 self.maybe_autoscroll_diff_to_first_change();
-                                if self.diff_cache.is_empty() {
+                                if self.patch_diff_row_len() == 0 {
                                     components::empty_state(theme, "Diff", "No differences.")
                                         .into_any_element()
-                                } else if self.diff_visible_indices.is_empty() {
+                                } else if self.diff_visible_len() == 0 {
                                     components::empty_state(theme, "Diff", "Nothing to render.")
                                         .into_any_element()
                                 } else {
@@ -2167,7 +2038,7 @@ impl MainPaneView {
                                         DiffViewMode::Inline => {
                                             let list = uniform_list(
                                                 "diff",
-                                                self.diff_visible_indices.len(),
+                                                self.diff_visible_len(),
                                                 cx.processor(Self::render_diff_rows),
                                             )
                                             .h_full()
@@ -2210,7 +2081,7 @@ impl MainPaneView {
                                                 .borrow()
                                                 .base_handle
                                                 .clone();
-                                            let count = self.diff_visible_indices.len();
+                                            let count = self.diff_visible_len();
                                             let left = uniform_list(
                                                 "diff_split_left",
                                                 count,
@@ -2487,7 +2358,7 @@ impl MainPaneView {
                         this.diff_search_active = false;
                         this.diff_search_matches.clear();
                         this.diff_search_match_ix = None;
-                        this.diff_text_segments_cache.clear();
+                        this.clear_diff_text_query_overlay_cache();
                         this.worktree_preview_segments_cache_path = None;
                         this.worktree_preview_segments_cache.clear();
                         this.clear_conflict_diff_query_overlay_caches();
@@ -2508,7 +2379,7 @@ impl MainPaneView {
                     && key == "f"
                 {
                     this.diff_search_active = true;
-                    this.diff_text_segments_cache.clear();
+                    this.clear_diff_text_query_overlay_cache();
                     this.worktree_preview_segments_cache_path = None;
                     this.worktree_preview_segments_cache.clear();
                     this.clear_conflict_diff_query_overlay_caches();
@@ -2639,9 +2510,7 @@ impl MainPaneView {
                     .read(cx)
                     .focus_handle()
                     .is_focused(window);
-                let is_file_preview = this.untracked_worktree_preview_path().is_some()
-                    || this.added_file_preview_abs_path().is_some()
-                    || this.deleted_file_preview_abs_path().is_some();
+                let is_file_preview = this.is_file_preview_active();
                 if is_file_preview {
                     if !handled
                         && !copy_target_is_focused
@@ -2701,7 +2570,7 @@ impl MainPaneView {
                                 this.conflict_resolver_set_mode(ConflictDiffMode::Inline, cx);
                             } else {
                                 this.diff_view = DiffViewMode::Inline;
-                                this.diff_text_segments_cache.clear();
+                                this.clear_diff_text_style_caches();
                             }
                             handled = true;
                         }
@@ -2710,19 +2579,18 @@ impl MainPaneView {
                                 this.conflict_resolver_set_mode(ConflictDiffMode::Split, cx);
                             } else {
                                 this.diff_view = DiffViewMode::Split;
-                                this.diff_text_segments_cache.clear();
+                                this.clear_diff_text_style_caches();
                             }
                             handled = true;
                         }
                         "h" => {
-                            let is_file_preview = this.untracked_worktree_preview_path().is_some()
-                                || this.added_file_preview_abs_path().is_some()
-                                || this.deleted_file_preview_abs_path().is_some();
-                            if !is_file_preview
-                                && !this.active_repo().is_some_and(|r| {
+                            let is_file_preview = this.is_file_preview_active();
+                            let wants_file_diff = !is_file_preview
+                                && !this.is_worktree_target_directory()
+                                && this.active_repo().is_some_and(|r| {
                                     Self::is_file_diff_target(r.diff_state.diff_target.as_ref())
-                                })
-                            {
+                                });
+                            if !is_file_preview && !wants_file_diff {
                                 this.open_popover_at_cursor(PopoverKind::DiffHunks, window, cx);
                                 handled = true;
                             }

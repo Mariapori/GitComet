@@ -72,8 +72,11 @@ mod status;
 
 pub(crate) mod benchmarks;
 
-pub(super) use diff_text::{
-    DiffSyntaxLanguage, DiffSyntaxMode, diff_syntax_language_for_path, syntax_highlights_for_line,
+pub(in crate::view) use diff_text::{
+    BackgroundPreparedDiffSyntaxDocument, DiffSyntaxBudget, DiffSyntaxLanguage, DiffSyntaxMode,
+    PrepareDiffSyntaxDocumentResult, PreparedDiffSyntaxDocument, diff_syntax_language_for_path,
+    inject_background_prepared_diff_syntax_document, prepare_diff_syntax_document_in_background,
+    prepare_diff_syntax_document_with_budget_reuse, syntax_highlights_for_line,
 };
 
 #[cfg(test)]

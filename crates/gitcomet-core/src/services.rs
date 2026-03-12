@@ -162,6 +162,14 @@ pub trait GitRepository: Send + Sync {
         Ok(None)
     }
     fn diff_unified(&self, target: &DiffTarget) -> Result<String>;
+    /// Load and parse unified diff rows for the target.
+    ///
+    /// Default implementation goes through `diff_unified`; backends may
+    /// override for streaming parsing to avoid large monolithic allocations.
+    fn diff_parsed(&self, target: &DiffTarget) -> Result<Diff> {
+        self.diff_unified(target)
+            .map(|text| Diff::from_unified(target.clone(), &text))
+    }
     fn diff_file_text(&self, _target: &DiffTarget) -> Result<Option<FileDiffText>> {
         Err(Error::new(ErrorKind::Unsupported(
             "file diff view is not implemented for this backend",

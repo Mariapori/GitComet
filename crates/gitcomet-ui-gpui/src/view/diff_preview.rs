@@ -1,8 +1,8 @@
-use gitcomet_core::diff::AnnotatedDiffLine;
+use crate::view::diff_utils::UnifiedDiffLine;
 use gitcomet_core::domain::DiffTarget;
 
 pub(super) fn build_new_file_preview_from_diff(
-    diff: &[AnnotatedDiffLine],
+    diff: &[impl UnifiedDiffLine],
     workdir: &std::path::Path,
     target: Option<&DiffTarget>,
 ) -> Option<(std::path::PathBuf, Vec<String>)> {
@@ -11,18 +11,18 @@ pub(super) fn build_new_file_preview_from_diff(
     let mut has_remove = false;
 
     for line in diff {
-        if matches!(line.kind, gitcomet_core::domain::DiffLineKind::Header)
-            && line.text.starts_with("diff --git ")
+        if matches!(line.kind(), gitcomet_core::domain::DiffLineKind::Header)
+            && line.text().starts_with("diff --git ")
         {
             file_header_count += 1;
         }
-        if matches!(line.kind, gitcomet_core::domain::DiffLineKind::Header)
-            && (line.text.starts_with("new file mode ")
-                || line.text.eq_ignore_ascii_case("--- /dev/null"))
+        if matches!(line.kind(), gitcomet_core::domain::DiffLineKind::Header)
+            && (line.text().starts_with("new file mode ")
+                || line.text().eq_ignore_ascii_case("--- /dev/null"))
         {
             is_new_file = true;
         }
-        if matches!(line.kind, gitcomet_core::domain::DiffLineKind::Remove) {
+        if matches!(line.kind(), gitcomet_core::domain::DiffLineKind::Remove) {
             has_remove = true;
         }
     }
@@ -47,15 +47,15 @@ pub(super) fn build_new_file_preview_from_diff(
 
     let lines = diff
         .iter()
-        .filter(|l| matches!(l.kind, gitcomet_core::domain::DiffLineKind::Add))
-        .map(|l| l.text.strip_prefix('+').unwrap_or(&l.text).to_string())
+        .filter(|l| matches!(l.kind(), gitcomet_core::domain::DiffLineKind::Add))
+        .map(|l| l.text().strip_prefix('+').unwrap_or(l.text()).to_string())
         .collect::<Vec<_>>();
 
     Some((abs_path, lines))
 }
 
 pub(super) fn build_deleted_file_preview_from_diff(
-    diff: &[AnnotatedDiffLine],
+    diff: &[impl UnifiedDiffLine],
     workdir: &std::path::Path,
     target: Option<&DiffTarget>,
 ) -> Option<(std::path::PathBuf, Vec<String>)> {
@@ -64,18 +64,18 @@ pub(super) fn build_deleted_file_preview_from_diff(
     let mut has_add = false;
 
     for line in diff {
-        if matches!(line.kind, gitcomet_core::domain::DiffLineKind::Header)
-            && line.text.starts_with("diff --git ")
+        if matches!(line.kind(), gitcomet_core::domain::DiffLineKind::Header)
+            && line.text().starts_with("diff --git ")
         {
             file_header_count += 1;
         }
-        if matches!(line.kind, gitcomet_core::domain::DiffLineKind::Header)
-            && (line.text.starts_with("deleted file mode ")
-                || line.text.eq_ignore_ascii_case("+++ /dev/null"))
+        if matches!(line.kind(), gitcomet_core::domain::DiffLineKind::Header)
+            && (line.text().starts_with("deleted file mode ")
+                || line.text().eq_ignore_ascii_case("+++ /dev/null"))
         {
             is_deleted_file = true;
         }
-        if matches!(line.kind, gitcomet_core::domain::DiffLineKind::Add) {
+        if matches!(line.kind(), gitcomet_core::domain::DiffLineKind::Add) {
             has_add = true;
         }
     }
@@ -100,8 +100,8 @@ pub(super) fn build_deleted_file_preview_from_diff(
 
     let lines = diff
         .iter()
-        .filter(|l| matches!(l.kind, gitcomet_core::domain::DiffLineKind::Remove))
-        .map(|l| l.text.strip_prefix('-').unwrap_or(&l.text).to_string())
+        .filter(|l| matches!(l.kind(), gitcomet_core::domain::DiffLineKind::Remove))
+        .map(|l| l.text().strip_prefix('-').unwrap_or(l.text()).to_string())
         .collect::<Vec<_>>();
 
     Some((abs_path, lines))
@@ -110,6 +110,7 @@ pub(super) fn build_deleted_file_preview_from_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gitcomet_core::diff::AnnotatedDiffLine;
     use gitcomet_core::domain::{DiffArea, DiffLineKind};
     use std::path::PathBuf;
 

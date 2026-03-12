@@ -1,10 +1,13 @@
 use super::{
     ClearDiffSelectionAction, ResolvedOutputConflictMarker, apply_conflict_choice_provenance_hints,
-    apply_three_way_empty_base_provenance_hints, build_resolved_output_conflict_markers,
-    clear_diff_selection_action, conflict_marker_nav_entries_from_markers,
-    conflict_resolver_output_context_line, first_output_marker_line_for_conflict,
+    apply_three_way_empty_base_provenance_hints, build_line_starts,
+    build_resolved_output_conflict_markers, clear_diff_selection_action,
+    conflict_marker_nav_entries_from_markers, conflict_resolver_output_context_line,
+    dirty_byte_range_to_line_range, first_output_marker_line_for_conflict,
     focused_mergetool_save_exit_code, output_line_range_for_conflict_block_in_text,
-    parse_conflict_canvas_rows_env, replace_output_lines_in_range, resolved_output_marker_for_line,
+    parse_conflict_canvas_rows_env, remap_line_keyed_cache_for_delta,
+    replace_output_lines_in_range, resolved_outline_delta_between_texts,
+    resolved_output_conflict_block_ranges_in_text, resolved_output_marker_for_line,
     resolved_output_markers_for_text, split_target_conflict_block_into_subchunks,
 };
 use crate::view::GitCometViewMode;
@@ -12,6 +15,7 @@ use crate::view::conflict_resolver::{
     self, ConflictBlock, ConflictChoice, ConflictResolverViewMode, ConflictSegment,
     ResolvedLineSource, SourceLines,
 };
+use rustc_hash::FxHashMap as HashMap;
 
 #[test]
 fn clear_diff_selection_action_is_clear_for_normal_mode() {
@@ -71,6 +75,71 @@ fn replace_output_lines_in_range_preserves_trailing_newline() {
     let replacement = vec!["x".to_string(), "y".to_string()];
     let next = replace_output_lines_in_range(output, 1..2, &replacement);
     assert_eq!(next, "a\nx\ny\n");
+}
+
+#[test]
+fn resolved_outline_delta_between_texts_clamps_to_utf8_boundaries() {
+    let old_text = "prefix ä\nsuffix";
+    let new_text = "prefix ö\nsuffix";
+    let delta = resolved_outline_delta_between_texts(old_text, new_text).expect("delta");
+    assert_eq!(old_text.get(delta.old_range.clone()), Some("ä"));
+    assert_eq!(new_text.get(delta.new_range.clone()), Some("ö"));
+}
+
+#[test]
+fn dirty_byte_range_to_line_range_includes_line_join_delete() {
+    let text = "a\nb\nc";
+    let line_starts = build_line_starts(text);
+    // Delete the newline between "a" and "b".
+    let dirty = dirty_byte_range_to_line_range(&line_starts, text.len(), 1..2);
+    assert_eq!(dirty, 0..2);
+}
+
+#[test]
+fn remap_line_keyed_cache_for_delta_shifts_suffix_entries() {
+    let mut cache: HashMap<usize, usize> = HashMap::default();
+    cache.insert(0, 10);
+    cache.insert(4, 40);
+    cache.insert(7, 70);
+
+    remap_line_keyed_cache_for_delta(&mut cache, 2..5, 2..3);
+    assert_eq!(cache.get(&0), Some(&10));
+    assert_eq!(cache.get(&4), None);
+    assert_eq!(cache.get(&5), Some(&70));
+}
+
+#[test]
+fn resolved_output_conflict_block_ranges_match_point_lookup() {
+    let segments = vec![
+        ConflictSegment::Text("top\n".to_string()),
+        ConflictSegment::Block(ConflictBlock {
+            base: None,
+            ours: "a\n".to_string(),
+            theirs: "x\n".to_string(),
+            choice: ConflictChoice::Ours,
+            resolved: true,
+        }),
+        ConflictSegment::Text("mid\n".to_string()),
+        ConflictSegment::Block(ConflictBlock {
+            base: None,
+            ours: "b\nc\n".to_string(),
+            theirs: "y\n".to_string(),
+            choice: ConflictChoice::Ours,
+            resolved: true,
+        }),
+    ];
+    let output = conflict_resolver::generate_resolved_text(&segments);
+    let ranges =
+        resolved_output_conflict_block_ranges_in_text(&segments, &output).expect("block ranges");
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(
+        output_line_range_for_conflict_block_in_text(&segments, &output, 0),
+        ranges.first().cloned()
+    );
+    assert_eq!(
+        output_line_range_for_conflict_block_in_text(&segments, &output, 1),
+        ranges.get(1).cloned()
+    );
 }
 
 #[test]

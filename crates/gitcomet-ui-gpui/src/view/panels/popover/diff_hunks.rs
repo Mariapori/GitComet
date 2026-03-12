@@ -5,12 +5,16 @@ pub(super) fn panel(this: &mut PopoverHost, cx: &mut gpui::Context<PopoverHost>)
     let close = cx.listener(|this, _e: &ClickEvent, _w, cx| this.close_popover(cx));
 
     let pane = this.main_pane.read(cx);
-    let mut items: Vec<SharedString> = Vec::with_capacity(pane.diff_visible_indices.len());
-    let mut targets: Vec<usize> = Vec::with_capacity(pane.diff_visible_indices.len());
+    let visible_len = pane.diff_visible_len();
+    let mut items: Vec<SharedString> = Vec::with_capacity(visible_len);
+    let mut targets: Vec<usize> = Vec::with_capacity(visible_len);
     let mut current_file: Option<String> = None;
 
     if !pane.is_file_diff_view_active() {
-        for (visible_ix, &ix) in pane.diff_visible_indices.iter().enumerate() {
+        for visible_ix in 0..visible_len {
+            let Some(ix) = pane.diff_mapped_ix_for_visible_ix(visible_ix) else {
+                continue;
+            };
             let (src_ix, click_kind) = match pane.diff_view {
                 DiffViewMode::Inline => {
                     let click_kind = pane
@@ -21,17 +25,17 @@ pub(super) fn panel(this: &mut PopoverHost, cx: &mut gpui::Context<PopoverHost>)
                     (ix, click_kind)
                 }
                 DiffViewMode::Split => {
-                    let Some(row) = pane.diff_split_cache.get(ix) else {
+                    let Some(row) = pane.patch_diff_split_row(ix) else {
                         continue;
                     };
                     let PatchSplitRow::Raw { src_ix, click_kind } = row else {
                         continue;
                     };
-                    (*src_ix, *click_kind)
+                    (src_ix, click_kind)
                 }
             };
 
-            let Some(line) = pane.diff_cache.get(src_ix) else {
+            let Some(line) = pane.patch_diff_row(src_ix) else {
                 continue;
             };
 

@@ -990,6 +990,34 @@ fn text_line_count_usize(text: &str) -> usize {
     }
 }
 
+fn indexed_line_count(text: &str, line_starts: &[usize]) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        line_starts.len()
+    }
+}
+
+fn indexed_line_text<'a>(text: &'a str, line_starts: &[usize], line_ix: usize) -> Option<&'a str> {
+    if text.is_empty() {
+        return None;
+    }
+    let text_len = text.len();
+    let start = line_starts.get(line_ix).copied().unwrap_or(text_len);
+    if start >= text_len {
+        return None;
+    }
+    let mut end = line_starts
+        .get(line_ix.saturating_add(1))
+        .copied()
+        .unwrap_or(text_len)
+        .min(text_len);
+    if end > start && text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\n') {
+        end = end.saturating_sub(1);
+    }
+    Some(text.get(start..end).unwrap_or(""))
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ThreeWayConflictMaps {
     pub conflict_ranges: Vec<std::ops::Range<usize>>,
@@ -1217,21 +1245,30 @@ pub fn build_three_way_visible_map(
         .collect();
 
     let mut visible = Vec::with_capacity(total_lines);
-    let mut line = 0usize;
-    while line < total_lines {
-        if let Some((range_ix, range)) = conflict_ranges
-            .iter()
-            .enumerate()
-            .find(|(_, r)| r.contains(&line))
-            .filter(|(ri, _)| resolved_blocks.get(*ri).copied().unwrap_or(false))
+    let mut line_ix = 0usize;
+    let mut range_ix = 0usize;
+
+    while line_ix < total_lines {
+        while let Some(range) = conflict_ranges.get(range_ix) {
+            if range.end <= line_ix {
+                range_ix += 1;
+                continue;
+            }
+            break;
+        }
+
+        if let Some(range) = conflict_ranges.get(range_ix)
+            && range.contains(&line_ix)
+            && resolved_blocks.get(range_ix).copied().unwrap_or(false)
         {
             // Emit one collapsed summary row and skip the rest of the range.
             visible.push(ThreeWayVisibleItem::CollapsedBlock(range_ix));
-            line = range.end;
+            line_ix = range.end;
             continue;
         }
-        visible.push(ThreeWayVisibleItem::Line(line));
-        line += 1;
+
+        visible.push(ThreeWayVisibleItem::Line(line_ix));
+        line_ix += 1;
     }
     visible
 }
@@ -1267,15 +1304,17 @@ pub fn unresolved_visible_nav_entries_for_three_way(
 }
 
 pub fn compute_three_way_word_highlights(
-    base_lines: &[gpui::SharedString],
-    ours_lines: &[gpui::SharedString],
-    theirs_lines: &[gpui::SharedString],
+    base_text: &str,
+    base_line_starts: &[usize],
+    ours_text: &str,
+    ours_line_starts: &[usize],
+    theirs_text: &str,
+    theirs_line_starts: &[usize],
     marker_segments: &[ConflictSegment],
 ) -> (WordHighlights, WordHighlights, WordHighlights) {
-    let len = base_lines
-        .len()
-        .max(ours_lines.len())
-        .max(theirs_lines.len());
+    let len = indexed_line_count(base_text, base_line_starts)
+        .max(indexed_line_count(ours_text, ours_line_starts))
+        .max(indexed_line_count(theirs_text, theirs_line_starts));
     let mut wh_base: WordHighlights = vec![None; len];
     let mut wh_ours: WordHighlights = vec![None; len];
     let mut wh_theirs: WordHighlights = vec![None; len];
@@ -1307,10 +1346,11 @@ pub fn compute_three_way_word_highlights(
     }
 
     fn full_line_range(
-        lines: &[gpui::SharedString],
+        text: &str,
+        line_starts: &[usize],
         line_ix: usize,
     ) -> Vec<std::ops::Range<usize>> {
-        let Some(line) = lines.get(line_ix).map(|s| s.as_ref()) else {
+        let Some(line) = indexed_line_text(text, line_starts, line_ix) else {
             return Vec::new();
         };
         if line.is_empty() {
@@ -1321,7 +1361,8 @@ pub fn compute_three_way_word_highlights(
 
     struct HighlightSide<'a> {
         global_start: usize,
-        lines: &'a [gpui::SharedString],
+        text: &'a str,
+        line_starts: &'a [usize],
     }
 
     fn apply_aligned_word_highlights(
@@ -1352,12 +1393,20 @@ pub fn compute_three_way_word_highlights(
                 }
                 FileDiffRowKind::Remove => {
                     if let Some(ix) = line_index(old_side.global_start, row.old_line) {
-                        merge_line_ranges(old_highlights, ix, full_line_range(old_side.lines, ix));
+                        merge_line_ranges(
+                            old_highlights,
+                            ix,
+                            full_line_range(old_side.text, old_side.line_starts, ix),
+                        );
                     }
                 }
                 FileDiffRowKind::Add => {
                     if let Some(ix) = line_index(new_side.global_start, row.new_line) {
-                        merge_line_ranges(new_highlights, ix, full_line_range(new_side.lines, ix));
+                        merge_line_ranges(
+                            new_highlights,
+                            ix,
+                            full_line_range(new_side.text, new_side.line_starts, ix),
+                        );
                     }
                 }
                 FileDiffRowKind::Context => {}
@@ -1383,11 +1432,13 @@ pub fn compute_three_way_word_highlights(
                         &block.ours,
                         HighlightSide {
                             global_start: base_offset,
-                            lines: base_lines,
+                            text: base_text,
+                            line_starts: base_line_starts,
                         },
                         HighlightSide {
                             global_start: ours_offset,
-                            lines: ours_lines,
+                            text: ours_text,
+                            line_starts: ours_line_starts,
                         },
                         &mut wh_base,
                         &mut wh_ours,
@@ -1397,11 +1448,13 @@ pub fn compute_three_way_word_highlights(
                         &block.theirs,
                         HighlightSide {
                             global_start: base_offset,
-                            lines: base_lines,
+                            text: base_text,
+                            line_starts: base_line_starts,
                         },
                         HighlightSide {
                             global_start: theirs_offset,
-                            lines: theirs_lines,
+                            text: theirs_text,
+                            line_starts: theirs_line_starts,
                         },
                         &mut wh_base,
                         &mut wh_theirs,
@@ -1413,11 +1466,13 @@ pub fn compute_three_way_word_highlights(
                     &block.theirs,
                     HighlightSide {
                         global_start: ours_offset,
-                        lines: ours_lines,
+                        text: ours_text,
+                        line_starts: ours_line_starts,
                     },
                     HighlightSide {
                         global_start: theirs_offset,
-                        lines: theirs_lines,
+                        text: theirs_text,
+                        line_starts: theirs_line_starts,
                     },
                     &mut wh_ours,
                     &mut wh_theirs,
@@ -1586,6 +1641,12 @@ pub fn split_output_lines_for_outline(output: &str) -> Vec<String> {
     output.split('\n').map(|line| line.to_string()).collect()
 }
 
+#[allow(dead_code)]
+pub fn output_line_count_for_outline(output: &str) -> usize {
+    output.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn append_lines_to_output(output: &str, lines: &[String]) -> String {
     if lines.is_empty() {
         return output.to_string();
@@ -1623,50 +1684,51 @@ pub struct SourceLines<'a> {
     pub c: &'a [gpui::SharedString],
 }
 
-/// Compute per-line provenance metadata for the resolved output.
-///
-/// Each output line is compared (exact text equality) against every source line
-/// in A, B, C. The first match found (priority: A, B, C) wins; if none match
-/// the line is labeled `Manual`.
-pub fn compute_resolved_line_provenance(
-    output_lines: &[String],
-    sources: &SourceLines<'_>,
+fn build_source_line_lookup<'a>(
+    sources: &'a SourceLines<'a>,
+) -> rustc_hash::FxHashMap<&'a str, (ResolvedLineSource, u32)> {
+    let mut lookup = rustc_hash::FxHashMap::default();
+
+    // Insert in reverse order so duplicates keep the first line number within a side.
+    // Later sides overwrite earlier ones to enforce priority A > B > C.
+    for (ix, line) in sources.c.iter().enumerate().rev() {
+        lookup.insert(
+            line.as_ref(),
+            (
+                ResolvedLineSource::C,
+                u32::try_from(ix + 1).unwrap_or(u32::MAX),
+            ),
+        );
+    }
+    for (ix, line) in sources.b.iter().enumerate().rev() {
+        lookup.insert(
+            line.as_ref(),
+            (
+                ResolvedLineSource::B,
+                u32::try_from(ix + 1).unwrap_or(u32::MAX),
+            ),
+        );
+    }
+    for (ix, line) in sources.a.iter().enumerate().rev() {
+        lookup.insert(
+            line.as_ref(),
+            (
+                ResolvedLineSource::A,
+                u32::try_from(ix + 1).unwrap_or(u32::MAX),
+            ),
+        );
+    }
+
+    lookup
+}
+
+fn compute_resolved_line_provenance_from_iter<'a>(
+    output_lines: impl Iterator<Item = &'a str>,
+    lookup: &rustc_hash::FxHashMap<&str, (ResolvedLineSource, u32)>,
 ) -> Vec<ResolvedLineMeta> {
-    // Build lookup tables: content -> Vec<(source, 1-based line_no)>
-    // We iterate sources in priority order (A, B, C) and take the first match.
-    let mut result = Vec::with_capacity(output_lines.len());
-
-    for (out_ix, out_line) in output_lines.iter().enumerate() {
-        let trimmed = out_line.as_str();
-        let mut found = None;
-
-        // Check A
-        for (i, src_line) in sources.a.iter().enumerate() {
-            if src_line.as_ref() == trimmed {
-                found = Some((ResolvedLineSource::A, (i + 1) as u32));
-                break;
-            }
-        }
-        // Check B (only if A didn't match)
-        if found.is_none() {
-            for (i, src_line) in sources.b.iter().enumerate() {
-                if src_line.as_ref() == trimmed {
-                    found = Some((ResolvedLineSource::B, (i + 1) as u32));
-                    break;
-                }
-            }
-        }
-        // Check C (only if A and B didn't match)
-        if found.is_none() {
-            for (i, src_line) in sources.c.iter().enumerate() {
-                if src_line.as_ref() == trimmed {
-                    found = Some((ResolvedLineSource::C, (i + 1) as u32));
-                    break;
-                }
-            }
-        }
-
-        let (source, input_line) = match found {
+    let mut result = Vec::new();
+    for (out_ix, out_line) in output_lines.enumerate() {
+        let (source, input_line) = match lookup.get(out_line).copied() {
             Some((src, line_no)) => (src, Some(line_no)),
             None => (ResolvedLineSource::Manual, None),
         };
@@ -1676,8 +1738,103 @@ pub fn compute_resolved_line_provenance(
             input_line,
         });
     }
-
     result
+}
+
+/// Compute per-line provenance metadata for the resolved output.
+///
+/// Each output line is compared (exact text equality) against every source line
+/// in A, B, C. The first match found (priority: A, B, C) wins; if none match
+/// the line is labeled `Manual`.
+pub fn compute_resolved_line_provenance(
+    output_lines: &[String],
+    sources: &SourceLines<'_>,
+) -> Vec<ResolvedLineMeta> {
+    let lookup = build_source_line_lookup(sources);
+    compute_resolved_line_provenance_from_iter(output_lines.iter().map(String::as_str), &lookup)
+}
+
+#[allow(dead_code)]
+pub fn compute_resolved_line_provenance_from_text(
+    output_text: &str,
+    sources: &SourceLines<'_>,
+) -> Vec<ResolvedLineMeta> {
+    let lookup = build_source_line_lookup(sources);
+    compute_resolved_line_provenance_from_iter(output_text.split('\n'), &lookup)
+}
+
+fn insert_indexed_source_lines<'a>(
+    lookup: &mut rustc_hash::FxHashMap<&'a str, (ResolvedLineSource, u32)>,
+    source: ResolvedLineSource,
+    text: &'a str,
+    line_starts: &[usize],
+) {
+    let line_count = indexed_line_count(text, line_starts);
+    for line_ix in (0..line_count).rev() {
+        if let Some(line) = indexed_line_text(text, line_starts, line_ix) {
+            lookup.insert(
+                line,
+                (
+                    source,
+                    u32::try_from(line_ix.saturating_add(1)).unwrap_or(u32::MAX),
+                ),
+            );
+        }
+    }
+}
+
+pub fn compute_resolved_line_provenance_from_text_with_indexed_sources(
+    output_text: &str,
+    a_text: &str,
+    a_line_starts: &[usize],
+    b_text: &str,
+    b_line_starts: &[usize],
+    c_text: &str,
+    c_line_starts: &[usize],
+) -> Vec<ResolvedLineMeta> {
+    let mut lookup = rustc_hash::FxHashMap::default();
+    insert_indexed_source_lines(&mut lookup, ResolvedLineSource::C, c_text, c_line_starts);
+    insert_indexed_source_lines(&mut lookup, ResolvedLineSource::B, b_text, b_line_starts);
+    insert_indexed_source_lines(&mut lookup, ResolvedLineSource::A, a_text, a_line_starts);
+    compute_resolved_line_provenance_from_iter(output_text.split('\n'), &lookup)
+}
+
+fn insert_two_way_side_lookup<'a>(
+    lookup: &mut rustc_hash::FxHashMap<&'a str, (ResolvedLineSource, u32)>,
+    rows: &'a [gitcomet_core::file_diff::FileDiffRow],
+    source: ResolvedLineSource,
+    read_text: impl Fn(&'a gitcomet_core::file_diff::FileDiffRow) -> Option<&'a str>,
+) {
+    let mut line_no = rows
+        .iter()
+        .filter_map(&read_text)
+        .count()
+        .min(u32::MAX as usize) as u32;
+    for row in rows.iter().rev() {
+        let Some(text) = read_text(row) else {
+            continue;
+        };
+        if line_no == 0 {
+            continue;
+        }
+        lookup.insert(text, (source, line_no));
+        line_no = line_no.saturating_sub(1);
+    }
+}
+
+pub fn compute_resolved_line_provenance_from_text_two_way_rows(
+    output_text: &str,
+    diff_rows: &[gitcomet_core::file_diff::FileDiffRow],
+) -> Vec<ResolvedLineMeta> {
+    let mut lookup = rustc_hash::FxHashMap::default();
+    // Reverse insertion to preserve side priority A > B for duplicate lines.
+    insert_two_way_side_lookup(&mut lookup, diff_rows, ResolvedLineSource::B, |row| {
+        row.new.as_deref()
+    });
+    insert_two_way_side_lookup(&mut lookup, diff_rows, ResolvedLineSource::A, |row| {
+        row.old.as_deref()
+    });
+    compute_resolved_line_provenance_from_iter(output_text.split('\n'), &lookup)
 }
 
 // ---------------------------------------------------------------------------
@@ -1688,6 +1845,7 @@ pub fn compute_resolved_line_provenance(
 ///
 /// Used to gate the plus-icon: a source row's plus-icon is hidden when its key
 /// is already in this set (preventing duplicate insertion).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn build_resolved_output_line_sources_index(
     meta: &[ResolvedLineMeta],
     output_lines: &[String],
@@ -1706,6 +1864,27 @@ pub fn build_resolved_output_line_sources_index(
             .map(|s| s.as_str())
             .unwrap_or("");
         index.insert(SourceLineKey::new(view_mode, m.source, line_no, content));
+    }
+    index
+}
+
+pub fn build_resolved_output_line_sources_index_from_text(
+    meta: &[ResolvedLineMeta],
+    output_text: &str,
+    view_mode: ConflictResolverViewMode,
+) -> rustc_hash::FxHashSet<SourceLineKey> {
+    let mut index = rustc_hash::FxHashSet::with_capacity_and_hasher(meta.len(), Default::default());
+    for (ix, line) in output_text.split('\n').enumerate() {
+        let Some(m) = meta.get(ix) else {
+            break;
+        };
+        if m.source == ResolvedLineSource::Manual {
+            continue;
+        }
+        let Some(line_no) = m.input_line else {
+            continue;
+        };
+        index.insert(SourceLineKey::new(view_mode, m.source, line_no, line));
     }
     index
 }

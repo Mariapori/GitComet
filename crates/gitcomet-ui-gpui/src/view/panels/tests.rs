@@ -137,6 +137,12 @@ fn assert_file_preview_ctrl_a_ctrl_c_copies_all(
         super::super::GitCometView::new(store, events, None, window, cx)
     });
 
+    // Create the file on disk so is_file_preview_active() can detect it.
+    let _ = std::fs::create_dir_all(&workdir);
+    std::fs::write(workdir.join(&file_rel), lines.join("\n")).expect("write preview fixture file");
+
+    // Push state through the model first; the observer will clear stale
+    // worktree_preview on diff-target change.
     cx.update(|_window, app| {
         view.update(app, |this, cx| {
             let mut repo = gitcomet_state::model::RepoState::new_opening(
@@ -170,7 +176,13 @@ fn assert_file_preview_ctrl_a_ctrl_c_copies_all(
             this._ui_model.update(cx, |model, cx| {
                 model.set_state(Arc::clone(&next_state), cx);
             });
+        });
+    });
 
+    // Set preview data in a separate update so it runs after the observer
+    // has cleared the stale preview state.
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
             let workdir = workdir.clone();
             let file_rel = file_rel.clone();
             let lines = Arc::clone(&lines);
@@ -198,6 +210,8 @@ fn assert_file_preview_ctrl_a_ctrl_c_copies_all(
         cx.read_from_clipboard().and_then(|item| item.text()),
         Some(expected.into())
     );
+
+    let _ = std::fs::remove_dir_all(&workdir);
 }
 
 #[gpui::test]
@@ -218,6 +232,12 @@ fn file_preview_renders_scrollable_syntax_highlighted_rows(cx: &mut gpui::TestAp
             .collect(),
     );
 
+    // Create the file on disk so is_file_preview_active() can detect it.
+    let _ = std::fs::create_dir_all(&workdir);
+    std::fs::write(workdir.join(&file_rel), lines.join("\n")).expect("write preview fixture file");
+
+    // Push state through the model first; the observer will clear stale
+    // worktree_preview on diff-target change.
     cx.update(|_window, app| {
         view.update(app, |this, cx| {
             let mut repo = gitcomet_state::model::RepoState::new_opening(
@@ -251,7 +271,13 @@ fn file_preview_renders_scrollable_syntax_highlighted_rows(cx: &mut gpui::TestAp
             this._ui_model.update(cx, |model, cx| {
                 model.set_state(Arc::clone(&next_state), cx);
             });
+        });
+    });
 
+    // Set preview data in a separate update so it runs after the observer
+    // has cleared the stale preview state.
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
             let workdir = workdir.clone();
             let file_rel = file_rel.clone();
             let lines = Arc::clone(&lines);
@@ -297,6 +323,8 @@ fn file_preview_renders_scrollable_syntax_highlighted_rows(cx: &mut gpui::TestAp
             "expected syntax highlighting highlights for preview row"
         );
     });
+
+    let _ = std::fs::remove_dir_all(&workdir);
 }
 
 #[gpui::test]
@@ -380,6 +408,137 @@ fn patch_view_applies_syntax_highlighting_to_context_lines(cx: &mut gpui::TestAp
 }
 
 #[gpui::test]
+fn patch_diff_search_query_keeps_stable_style_cache_entries(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(22);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_patch_search",
+        std::process::id()
+    ));
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let target = gitcomet_core::domain::DiffTarget::Commit {
+                commit_id: gitcomet_core::domain::CommitId("feedface".to_string()),
+                path: None,
+            };
+
+            let diff = gitcomet_core::domain::Diff {
+                target: target.clone(),
+                lines: vec![
+                    gitcomet_core::domain::DiffLine {
+                        kind: gitcomet_core::domain::DiffLineKind::Header,
+                        text: "diff --git a/foo.rs b/foo.rs".into(),
+                    },
+                    gitcomet_core::domain::DiffLine {
+                        kind: gitcomet_core::domain::DiffLineKind::Hunk,
+                        text: "@@ -1,1 +1,1 @@".into(),
+                    },
+                    gitcomet_core::domain::DiffLine {
+                        kind: gitcomet_core::domain::DiffLineKind::Context,
+                        text: " fn main() { let x = 1; }".into(),
+                    },
+                ],
+            };
+
+            let mut repo = gitcomet_state::model::RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus::default().into(),
+            );
+            repo.diff_state.diff_target = Some(target);
+            repo.diff_state.diff_rev = 1;
+            repo.diff_state.diff = gitcomet_state::model::Loadable::Ready(diff.into());
+
+            let next_state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+        });
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    let mut stable_highlights_hash_before = 0u64;
+    let mut stable_text_hash_before = 0u64;
+    cx.update(|_window, app| {
+        let main_pane = view.read(app).main_pane.clone();
+        let pane = main_pane.read(app);
+        let stable = pane
+            .diff_text_segments_cache
+            .get(2)
+            .and_then(|entry| entry.as_ref())
+            .expect("expected stable cache entry for context row before search");
+        assert!(
+            pane.diff_text_query_segments_cache.is_empty(),
+            "query overlay cache should start empty"
+        );
+        stable_highlights_hash_before = stable.highlights_hash;
+        stable_text_hash_before = stable.text_hash;
+    });
+
+    cx.update(|_window, app| {
+        let main_pane = view.read(app).main_pane.clone();
+        main_pane.update(app, |pane, cx| {
+            pane.diff_search_active = true;
+            pane.diff_search_input.update(cx, |input, cx| {
+                input.set_text("main", cx);
+            });
+            cx.notify();
+        });
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let main_pane = view.read(app).main_pane.clone();
+        let pane = main_pane.read(app);
+
+        let stable_after = pane
+            .diff_text_segments_cache
+            .get(2)
+            .and_then(|entry| entry.as_ref())
+            .expect("expected stable cache entry for context row after search query update");
+        assert_eq!(
+            stable_after.highlights_hash, stable_highlights_hash_before,
+            "search query updates should not rewrite stable style highlights"
+        );
+        assert_eq!(
+            stable_after.text_hash, stable_text_hash_before,
+            "search query updates should not rewrite stable styled text"
+        );
+
+        assert_eq!(pane.diff_text_query_cache_query.as_ref(), "main");
+        let query_overlay = pane
+            .diff_text_query_segments_cache
+            .get(2)
+            .and_then(|entry| entry.as_ref())
+            .expect("expected query overlay cache entry for searched context row");
+        assert_ne!(
+            query_overlay.highlights_hash, stable_after.highlights_hash,
+            "query overlay should layer match highlighting on top of stable highlights"
+        );
+    });
+}
+
+#[gpui::test]
 fn staged_deleted_file_preview_uses_old_contents(cx: &mut gpui::TestAppContext) {
     let (store, events) = AppStore::new(Arc::new(TestBackend));
     let (view, cx) = cx.add_window_view(|window, cx| {
@@ -438,7 +597,7 @@ fn staged_deleted_file_preview_uses_old_contents(cx: &mut gpui::TestAppContext) 
     cx.update(|_window, app| {
         view.update(app, |this, cx| {
             this.main_pane.update(cx, |pane, cx| {
-                pane.try_populate_worktree_preview_from_diff_file();
+                pane.try_populate_worktree_preview_from_diff_file(cx);
                 cx.notify();
             });
         });
@@ -455,6 +614,688 @@ fn staged_deleted_file_preview_uses_old_contents(cx: &mut gpui::TestAppContext) 
         };
         assert_eq!(lines.as_ref(), &vec!["one".to_string(), "two".to_string()]);
     });
+}
+
+#[gpui::test]
+fn unstaged_deleted_gitlink_preview_does_not_stay_loading(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(44);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_unstaged_gitlink",
+        std::process::id()
+    ));
+    let file_rel = std::path::PathBuf::from("chess3");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+
+    let target = gitcomet_core::domain::DiffTarget::WorkingTree {
+        path: file_rel.clone(),
+        area: gitcomet_core::domain::DiffArea::Unstaged,
+    };
+    let unified = format!(
+        "diff --git a/{0} b/{0}\nindex 1234567..0000000 160000\n--- a/{0}\n+++ /dev/null\n@@ -1 +0,0 @@\n-Subproject commit c35be02cd52b18c7b2894dc570825b43c94130ed\n",
+        file_rel.display()
+    );
+    let diff = gitcomet_core::domain::Diff::from_unified(target.clone(), &unified);
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = gitcomet_state::model::RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![],
+                    unstaged: vec![gitcomet_core::domain::FileStatus {
+                        path: file_rel.clone(),
+                        kind: gitcomet_core::domain::FileStatusKind::Deleted,
+                        conflict: None,
+                    }],
+                }
+                .into(),
+            );
+            repo.diff_state.diff_target = Some(target.clone());
+            repo.diff_state.diff = gitcomet_state::model::Loadable::Ready(Arc::new(diff));
+            repo.diff_state.diff_file = gitcomet_state::model::Loadable::Ready(None);
+
+            let next_state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+        });
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let pane = view.read(app).main_pane.read(app);
+        assert!(
+            !matches!(
+                pane.worktree_preview,
+                gitcomet_state::model::Loadable::Loading
+            ),
+            "unstaged gitlink-like deleted target should not remain stuck in File Loading"
+        );
+    });
+
+    std::fs::remove_dir_all(&workdir).expect("cleanup unstaged gitlink fixture");
+}
+
+#[gpui::test]
+fn unstaged_modified_gitlink_target_uses_unified_diff_mode(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(45);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_unstaged_gitlink_mod",
+        std::process::id()
+    ));
+    let file_rel = std::path::PathBuf::from("chess3");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(workdir.join(&file_rel)).expect("create gitlink-like directory");
+
+    let target = gitcomet_core::domain::DiffTarget::WorkingTree {
+        path: file_rel.clone(),
+        area: gitcomet_core::domain::DiffArea::Unstaged,
+    };
+    let unified = format!(
+        "diff --git a/{0} b/{0}\nindex 1234567..89abcde 160000\n--- a/{0}\n+++ b/{0}\n@@ -1 +1 @@\n-Subproject commit 1234567890123456789012345678901234567890\n+Subproject commit 89abcdef0123456789abcdef0123456789abcdef\n",
+        file_rel.display()
+    );
+    let diff = gitcomet_core::domain::Diff::from_unified(target.clone(), &unified);
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = gitcomet_state::model::RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![gitcomet_core::domain::FileStatus {
+                        path: file_rel.clone(),
+                        kind: gitcomet_core::domain::FileStatusKind::Added,
+                        conflict: None,
+                    }],
+                    unstaged: vec![gitcomet_core::domain::FileStatus {
+                        path: file_rel.clone(),
+                        kind: gitcomet_core::domain::FileStatusKind::Modified,
+                        conflict: None,
+                    }],
+                }
+                .into(),
+            );
+            repo.diff_state.diff_target = Some(target);
+            repo.diff_state.diff = gitcomet_state::model::Loadable::Ready(Arc::new(diff));
+            repo.diff_state.diff_file = gitcomet_state::model::Loadable::Ready(None);
+
+            let next_state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+        });
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let pane = view.read(app).main_pane.read(app);
+        assert!(
+            pane.is_worktree_target_directory(),
+            "gitlink-like target should be treated as directory-backed for unified diff mode"
+        );
+        assert!(
+            !pane.is_file_preview_active(),
+            "unstaged modified gitlink target should bypass file preview mode"
+        );
+        assert!(
+            !matches!(
+                pane.worktree_preview,
+                gitcomet_state::model::Loadable::Loading
+            ),
+            "unstaged modified gitlink target should not show stuck File Loading state"
+        );
+    });
+
+    std::fs::remove_dir_all(&workdir).expect("cleanup unstaged gitlink modified fixture");
+}
+
+#[gpui::test]
+fn ensure_preview_loading_does_not_reenter_loading_from_error_for_same_path(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let temp = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_preview_loading_error",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp);
+    std::fs::create_dir_all(&temp).expect("create temp directory");
+    let path_a = temp.join("a.txt");
+    let path_b = temp.join("b.txt");
+    std::fs::write(&path_a, "a\n").expect("write a.txt");
+    std::fs::write(&path_b, "b\n").expect("write b.txt");
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            this.main_pane.update(cx, |pane, _cx| {
+                pane.worktree_preview_path = Some(path_a.clone());
+                pane.worktree_preview = gitcomet_state::model::Loadable::Error("boom".into());
+
+                // Same path: keep showing the existing error, do not bounce back to Loading.
+                pane.ensure_preview_loading(path_a.clone());
+                assert!(
+                    matches!(
+                        pane.worktree_preview,
+                        gitcomet_state::model::Loadable::Error(_)
+                    ),
+                    "same-path retry should not reset Error to Loading"
+                );
+
+                // Different path: loading the newly selected file is expected.
+                pane.ensure_preview_loading(path_b.clone());
+                assert_eq!(pane.worktree_preview_path, Some(path_b.clone()));
+                assert!(
+                    matches!(
+                        pane.worktree_preview,
+                        gitcomet_state::model::Loadable::Loading
+                    ),
+                    "new path selection should enter Loading"
+                );
+            });
+        });
+    });
+
+    std::fs::remove_dir_all(&temp).expect("cleanup temp directory");
+}
+
+#[gpui::test]
+fn switching_diff_target_clears_stale_worktree_preview_loading(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(36);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_switch_preview_target",
+        std::process::id()
+    ));
+    let file_a = std::path::PathBuf::from("a.txt");
+    let file_b = std::path::PathBuf::from("b.txt");
+
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+
+    let make_state = |target_path: std::path::PathBuf, diff_state_rev: u64| {
+        Arc::new(AppState {
+            repos: vec![{
+                let mut repo = gitcomet_state::model::RepoState::new_opening(
+                    repo_id,
+                    gitcomet_core::domain::RepoSpec {
+                        workdir: workdir.clone(),
+                    },
+                );
+                repo.status = gitcomet_state::model::Loadable::Ready(
+                    gitcomet_core::domain::RepoStatus {
+                        staged: vec![],
+                        unstaged: vec![
+                            gitcomet_core::domain::FileStatus {
+                                path: file_a.clone(),
+                                kind: gitcomet_core::domain::FileStatusKind::Untracked,
+                                conflict: None,
+                            },
+                            gitcomet_core::domain::FileStatus {
+                                path: file_b.clone(),
+                                kind: gitcomet_core::domain::FileStatusKind::Untracked,
+                                conflict: None,
+                            },
+                        ],
+                    }
+                    .into(),
+                );
+                repo.diff_state.diff_target =
+                    Some(gitcomet_core::domain::DiffTarget::WorkingTree {
+                        path: target_path,
+                        area: gitcomet_core::domain::DiffArea::Unstaged,
+                    });
+                repo.diff_state.diff_state_rev = diff_state_rev;
+                repo
+            }],
+            active_repo: Some(repo_id),
+            ..Default::default()
+        })
+    };
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let first = make_state(file_a.clone(), 1);
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(first, cx);
+            });
+            this.main_pane.update(cx, |pane, _cx| {
+                pane.worktree_preview_path = Some(workdir.join(&file_a));
+                pane.worktree_preview = gitcomet_state::model::Loadable::Loading;
+            });
+        });
+    });
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let second = make_state(file_b.clone(), 2);
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(second, cx);
+            });
+        });
+    });
+
+    cx.update(|_window, app| {
+        let pane = view.read(app).main_pane.read(app);
+        let stale_path = workdir.join(&file_a);
+        let is_stale_loading =
+            matches!(pane.worktree_preview, gitcomet_state::model::Loadable::Loading)
+                && pane.worktree_preview_path.as_ref() == Some(&stale_path);
+        assert!(
+            !is_stale_loading,
+            "switching selected file should not keep stale Loading on previous path; state={:?} path={:?}",
+            pane.worktree_preview,
+            pane.worktree_preview_path
+        );
+    });
+
+    std::fs::remove_dir_all(&workdir).expect("cleanup workdir");
+}
+
+#[gpui::test]
+fn staged_directory_target_uses_unified_diff_mode(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(34);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_staged_dir",
+        std::process::id()
+    ));
+    let file_rel = std::path::PathBuf::from("subproject");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(workdir.join(&file_rel)).expect("create staged directory path");
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = gitcomet_state::model::RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![gitcomet_core::domain::FileStatus {
+                        path: file_rel.clone(),
+                        kind: gitcomet_core::domain::FileStatusKind::Added,
+                        conflict: None,
+                    }],
+                    unstaged: vec![],
+                }
+                .into(),
+            );
+            repo.diff_state.diff_target = Some(gitcomet_core::domain::DiffTarget::WorkingTree {
+                path: file_rel.clone(),
+                area: gitcomet_core::domain::DiffArea::Staged,
+            });
+
+            let next_state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+        });
+    });
+
+    cx.update(|_window, app| {
+        let pane = view.read(app).main_pane.read(app);
+        assert!(
+            pane.is_worktree_target_directory(),
+            "expected staged directory target detection for gitlink-like entries"
+        );
+        assert!(
+            !pane.is_file_preview_active(),
+            "directory targets should avoid file preview mode to show unified subproject diffs"
+        );
+    });
+
+    std::fs::remove_dir_all(&workdir).expect("cleanup staged directory fixture");
+}
+
+#[gpui::test]
+fn staged_added_missing_target_uses_unified_diff_mode(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(43);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_staged_added_missing",
+        std::process::id()
+    ));
+    let file_rel = std::path::PathBuf::from("subproject");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = gitcomet_state::model::RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![gitcomet_core::domain::FileStatus {
+                        path: file_rel.clone(),
+                        kind: gitcomet_core::domain::FileStatusKind::Added,
+                        conflict: None,
+                    }],
+                    unstaged: vec![],
+                }
+                .into(),
+            );
+            repo.diff_state.diff_target = Some(gitcomet_core::domain::DiffTarget::WorkingTree {
+                path: file_rel.clone(),
+                area: gitcomet_core::domain::DiffArea::Staged,
+            });
+
+            let next_state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+        });
+    });
+
+    cx.update(|_window, app| {
+        let pane = view.read(app).main_pane.read(app);
+        assert!(
+            !pane.is_file_preview_active(),
+            "staged Added targets that are not real files should bypass file preview to avoid stuck loading"
+        );
+    });
+
+    std::fs::remove_dir_all(&workdir).expect("cleanup staged-added-missing fixture");
+}
+
+#[gpui::test]
+fn untracked_directory_target_uses_unified_diff_mode(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(35);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_unstaged_dir",
+        std::process::id()
+    ));
+    let file_rel = std::path::PathBuf::from("subproject");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(workdir.join(&file_rel)).expect("create untracked directory path");
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = gitcomet_state::model::RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![],
+                    unstaged: vec![gitcomet_core::domain::FileStatus {
+                        path: file_rel.clone(),
+                        kind: gitcomet_core::domain::FileStatusKind::Untracked,
+                        conflict: None,
+                    }],
+                }
+                .into(),
+            );
+            repo.diff_state.diff_target = Some(gitcomet_core::domain::DiffTarget::WorkingTree {
+                path: file_rel.clone(),
+                area: gitcomet_core::domain::DiffArea::Unstaged,
+            });
+
+            let next_state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+        });
+    });
+
+    cx.update(|_window, app| {
+        let pane = view.read(app).main_pane.read(app);
+        assert!(
+            pane.is_worktree_target_directory(),
+            "expected untracked directory target detection for gitlink-like entries"
+        );
+        assert!(
+            !pane.is_file_preview_active(),
+            "untracked directory targets should avoid file preview loading mode"
+        );
+    });
+
+    std::fs::remove_dir_all(&workdir).expect("cleanup untracked directory fixture");
+}
+
+#[gpui::test]
+fn untracked_directory_target_clears_stale_file_loading_state(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(46);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_unstaged_dir_stale_loading",
+        std::process::id()
+    ));
+    let file_rel = std::path::PathBuf::from("chess3");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(workdir.join(&file_rel)).expect("create untracked directory path");
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = gitcomet_state::model::RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![],
+                    unstaged: vec![gitcomet_core::domain::FileStatus {
+                        path: file_rel.clone(),
+                        kind: gitcomet_core::domain::FileStatusKind::Untracked,
+                        conflict: None,
+                    }],
+                }
+                .into(),
+            );
+            repo.diff_state.diff_target = Some(gitcomet_core::domain::DiffTarget::WorkingTree {
+                path: file_rel.clone(),
+                area: gitcomet_core::domain::DiffArea::Unstaged,
+            });
+            repo.diff_state.diff = gitcomet_state::model::Loadable::Ready(Arc::new(
+                gitcomet_core::domain::Diff::from_unified(
+                    gitcomet_core::domain::DiffTarget::WorkingTree {
+                        path: file_rel.clone(),
+                        area: gitcomet_core::domain::DiffArea::Unstaged,
+                    },
+                    "",
+                ),
+            ));
+
+            let next_state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+
+            this.main_pane.update(cx, |pane, _cx| {
+                pane.worktree_preview_path = Some(workdir.join(&file_rel));
+                pane.worktree_preview = gitcomet_state::model::Loadable::Loading;
+            });
+        });
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let pane = view.read(app).main_pane.read(app);
+        assert!(
+            pane.untracked_directory_notice().is_some(),
+            "expected untracked directory selection to expose a directory-specific notice"
+        );
+        assert!(
+            !matches!(
+                pane.worktree_preview,
+                gitcomet_state::model::Loadable::Loading
+            ),
+            "untracked directory target should not stay stuck in File Loading"
+        );
+    });
+
+    std::fs::remove_dir_all(&workdir).expect("cleanup stale-loading untracked directory fixture");
+}
+
+#[gpui::test]
+fn directory_target_with_loading_status_clears_stale_file_loading_state(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(47);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_directory_loading_status",
+        std::process::id()
+    ));
+    let file_rel = std::path::PathBuf::from("chess3");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(workdir.join(&file_rel)).expect("create directory target path");
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = gitcomet_state::model::RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+
+            repo.status = gitcomet_state::model::Loadable::Loading;
+            repo.diff_state.diff_target = Some(gitcomet_core::domain::DiffTarget::WorkingTree {
+                path: file_rel.clone(),
+                area: gitcomet_core::domain::DiffArea::Unstaged,
+            });
+            repo.diff_state.diff = gitcomet_state::model::Loadable::Loading;
+
+            let next_state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+
+            this._ui_model.update(cx, |model, cx| {
+                model.set_state(Arc::clone(&next_state), cx);
+            });
+
+            this.main_pane.update(cx, |pane, _cx| {
+                pane.worktree_preview_path = Some(workdir.join(&file_rel));
+                pane.worktree_preview = gitcomet_state::model::Loadable::Loading;
+            });
+        });
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let pane = view.read(app).main_pane.read(app);
+        assert!(
+            pane.untracked_directory_notice().is_some(),
+            "expected directory target to expose a non-file notice even while status is loading"
+        );
+        assert!(
+            !matches!(
+                pane.worktree_preview,
+                gitcomet_state::model::Loadable::Loading
+            ),
+            "directory target should not stay stuck in File Loading when status is loading"
+        );
+    });
+
+    std::fs::remove_dir_all(&workdir).expect("cleanup directory-loading-status fixture");
 }
 
 #[gpui::test]

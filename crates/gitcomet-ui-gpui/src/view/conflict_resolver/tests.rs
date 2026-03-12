@@ -1885,6 +1885,43 @@ fn two_way_visible_indices_hide_only_resolved_conflict_rows() {
 
 // -- hide-resolved visible map tests --
 
+fn build_three_way_visible_map_legacy(
+    total_lines: usize,
+    conflict_ranges: &[std::ops::Range<usize>],
+    segments: &[ConflictSegment],
+    hide_resolved: bool,
+) -> Vec<ThreeWayVisibleItem> {
+    if !hide_resolved {
+        return (0..total_lines).map(ThreeWayVisibleItem::Line).collect();
+    }
+
+    let resolved_blocks: Vec<bool> = segments
+        .iter()
+        .filter_map(|s| match s {
+            ConflictSegment::Block(b) => Some(b.resolved),
+            _ => None,
+        })
+        .collect();
+
+    let mut visible = Vec::with_capacity(total_lines);
+    let mut line = 0usize;
+    while line < total_lines {
+        if let Some((range_ix, range)) = conflict_ranges
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.contains(&line))
+            .filter(|(ri, _)| resolved_blocks.get(*ri).copied().unwrap_or(false))
+        {
+            visible.push(ThreeWayVisibleItem::CollapsedBlock(range_ix));
+            line = range.end;
+            continue;
+        }
+        visible.push(ThreeWayVisibleItem::Line(line));
+        line += 1;
+    }
+    visible
+}
+
 #[test]
 fn visible_map_identity_when_not_hiding() {
     // 3 lines of text, 1 conflict with 2 lines = 5 total lines
@@ -1960,6 +1997,110 @@ fn visible_map_keeps_unresolved_blocks_expanded() {
     assert_eq!(map[1], ThreeWayVisibleItem::Line(1));
     assert_eq!(map[2], ThreeWayVisibleItem::Line(2));
     assert_eq!(map[3], ThreeWayVisibleItem::CollapsedBlock(1));
+}
+
+#[test]
+fn visible_map_matches_legacy_scan_with_empty_and_trailing_ranges() {
+    let segments = vec![
+        ConflictSegment::Block(ConflictBlock {
+            base: None,
+            ours: "a\n".into(),
+            theirs: "A\n".into(),
+            choice: ConflictChoice::Ours,
+            resolved: true,
+        }),
+        ConflictSegment::Block(ConflictBlock {
+            base: None,
+            ours: "b\nc\n".into(),
+            theirs: "B\nC\n".into(),
+            choice: ConflictChoice::Ours,
+            resolved: false,
+        }),
+        ConflictSegment::Block(ConflictBlock {
+            base: None,
+            ours: "d\ne\n".into(),
+            theirs: "D\nE\n".into(),
+            choice: ConflictChoice::Theirs,
+            resolved: true,
+        }),
+    ];
+    let ranges = vec![0..0, 1..3, 4..6, 7..9];
+    let linear = build_three_way_visible_map(9, &ranges, &segments, true);
+    let legacy = build_three_way_visible_map_legacy(9, &ranges, &segments, true);
+    assert_eq!(linear, legacy);
+    assert_eq!(
+        linear,
+        vec![
+            ThreeWayVisibleItem::Line(0),
+            ThreeWayVisibleItem::Line(1),
+            ThreeWayVisibleItem::Line(2),
+            ThreeWayVisibleItem::Line(3),
+            ThreeWayVisibleItem::CollapsedBlock(2),
+            ThreeWayVisibleItem::Line(6),
+            ThreeWayVisibleItem::Line(7),
+            ThreeWayVisibleItem::Line(8),
+        ]
+    );
+}
+
+#[test]
+fn visible_map_linear_walk_outpaces_legacy_scan() {
+    use std::time::Instant;
+
+    let conflict_count = 5_000usize;
+    let total_lines = conflict_count.saturating_mul(2).saturating_add(1);
+    let ranges: Vec<std::ops::Range<usize>> = (0..conflict_count)
+        .map(|ix| {
+            let start = ix.saturating_mul(2).saturating_add(1);
+            start..start.saturating_add(1)
+        })
+        .collect();
+    let segments: Vec<ConflictSegment> = (0..conflict_count)
+        .map(|ix| {
+            ConflictSegment::Block(ConflictBlock {
+                base: None,
+                ours: "ours\n".into(),
+                theirs: "theirs\n".into(),
+                choice: ConflictChoice::Ours,
+                resolved: ix % 3 != 0,
+            })
+        })
+        .collect();
+
+    let linear_map = build_three_way_visible_map(total_lines, &ranges, &segments, true);
+    let legacy_map = build_three_way_visible_map_legacy(total_lines, &ranges, &segments, true);
+    assert_eq!(linear_map, legacy_map);
+
+    let iterations = 6usize;
+
+    let linear_start = Instant::now();
+    for _ in 0..iterations {
+        std::hint::black_box(build_three_way_visible_map(
+            total_lines,
+            &ranges,
+            &segments,
+            true,
+        ));
+    }
+    let linear_elapsed = linear_start.elapsed();
+
+    let legacy_start = Instant::now();
+    for _ in 0..iterations {
+        std::hint::black_box(build_three_way_visible_map_legacy(
+            total_lines,
+            &ranges,
+            &segments,
+            true,
+        ));
+    }
+    let legacy_elapsed = legacy_start.elapsed();
+
+    let linear_ns = linear_elapsed.as_nanos().max(1);
+    let legacy_ns = legacy_elapsed.as_nanos().max(1);
+    assert!(
+        linear_ns.saturating_mul(4) < legacy_ns,
+        "expected linear walk to be >=4x faster than legacy scan, got linear={linear_elapsed:?}, legacy={legacy_elapsed:?}"
+    );
 }
 
 #[test]
@@ -2804,8 +2945,16 @@ fn two_way_conflict_index_for_visible_row_maps_back_to_conflict() {
 
 #[test]
 fn three_way_word_highlights_align_shifted_local_and_remote_rows() {
-    fn shared_lines(text: &str) -> Vec<gpui::SharedString> {
-        text.lines().map(|line| line.to_string().into()).collect()
+    fn line_starts(text: &str) -> Vec<usize> {
+        let mut starts =
+            Vec::with_capacity(text.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1);
+        starts.push(0);
+        for (ix, byte) in text.as_bytes().iter().enumerate() {
+            if *byte == b'\n' {
+                starts.push(ix + 1);
+            }
+        }
+        starts
     }
 
     let marker_segments = vec![ConflictSegment::Block(ConflictBlock {
@@ -2815,14 +2964,17 @@ fn three_way_word_highlights_align_shifted_local_and_remote_rows() {
         choice: ConflictChoice::Ours,
         resolved: false,
     })];
-    let base_lines = Vec::new();
-    let ours_lines = shared_lines("alpha\nbeta changed\ngamma\n");
-    let theirs_lines = shared_lines("alpha\ninserted\nbeta remote\ngamma\n");
+    let base_text = "";
+    let ours_text = "alpha\nbeta changed\ngamma\n";
+    let theirs_text = "alpha\ninserted\nbeta remote\ngamma\n";
 
     let (_base_hl, ours_hl, theirs_hl) = compute_three_way_word_highlights(
-        &base_lines,
-        &ours_lines,
-        &theirs_lines,
+        base_text,
+        &line_starts(base_text),
+        ours_text,
+        &line_starts(ours_text),
+        theirs_text,
+        &line_starts(theirs_text),
         &marker_segments,
     );
 
@@ -2855,8 +3007,16 @@ fn three_way_word_highlights_align_shifted_local_and_remote_rows() {
 
 #[test]
 fn three_way_word_highlights_keep_global_offsets_per_column() {
-    fn shared_lines(text: &str) -> Vec<gpui::SharedString> {
-        text.lines().map(|line| line.to_string().into()).collect()
+    fn line_starts(text: &str) -> Vec<usize> {
+        let mut starts =
+            Vec::with_capacity(text.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1);
+        starts.push(0);
+        for (ix, byte) in text.as_bytes().iter().enumerate() {
+            if *byte == b'\n' {
+                starts.push(ix + 1);
+            }
+        }
+        starts
     }
 
     let marker_segments = vec![
@@ -2870,14 +3030,17 @@ fn three_way_word_highlights_keep_global_offsets_per_column() {
         }),
         ConflictSegment::Text("tail\n".into()),
     ];
-    let base_lines = Vec::new();
-    let ours_lines = shared_lines("ctx\nsame\ntail\n");
-    let theirs_lines = shared_lines("ctx\nadded\nsame\ntail\n");
+    let base_text = "";
+    let ours_text = "ctx\nsame\ntail\n";
+    let theirs_text = "ctx\nadded\nsame\ntail\n";
 
     let (_base_hl, ours_hl, theirs_hl) = compute_three_way_word_highlights(
-        &base_lines,
-        &ours_lines,
-        &theirs_lines,
+        base_text,
+        &line_starts(base_text),
+        ours_text,
+        &line_starts(ours_text),
+        theirs_text,
+        &line_starts(theirs_text),
         &marker_segments,
     );
 

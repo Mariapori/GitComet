@@ -1,3 +1,4 @@
+use super::text_model::{TextModel, TextModelSnapshot};
 use crate::theme::AppTheme;
 use gpui::prelude::*;
 use gpui::{
@@ -7,9 +8,12 @@ use gpui::{
     ScrollHandle, ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window,
     WrappedLine, actions, anchored, deferred, div, fill, hsla, point, px, relative, size,
 };
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation as _;
 
 actions!(
@@ -50,10 +54,53 @@ actions!(
 );
 
 const MAX_UNDO_STEPS: usize = 100;
+const TEXT_INPUT_GUARD_ROWS: usize = 2;
+const TEXT_INPUT_MAX_LINE_SHAPE_BYTES: usize = 4 * 1024;
+const TEXT_INPUT_SHAPE_CACHE_LIMIT: usize = 8 * 1024;
+const TEXT_INPUT_TRUNCATION_SUFFIX: &str = "…";
+const TEXT_INPUT_WRAP_SYNC_LINE_THRESHOLD: usize = 256;
+const TEXT_INPUT_WRAP_FOREGROUND_BUDGET_MS: u64 = 4;
+const TEXT_INPUT_WRAP_BACKGROUND_YIELD_EVERY_ROWS: usize = 100;
+const TEXT_INPUT_WRAP_DIRTY_SYNC_LINE_LIMIT: usize = 128;
+const TEXT_INPUT_WRAP_TAB_STOP_COLUMNS: usize = 4;
+const TEXT_INPUT_WRAP_CHAR_ADVANCE_FACTOR: f32 = 0.6;
+const TEXT_INPUT_MAX_INTERPOLATED_WRAP_PATCHES: usize = 4_096;
+const TEXT_INPUT_STREAMED_HIGHLIGHT_LEGACY_LINE_THRESHOLD: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ShapedRowCacheKey {
+    line_ix: usize,
+    wrap_width_key: i32,
+    style_epoch: u64,
+    text_hash_slice: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PrepaintHighlightRunsCache {
+    highlight_epoch: u64,
+    visible_start: usize,
+    visible_end: usize,
+    line_runs: Arc<Vec<Vec<TextRun>>>,
+}
+
+#[derive(Clone, Copy)]
+struct TextShapeStyle<'a> {
+    base_font: &'a gpui::Font,
+    text_color: gpui::Hsla,
+    highlights: Option<&'a [(Range<usize>, gpui::HighlightStyle)]>,
+    font_size: Pixels,
+}
+
+#[derive(Clone, Copy)]
+struct LineShapeInput<'a> {
+    line_ix: usize,
+    line_start: usize,
+    line_text: &'a str,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct UndoSnapshot {
-    content: SharedString,
+    content: TextModelSnapshot,
     selected_range: Range<usize>,
     selection_reversed: bool,
 }
@@ -144,18 +191,35 @@ struct WrapCache {
     rows: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingWrapJob {
+    sequence: u64,
+    width_key: i32,
+    line_count: usize,
+    wrap_columns: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InterpolatedWrapPatch {
+    width_key: i32,
+    line_start: usize,
+    old_rows: Vec<usize>,
+    new_rows: Vec<usize>,
+}
+
 #[derive(Clone, Debug)]
 enum TextInputLayout {
     Plain(Vec<ShapedLine>),
     Wrapped {
         lines: Vec<WrappedLine>,
         y_offsets: Vec<Pixels>,
+        row_counts: Vec<usize>,
     },
 }
 
 pub struct TextInput {
     focus_handle: FocusHandle,
-    content: SharedString,
+    content: TextModel,
     placeholder: SharedString,
     multiline: bool,
     read_only: bool,
@@ -165,6 +229,7 @@ pub struct TextInput {
     line_ending: &'static str,
     style: TextInputStyle,
     highlights: Arc<Vec<(Range<usize>, gpui::HighlightStyle)>>,
+    highlight_epoch: u64,
     line_height_override: Option<Pixels>,
 
     selected_range: Range<usize>,
@@ -178,12 +243,24 @@ pub struct TextInput {
     last_line_height: Pixels,
     wrap_cache: Option<WrapCache>,
     last_wrap_rows: Option<usize>,
+    wrap_row_counts: Vec<usize>,
+    wrap_row_counts_width: Option<Pixels>,
+    wrap_recompute_sequence: u64,
+    wrap_recompute_requested: bool,
+    pending_wrap_job: Option<PendingWrapJob>,
+    pending_wrap_dirty_ranges: Vec<Range<usize>>,
+    interpolated_wrap_patches: Vec<InterpolatedWrapPatch>,
+    shape_style_epoch: u64,
+    prepaint_highlight_runs_cache: Option<PrepaintHighlightRunsCache>,
+    plain_line_cache: HashMap<ShapedRowCacheKey, ShapedLine>,
+    wrapped_line_cache: HashMap<ShapedRowCacheKey, WrappedLine>,
     is_selecting: bool,
     suppress_right_click: bool,
     context_menu: Option<TextInputContextMenuState>,
     vertical_motion_x: Option<Pixels>,
     vertical_scroll_handle: Option<ScrollHandle>,
     pending_cursor_autoscroll: bool,
+    pending_text_edit_delta: Option<(Range<usize>, Range<usize>)>,
 
     has_focus: bool,
     cursor_blink_visible: bool,
@@ -197,7 +274,7 @@ impl TextInput {
         let _ = window;
         Self {
             focus_handle,
-            content: "".into(),
+            content: TextModel::new(),
             placeholder: options.placeholder,
             multiline: options.multiline,
             read_only: options.read_only,
@@ -207,6 +284,7 @@ impl TextInput {
             line_ending: if cfg!(windows) { "\r\n" } else { "\n" },
             style: TextInputStyle::from_theme(AppTheme::zed_ayu_dark()),
             highlights: Arc::new(Vec::new()),
+            highlight_epoch: 1,
             line_height_override: None,
             selected_range: 0..0,
             selection_reversed: false,
@@ -218,12 +296,24 @@ impl TextInput {
             last_line_height: px(0.0),
             wrap_cache: None,
             last_wrap_rows: None,
+            wrap_row_counts: Vec::new(),
+            wrap_row_counts_width: None,
+            wrap_recompute_sequence: 1,
+            wrap_recompute_requested: false,
+            pending_wrap_job: None,
+            pending_wrap_dirty_ranges: Vec::new(),
+            interpolated_wrap_patches: Vec::new(),
+            shape_style_epoch: 1,
+            prepaint_highlight_runs_cache: None,
+            plain_line_cache: HashMap::default(),
+            wrapped_line_cache: HashMap::default(),
             is_selecting: false,
             suppress_right_click: false,
             context_menu: None,
             vertical_motion_x: None,
             vertical_scroll_handle: None,
             pending_cursor_autoscroll: false,
+            pending_text_edit_delta: None,
             has_focus: false,
             cursor_blink_visible: true,
             cursor_blink_task: None,
@@ -235,7 +325,7 @@ impl TextInput {
         let focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
         Self {
             focus_handle,
-            content: "".into(),
+            content: TextModel::new(),
             placeholder: options.placeholder,
             multiline: options.multiline,
             read_only: options.read_only,
@@ -245,6 +335,7 @@ impl TextInput {
             line_ending: if cfg!(windows) { "\r\n" } else { "\n" },
             style: TextInputStyle::from_theme(AppTheme::zed_ayu_dark()),
             highlights: Arc::new(Vec::new()),
+            highlight_epoch: 1,
             line_height_override: None,
             selected_range: 0..0,
             selection_reversed: false,
@@ -256,12 +347,24 @@ impl TextInput {
             last_line_height: px(0.0),
             wrap_cache: None,
             last_wrap_rows: None,
+            wrap_row_counts: Vec::new(),
+            wrap_row_counts_width: None,
+            wrap_recompute_sequence: 1,
+            wrap_recompute_requested: false,
+            pending_wrap_job: None,
+            pending_wrap_dirty_ranges: Vec::new(),
+            interpolated_wrap_patches: Vec::new(),
+            shape_style_epoch: 1,
+            prepaint_highlight_runs_cache: None,
+            plain_line_cache: HashMap::default(),
+            wrapped_line_cache: HashMap::default(),
             is_selecting: false,
             suppress_right_click: false,
             context_menu: None,
             vertical_motion_x: None,
             vertical_scroll_handle: None,
             pending_cursor_autoscroll: false,
+            pending_text_edit_delta: None,
             has_focus: false,
             cursor_blink_visible: true,
             cursor_blink_task: None,
@@ -277,29 +380,76 @@ impl TextInput {
         self.focus_handle.clone()
     }
 
+    fn clear_shaped_row_caches(&mut self) {
+        self.plain_line_cache.clear();
+        self.wrapped_line_cache.clear();
+        self.prepaint_highlight_runs_cache = None;
+    }
+
+    fn clear_wrap_recompute_state(&mut self) {
+        self.pending_wrap_job = None;
+        self.pending_wrap_dirty_ranges.clear();
+        self.interpolated_wrap_patches.clear();
+        self.wrap_recompute_requested = false;
+    }
+
+    fn invalidate_layout_caches_full(&mut self) {
+        self.wrap_cache = None;
+        self.last_layout = None;
+        self.last_line_starts = None;
+        self.wrap_row_counts.clear();
+        self.wrap_row_counts_width = None;
+        self.clear_wrap_recompute_state();
+        self.last_wrap_rows = None;
+        self.clear_shaped_row_caches();
+    }
+
+    fn invalidate_layout_caches_preserving_wrap_rows(&mut self) {
+        self.wrap_cache = None;
+        self.last_layout = None;
+        self.last_line_starts = None;
+        self.clear_shaped_row_caches();
+    }
+
+    fn invalidate_layout_caches(&mut self) {
+        self.invalidate_layout_caches_full();
+    }
+
+    fn request_wrap_recompute(&mut self) {
+        self.wrap_recompute_requested = true;
+    }
+
+    fn bump_shape_style_epoch(&mut self) {
+        self.shape_style_epoch = self.shape_style_epoch.wrapping_add(1).max(1);
+        self.invalidate_layout_caches();
+    }
+
     pub fn set_theme(&mut self, theme: AppTheme, cx: &mut Context<Self>) {
         let style = TextInputStyle::from_theme(theme);
         if self.style == style {
             return;
         }
         self.style = style;
+        self.bump_shape_style_epoch();
         cx.notify();
     }
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         let text = text.into();
-        if self.content == text {
+        if self.content.as_ref() == text.as_ref() {
             return;
         }
-        self.content = text;
+        self.content.set_text(text.as_ref());
         self.selected_range = self.content.len()..self.content.len();
         self.selection_reversed = false;
         self.undo_stack.clear();
         self.cursor_blink_visible = true;
         self.scroll_x = px(0.0);
-        self.wrap_cache = None;
-        self.last_layout = None;
-        self.last_line_starts = None;
+        self.invalidate_layout_caches();
+        if self.multiline && self.soft_wrap {
+            self.request_wrap_recompute();
+        }
+        self.pending_text_edit_delta = None;
         cx.notify();
     }
 
@@ -310,6 +460,8 @@ impl TextInput {
     ) {
         highlights.sort_by(|(a, _), (b, _)| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
         self.highlights = Arc::new(highlights);
+        self.highlight_epoch = self.highlight_epoch.wrapping_add(1).max(1);
+        self.bump_shape_style_epoch();
         cx.notify();
     }
 
@@ -346,6 +498,402 @@ impl TextInput {
         self.pending_cursor_autoscroll = true;
     }
 
+    fn trim_shape_caches(&mut self) {
+        if self.plain_line_cache.len() > TEXT_INPUT_SHAPE_CACHE_LIMIT {
+            self.plain_line_cache.clear();
+        }
+        if self.wrapped_line_cache.len() > TEXT_INPUT_SHAPE_CACHE_LIMIT {
+            self.wrapped_line_cache.clear();
+        }
+    }
+
+    fn streamed_highlight_runs_for_visible_window(
+        &mut self,
+        display_text: &str,
+        line_starts: &[usize],
+        visible_line_range: Range<usize>,
+        shape_style: &TextShapeStyle<'_>,
+    ) -> Option<Arc<Vec<Vec<TextRun>>>> {
+        let Some(highlights) = shape_style.highlights else {
+            self.prepaint_highlight_runs_cache = None;
+            return None;
+        };
+        let line_count = line_starts.len().max(1);
+        if highlights.is_empty()
+            || line_count <= TEXT_INPUT_STREAMED_HIGHLIGHT_LEGACY_LINE_THRESHOLD
+            || visible_line_range.is_empty()
+        {
+            self.prepaint_highlight_runs_cache = None;
+            return None;
+        }
+
+        if let Some(cache) = self.prepaint_highlight_runs_cache.as_ref()
+            && cache.highlight_epoch == self.highlight_epoch
+            && cache.visible_start == visible_line_range.start
+            && cache.visible_end == visible_line_range.end
+        {
+            return Some(Arc::clone(&cache.line_runs));
+        }
+
+        let line_runs = Arc::new(build_streamed_highlight_runs_for_visible_window(
+            shape_style.base_font,
+            shape_style.text_color,
+            display_text,
+            line_starts,
+            visible_line_range.clone(),
+            highlights,
+        ));
+        self.prepaint_highlight_runs_cache = Some(PrepaintHighlightRunsCache {
+            highlight_epoch: self.highlight_epoch,
+            visible_start: visible_line_range.start,
+            visible_end: visible_line_range.end,
+            line_runs: Arc::clone(&line_runs),
+        });
+        Some(line_runs)
+    }
+
+    fn shape_plain_line_cached(
+        &mut self,
+        line: LineShapeInput<'_>,
+        precomputed_runs: Option<&[TextRun]>,
+        shape_style: &TextShapeStyle<'_>,
+        window: &mut Window,
+    ) -> ShapedLine {
+        let (capped_text, text_hash_slice) =
+            truncate_line_for_shaping(line.line_text, TEXT_INPUT_MAX_LINE_SHAPE_BYTES);
+        let key = ShapedRowCacheKey {
+            line_ix: line.line_ix,
+            wrap_width_key: i32::MIN,
+            style_epoch: self.shape_style_epoch,
+            text_hash_slice,
+        };
+        if let Some(cached) = self.plain_line_cache.get(&key) {
+            return cached.clone();
+        }
+
+        let owned_runs;
+        let runs = if let Some(precomputed_runs) = precomputed_runs {
+            precomputed_runs
+        } else {
+            owned_runs = runs_for_line(
+                shape_style.base_font,
+                shape_style.text_color,
+                line.line_start,
+                capped_text.as_ref(),
+                shape_style.highlights,
+            );
+            owned_runs.as_slice()
+        };
+        let shaped =
+            window
+                .text_system()
+                .shape_line(capped_text, shape_style.font_size, runs, None);
+        self.plain_line_cache.insert(key, shaped.clone());
+        self.trim_shape_caches();
+        shaped
+    }
+
+    fn shape_wrapped_line_cached(
+        &mut self,
+        line: LineShapeInput<'_>,
+        wrap_width: Pixels,
+        precomputed_runs: Option<&[TextRun]>,
+        shape_style: &TextShapeStyle<'_>,
+        window: &mut Window,
+    ) -> WrappedLine {
+        let (capped_text, text_hash_slice) =
+            truncate_line_for_shaping(line.line_text, TEXT_INPUT_MAX_LINE_SHAPE_BYTES);
+        let key = ShapedRowCacheKey {
+            line_ix: line.line_ix,
+            wrap_width_key: wrap_width_cache_key(wrap_width),
+            style_epoch: self.shape_style_epoch,
+            text_hash_slice,
+        };
+        if let Some(cached) = self.wrapped_line_cache.get(&key) {
+            return cached.clone();
+        }
+
+        let owned_runs;
+        let runs = if let Some(precomputed_runs) = precomputed_runs {
+            precomputed_runs
+        } else {
+            owned_runs = runs_for_line(
+                shape_style.base_font,
+                shape_style.text_color,
+                line.line_start,
+                capped_text.as_ref(),
+                shape_style.highlights,
+            );
+            owned_runs.as_slice()
+        };
+        let shaped = window
+            .text_system()
+            .shape_text(
+                capped_text,
+                shape_style.font_size,
+                runs,
+                Some(wrap_width),
+                None,
+            )
+            .unwrap_or_default();
+        let wrapped = shaped.into_iter().next().unwrap_or_default();
+        self.wrapped_line_cache.insert(key, wrapped.clone());
+        self.trim_shape_caches();
+        wrapped
+    }
+
+    fn mark_wrap_dirty_from_edit(&mut self, old_range: Range<usize>, new_range: Range<usize>) {
+        if !(self.multiline && self.soft_wrap) {
+            return;
+        }
+
+        let text = self.content.as_ref();
+        let line_starts = self.content.line_starts();
+        let line_count = line_starts.len().max(1);
+        if self.wrap_row_counts.len() != line_count {
+            self.wrap_row_counts.resize(line_count, 1);
+            self.wrap_recompute_requested = true;
+            self.pending_wrap_job = None;
+            self.interpolated_wrap_patches.clear();
+            return;
+        }
+
+        let dirty_range =
+            expanded_dirty_wrap_line_range_for_edit(text, line_starts, &old_range, &new_range);
+        if dirty_range.start < dirty_range.end {
+            self.pending_wrap_dirty_ranges.push(dirty_range);
+        }
+    }
+
+    fn take_normalized_wrap_dirty_ranges(&mut self, line_count: usize) -> Vec<Range<usize>> {
+        let mut ranges = std::mem::take(&mut self.pending_wrap_dirty_ranges);
+        ranges.retain_mut(|range| {
+            range.start = range.start.min(line_count);
+            range.end = range.end.min(line_count);
+            range.start < range.end
+        });
+        if ranges.is_empty() {
+            return ranges;
+        }
+
+        ranges.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
+        let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            if let Some(last) = merged.last_mut()
+                && range.start <= last.end
+            {
+                last.end = last.end.max(range.end);
+                continue;
+            }
+            merged.push(range);
+        }
+        merged
+    }
+
+    fn push_interpolated_wrap_patch(
+        &mut self,
+        width_key: i32,
+        line_ix: usize,
+        old_rows: usize,
+        new_rows: usize,
+    ) {
+        if old_rows == new_rows {
+            return;
+        }
+
+        if let Some(last) = self.interpolated_wrap_patches.last_mut()
+            && last.width_key == width_key
+            && last.line_start + last.old_rows.len() == line_ix
+        {
+            last.old_rows.push(old_rows);
+            last.new_rows.push(new_rows);
+            return;
+        }
+
+        if reset_interpolated_wrap_patches_on_overflow(
+            &mut self.interpolated_wrap_patches,
+            &mut self.wrap_recompute_requested,
+        ) {
+            return;
+        }
+        self.interpolated_wrap_patches.push(InterpolatedWrapPatch {
+            width_key,
+            line_start: line_ix,
+            old_rows: vec![old_rows],
+            new_rows: vec![new_rows],
+        });
+    }
+
+    fn apply_pending_dirty_wrap_updates(
+        &mut self,
+        display_text: &str,
+        line_starts: &[usize],
+        wrap_width: Pixels,
+        shape_style: &TextShapeStyle<'_>,
+        allow_interpolated_patches: bool,
+        window: &mut Window,
+    ) -> bool {
+        if self.pending_wrap_dirty_ranges.is_empty() {
+            return false;
+        }
+
+        let line_count = line_starts.len().max(1);
+        if line_count == 0 {
+            self.pending_wrap_dirty_ranges.clear();
+            return false;
+        }
+
+        let mut ranges = self.take_normalized_wrap_dirty_ranges(line_count);
+        let dirty_line_count = ranges
+            .iter()
+            .map(|range| range.end.saturating_sub(range.start))
+            .sum::<usize>();
+        if dirty_line_count > TEXT_INPUT_WRAP_DIRTY_SYNC_LINE_LIMIT {
+            self.request_wrap_recompute();
+            return false;
+        }
+
+        let width_key = wrap_width_cache_key(wrap_width);
+        let job_accepts_interpolation = pending_wrap_job_accepts_interpolated_patch(
+            self.pending_wrap_job.as_ref(),
+            width_key,
+            line_count,
+            allow_interpolated_patches,
+        );
+        let mut changed = false;
+        for range in ranges.drain(..) {
+            for line_ix in range {
+                let line_start = line_starts.get(line_ix).copied().unwrap_or(0);
+                let wrapped = self.shape_wrapped_line_cached(
+                    LineShapeInput {
+                        line_ix,
+                        line_start,
+                        line_text: line_text_for_index(display_text, line_starts, line_ix),
+                    },
+                    wrap_width,
+                    None,
+                    shape_style,
+                    window,
+                );
+                let new_rows = wrapped.wrap_boundaries().len().saturating_add(1).max(1);
+                let old_rows = self
+                    .wrap_row_counts
+                    .get(line_ix)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
+                if old_rows != new_rows {
+                    if let Some(slot) = self.wrap_row_counts.get_mut(line_ix) {
+                        *slot = new_rows;
+                    }
+                    changed = true;
+                    if job_accepts_interpolation {
+                        self.push_interpolated_wrap_patch(width_key, line_ix, old_rows, new_rows);
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    fn maybe_recompute_wrap_rows(
+        &mut self,
+        display_text: &str,
+        rounded_wrap_width: Pixels,
+        font_size: Pixels,
+        line_count: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let width_key = wrap_width_cache_key(rounded_wrap_width);
+        let wrap_columns = wrap_columns_for_width(rounded_wrap_width, font_size);
+        if line_count <= TEXT_INPUT_WRAP_SYNC_LINE_THRESHOLD {
+            self.pending_wrap_job = None;
+            self.interpolated_wrap_patches.clear();
+            self.wrap_row_counts = estimate_wrap_rows_for_text(display_text, wrap_columns);
+            self.wrap_row_counts.resize(line_count, 1);
+            self.wrap_recompute_requested = false;
+            return false;
+        }
+
+        let has_compatible_job = self
+            .pending_wrap_job
+            .map(|job| job.width_key == width_key && job.line_count == line_count)
+            .unwrap_or(false);
+        if has_compatible_job && !self.wrap_recompute_requested {
+            return false;
+        }
+        if !self.wrap_recompute_requested {
+            return false;
+        }
+
+        let mut budget_rows = self.wrap_row_counts.clone();
+        budget_rows.resize(line_count, 1);
+        estimate_wrap_rows_budgeted(
+            display_text,
+            wrap_columns,
+            &mut budget_rows,
+            Duration::from_millis(TEXT_INPUT_WRAP_FOREGROUND_BUDGET_MS),
+        );
+        self.wrap_row_counts = budget_rows;
+        self.wrap_row_counts_width = Some(rounded_wrap_width);
+        self.wrap_recompute_requested = false;
+
+        let sequence = self.wrap_recompute_sequence.wrapping_add(1).max(1);
+        self.wrap_recompute_sequence = sequence;
+        self.pending_wrap_job = Some(PendingWrapJob {
+            sequence,
+            width_key,
+            line_count,
+            wrap_columns,
+        });
+        self.interpolated_wrap_patches.clear();
+
+        let snapshot = display_text.to_string();
+        cx.spawn(
+            async move |input: gpui::WeakEntity<TextInput>, cx: &mut gpui::AsyncApp| {
+                let rows =
+                    smol::unblock(move || estimate_wrap_rows_for_text(&snapshot, wrap_columns))
+                        .await;
+                let _ = input.update(cx, |input, cx| {
+                    input.complete_wrap_recompute_job(sequence, width_key, line_count, rows, cx);
+                });
+            },
+        )
+        .detach();
+        true
+    }
+
+    fn complete_wrap_recompute_job(
+        &mut self,
+        sequence: u64,
+        width_key: i32,
+        line_count: usize,
+        mut rows: Vec<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(job) = self.pending_wrap_job else {
+            return;
+        };
+        if job.sequence != sequence || job.width_key != width_key || job.line_count != line_count {
+            return;
+        }
+
+        rows.resize(line_count, 1);
+        for rows_per_line in &mut rows {
+            *rows_per_line = (*rows_per_line).max(1);
+        }
+        for patch in &self.interpolated_wrap_patches {
+            if patch.width_key == width_key {
+                apply_interpolated_wrap_patch_delta(rows.as_mut_slice(), patch);
+            }
+        }
+        self.interpolated_wrap_patches.clear();
+        self.wrap_row_counts = rows;
+        self.pending_wrap_job = None;
+        self.last_wrap_rows = Some(total_wrap_rows(self.wrap_row_counts.as_slice()));
+        cx.notify();
+    }
+
     pub fn selected_text(&self) -> Option<String> {
         if self.selected_range.is_empty() {
             None
@@ -368,7 +916,10 @@ impl TextInput {
             return;
         }
         self.soft_wrap = soft_wrap;
-        self.wrap_cache = None;
+        self.invalidate_layout_caches();
+        if soft_wrap {
+            self.request_wrap_recompute();
+        }
         if !soft_wrap {
             self.last_wrap_rows = None;
         }
@@ -380,6 +931,10 @@ impl TextInput {
             return;
         }
         self.masked = masked;
+        self.invalidate_layout_caches();
+        if self.multiline && self.soft_wrap {
+            self.request_wrap_recompute();
+        }
         cx.notify();
     }
 
@@ -563,6 +1118,13 @@ impl TextInput {
         let line_ix = (ix - 1).min(lines.len().saturating_sub(1));
         let line_start = starts.get(line_ix).copied().unwrap_or(0);
         let line = lines.get(line_ix).unwrap_or(line);
+        let next_start = starts
+            .get(line_ix.saturating_add(1))
+            .copied()
+            .unwrap_or(self.content.len());
+        if line.len() == 0 && next_start > line_start {
+            return self.logical_row_boundaries(offset);
+        }
         let local = offset.saturating_sub(line_start).min(line.len());
 
         let mut row_end_indices: Vec<usize> = Vec::with_capacity(line.wrap_boundaries().len() + 1);
@@ -633,7 +1195,9 @@ impl TextInput {
                 let y = line_height * line_ix as f32 + line_height / 2.0;
                 Some(point(bounds.left() + x, bounds.top() + y))
             }
-            TextInputLayout::Wrapped { lines, y_offsets } => {
+            TextInputLayout::Wrapped {
+                lines, y_offsets, ..
+            } => {
                 let mut ix = starts.partition_point(|&s| s <= cursor);
                 if ix == 0 {
                     ix = 1;
@@ -705,7 +1269,9 @@ impl TextInput {
                 let bottom = top + line_height;
                 Some((top, bottom))
             }
-            TextInputLayout::Wrapped { lines, y_offsets } => {
+            TextInputLayout::Wrapped {
+                lines, y_offsets, ..
+            } => {
                 let mut ix = starts.partition_point(|&s| s <= cursor);
                 if ix == 0 {
                     ix = 1;
@@ -956,6 +1522,79 @@ impl TextInput {
         }
     }
 
+    pub fn set_cursor_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.move_to(offset, cx);
+        self.queue_cursor_autoscroll();
+    }
+
+    fn normalized_utf8_range(&self, range: Range<usize>) -> Range<usize> {
+        let start = self.clamp_to_char_boundary(range.start.min(self.content.len()));
+        let end = self.clamp_to_char_boundary(range.end.min(self.content.len()));
+        if end < start { end..start } else { start..end }
+    }
+
+    fn replace_utf8_range_internal(
+        &mut self,
+        range: Range<usize>,
+        new_text: &str,
+        cx: &mut Context<Self>,
+    ) -> Range<usize> {
+        let undo_snapshot = self.current_undo_snapshot();
+        let range = self.normalized_utf8_range(range);
+        let inserted = self.content.replace_range(range.clone(), new_text);
+        self.push_undo_snapshot(undo_snapshot);
+        self.pending_text_edit_delta = Some((range.clone(), inserted.clone()));
+        self.mark_wrap_dirty_from_edit(range.clone(), inserted.clone());
+        self.selected_range = inserted.end..inserted.end;
+        self.selection_reversed = false;
+        self.marked_range.take();
+        self.vertical_motion_x = None;
+        self.cursor_blink_visible = true;
+        self.invalidate_layout_caches_preserving_wrap_rows();
+        self.queue_cursor_autoscroll();
+        cx.notify();
+        inserted
+    }
+
+    /// Replace a UTF-8 byte range in content.
+    ///
+    /// Returns the inserted byte range after replacement.
+    pub fn replace_utf8_range(
+        &mut self,
+        range: Range<usize>,
+        new_text: &str,
+        cx: &mut Context<Self>,
+    ) -> Range<usize> {
+        if self.read_only {
+            let cursor = self.cursor_offset();
+            return cursor..cursor;
+        }
+        let Some(new_text) = self.sanitize_insert_text(new_text) else {
+            let cursor = self.cursor_offset();
+            return cursor..cursor;
+        };
+        self.replace_utf8_range_internal(range, &new_text, cx)
+    }
+
+    /// Replace the current selection range with `new_text`.
+    ///
+    /// Returns the inserted byte range after replacement.
+    pub fn replace_selection_utf8(
+        &mut self,
+        new_text: &str,
+        cx: &mut Context<Self>,
+    ) -> Range<usize> {
+        self.replace_utf8_range(self.selected_range.clone(), new_text, cx)
+    }
+
+    /// Consume the latest UTF-8 edit delta as `(old_range, new_range)`.
+    ///
+    /// `old_range` references bytes in the pre-edit text; `new_range` references
+    /// bytes in the post-edit text.
+    pub fn take_recent_utf8_edit_delta(&mut self) -> Option<(Range<usize>, Range<usize>)> {
+        self.pending_text_edit_delta.take()
+    }
+
     pub fn offset_for_position(&self, position: Point<Pixels>) -> usize {
         self.index_for_position(position)
     }
@@ -1014,7 +1653,7 @@ impl TextInput {
 
     fn current_undo_snapshot(&self) -> UndoSnapshot {
         UndoSnapshot {
-            content: self.content.clone(),
+            content: self.content.snapshot(),
             selected_range: self.selected_range.clone(),
             selection_reversed: self.selection_reversed,
         }
@@ -1031,16 +1670,18 @@ impl TextInput {
     }
 
     fn restore_undo_snapshot(&mut self, snapshot: UndoSnapshot, cx: &mut Context<Self>) {
-        self.content = snapshot.content;
+        self.content = snapshot.content.into();
         self.selected_range = snapshot.selected_range;
         self.selection_reversed = snapshot.selection_reversed;
         self.marked_range = None;
         self.vertical_motion_x = None;
         self.cursor_blink_visible = true;
         self.is_selecting = false;
-        self.wrap_cache = None;
-        self.last_layout = None;
-        self.last_line_starts = None;
+        self.invalidate_layout_caches();
+        if self.multiline && self.soft_wrap {
+            self.request_wrap_recompute();
+        }
+        self.pending_text_edit_delta = None;
         self.queue_cursor_autoscroll();
         cx.notify();
     }
@@ -1466,21 +2107,13 @@ impl TextInput {
                 let doc_ix = starts.get(line_ix).copied().unwrap_or(0) + local_ix;
                 doc_ix.min(self.content.len())
             }
-            TextInputLayout::Wrapped { lines, y_offsets } => {
+            TextInputLayout::Wrapped {
+                lines,
+                y_offsets,
+                row_counts,
+            } => {
                 let local_y = position.y - bounds.top();
-                let mut line_ix = 0usize;
-                for (ix, line) in lines.iter().enumerate() {
-                    let y0 = y_offsets.get(ix).copied().unwrap_or(Pixels::ZERO);
-                    let rows = line.wrap_boundaries().len().saturating_add(1);
-                    let y1 = y0 + line_height * rows as f32;
-                    if local_y >= y0 && local_y < y1 {
-                        line_ix = ix;
-                        break;
-                    }
-                    if local_y >= y1 {
-                        line_ix = ix;
-                    }
-                }
+                let line_ix = wrapped_line_index_for_y(y_offsets, row_counts, line_height, local_y);
                 let line_ix = line_ix.min(lines.len().saturating_sub(1));
                 let local_x = position.x - bounds.left();
                 let local_y_in_line =
@@ -1525,21 +2158,13 @@ impl TextInput {
                 let doc_ix = starts.get(line_ix).copied().unwrap_or(0) + local_ix;
                 doc_ix.min(self.content.len())
             }
-            TextInputLayout::Wrapped { lines, y_offsets } => {
+            TextInputLayout::Wrapped {
+                lines,
+                y_offsets,
+                row_counts,
+            } => {
                 let local_y = position.y - bounds.top();
-                let mut line_ix = 0usize;
-                for (ix, line) in lines.iter().enumerate() {
-                    let y0 = y_offsets.get(ix).copied().unwrap_or(Pixels::ZERO);
-                    let rows = line.wrap_boundaries().len().saturating_add(1);
-                    let y1 = y0 + line_height * rows as f32;
-                    if local_y >= y0 && local_y < y1 {
-                        line_ix = ix;
-                        break;
-                    }
-                    if local_y >= y1 {
-                        line_ix = ix;
-                    }
-                }
+                let line_ix = wrapped_line_index_for_y(y_offsets, row_counts, line_height, local_y);
                 let line_ix = line_ix.min(lines.len().saturating_sub(1));
                 let local_x = position.x - bounds.left();
                 let local_y_in_line =
@@ -1652,18 +2277,16 @@ impl EntityInputHandler for TextInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
-        self.content =
-            (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
-                .into();
+        let inserted = self.content.replace_range(range.clone(), new_text.as_str());
+        self.pending_text_edit_delta = Some((range.clone(), inserted.clone()));
+        self.mark_wrap_dirty_from_edit(range.clone(), inserted.clone());
         self.push_undo_snapshot(undo_snapshot);
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        self.selected_range = inserted.end..inserted.end;
         self.selection_reversed = false;
         self.marked_range.take();
         self.vertical_motion_x = None;
         self.cursor_blink_visible = true;
-        self.wrap_cache = None;
-        self.last_layout = None;
-        self.last_line_starts = None;
+        self.invalidate_layout_caches_preserving_wrap_rows();
         self.queue_cursor_autoscroll();
         cx.notify();
     }
@@ -1690,12 +2313,12 @@ impl EntityInputHandler for TextInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
-        self.content =
-            (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
-                .into();
+        let inserted = self.content.replace_range(range.clone(), new_text.as_str());
+        self.pending_text_edit_delta = Some((range.clone(), inserted.clone()));
+        self.mark_wrap_dirty_from_edit(range.clone(), inserted.clone());
         self.push_undo_snapshot(undo_snapshot);
         if !new_text.is_empty() {
-            self.marked_range = Some(range.start..range.start + new_text.len());
+            self.marked_range = Some(inserted.clone());
         } else {
             self.marked_range = None;
         }
@@ -1708,9 +2331,7 @@ impl EntityInputHandler for TextInput {
 
         self.vertical_motion_x = None;
         self.cursor_blink_visible = true;
-        self.wrap_cache = None;
-        self.last_layout = None;
-        self.last_line_starts = None;
+        self.invalidate_layout_caches_preserving_wrap_rows();
         self.queue_cursor_autoscroll();
         cx.notify();
     }
@@ -1733,7 +2354,9 @@ impl EntityInputHandler for TextInput {
                 let (line_ix, local_ix) = line_for_offset(starts, lines, offset);
                 (line_ix, local_ix, line_height * line_ix as f32)
             }
-            TextInputLayout::Wrapped { lines, y_offsets } => {
+            TextInputLayout::Wrapped {
+                lines, y_offsets, ..
+            } => {
                 let mut ix = starts.partition_point(|&s| s <= offset);
                 if ix == 0 {
                     ix = 1;
@@ -1791,20 +2414,12 @@ impl EntityInputHandler for TextInput {
                 let doc_offset = starts.get(line_ix).copied().unwrap_or(0) + idx;
                 Some(self.offset_to_utf16(doc_offset))
             }
-            TextInputLayout::Wrapped { lines, y_offsets } => {
-                let mut line_ix = 0usize;
-                for (ix, line) in lines.iter().enumerate() {
-                    let y0 = y_offsets.get(ix).copied().unwrap_or(Pixels::ZERO);
-                    let rows = line.wrap_boundaries().len().saturating_add(1);
-                    let y1 = y0 + line_height * rows as f32;
-                    if local.y >= y0 && local.y < y1 {
-                        line_ix = ix;
-                        break;
-                    }
-                    if local.y >= y1 {
-                        line_ix = ix;
-                    }
-                }
+            TextInputLayout::Wrapped {
+                lines,
+                y_offsets,
+                row_counts,
+            } => {
+                let line_ix = wrapped_line_index_for_y(y_offsets, row_counts, line_height, local.y);
                 let line_ix = line_ix.min(lines.len().saturating_sub(1));
                 let line = lines.get(line_ix)?;
                 let local_y = local.y - y_offsets.get(line_ix).copied().unwrap_or(Pixels::ZERO);
@@ -1835,6 +2450,7 @@ struct PrepaintState {
     line_starts: Option<Vec<usize>>,
     wrap_cache: Option<WrapCache>,
     scroll_x: Pixels,
+    visible_line_range: Range<usize>,
 }
 
 impl IntoElement for TextElement {
@@ -1869,7 +2485,7 @@ impl Element for TextElement {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         if input.multiline {
-            let line_count = input.content.as_ref().split('\n').count().max(1) as f32;
+            let line_count = input.content.line_starts().len().max(1) as f32;
             if input.soft_wrap
                 && let Some(cache) = input.wrap_cache
                 && cache.rows > 0
@@ -1900,93 +2516,444 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let input = self.input.read(cx);
-        let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
-        let style_colors = input.style;
-        let soft_wrap = input.soft_wrap && input.multiline;
-        let style = window.text_style();
-        let has_content = !content.is_empty();
+        self.input.update(cx, |input, cx| {
+            let content = input.content.snapshot();
+            let selected_range = input.selected_range.clone();
+            let cursor = input.cursor_offset();
+            let style_colors = input.style;
+            let soft_wrap = input.soft_wrap && input.multiline;
+            let style = window.text_style();
+            let has_content = !content.is_empty();
 
-        let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), style_colors.placeholder)
-        } else if input.masked {
-            (
-                mask_text_for_display(content.as_ref()).into(),
-                style_colors.text,
-            )
-        } else {
-            (content, style_colors.text)
-        };
-
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line_height = input.effective_line_height(window);
-        let base_font = style.font();
-        let highlights = if !has_content {
-            None
-        } else {
-            Some(Arc::clone(&input.highlights))
-        };
-
-        let (line_starts, lines_text): (Vec<usize>, Vec<SharedString>) =
-            split_lines_with_starts(&display_text);
-
-        if !soft_wrap {
-            let mut scroll_x = if input.multiline {
-                px(0.0)
+            let (display_text, text_color) = if content.is_empty() {
+                (input.placeholder.clone(), style_colors.placeholder)
+            } else if input.masked {
+                (
+                    mask_text_for_display(content.as_ref()).into(),
+                    style_colors.text,
+                )
             } else {
-                input.scroll_x
+                (content.as_shared_string(), style_colors.text)
             };
-            let mut lines = Vec::with_capacity(lines_text.len());
-            for (line_ix, line_text) in lines_text.iter().enumerate() {
-                let runs = runs_for_line(
-                    &base_font,
-                    text_color,
-                    line_starts[line_ix],
-                    line_text.as_ref(),
-                    highlights.as_ref().map(|h| h.as_slice()),
-                );
-                let shaped =
-                    window
-                        .text_system()
-                        .shape_line(line_text.clone(), font_size, &runs, None);
-                lines.push(shaped);
-            }
 
-            if !input.multiline && !lines.is_empty() {
-                let viewport_w = bounds.size.width.max(px(0.0));
-                let pad = px(8.0).min(viewport_w / 4.0);
-                let (line_ix, local_ix) = line_for_offset(&line_starts, &lines, cursor);
-                let cursor_x = lines[line_ix].x_for_index(local_ix);
-                let max_scroll_x = (lines[line_ix].width - viewport_w).max(px(0.0));
-
-                let left = scroll_x;
-                let right = scroll_x + viewport_w;
-                if cursor_x < left + pad {
-                    scroll_x = (cursor_x - pad).max(px(0.0));
-                } else if cursor_x > right - pad {
-                    scroll_x = (cursor_x + pad - viewport_w).max(px(0.0));
-                }
-                scroll_x = scroll_x.min(max_scroll_x);
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let line_height = input.effective_line_height(window);
+            let base_font = style.font();
+            let highlights = if !has_content {
+                None
             } else {
-                scroll_x = px(0.0);
+                Some(Arc::clone(&input.highlights))
+            };
+            let highlight_slice = highlights.as_ref().map(|h| h.as_slice());
+
+            let display_text_str = display_text.as_ref();
+            let line_starts = compute_line_starts(display_text_str);
+            let line_count = line_starts.len().max(1);
+            let shape_style = TextShapeStyle {
+                base_font: &base_font,
+                text_color,
+                highlights: highlight_slice,
+                font_size,
+            };
+            let (visible_top, visible_bottom) =
+                visible_vertical_window(bounds, input.vertical_scroll_handle.as_ref());
+
+            if !soft_wrap {
+                let mut scroll_x = if input.multiline {
+                    px(0.0)
+                } else {
+                    input.scroll_x
+                };
+                let mut lines = vec![ShapedLine::default(); line_count];
+                let mut visible_line_range = if input.multiline {
+                    visible_plain_line_range(
+                        line_count,
+                        line_height,
+                        visible_top,
+                        visible_bottom,
+                        TEXT_INPUT_GUARD_ROWS,
+                    )
+                } else {
+                    0..line_count
+                };
+                if visible_line_range.is_empty() {
+                    visible_line_range = 0..line_count.min(1);
+                }
+                let streamed_line_runs = input.streamed_highlight_runs_for_visible_window(
+                    display_text_str,
+                    line_starts.as_slice(),
+                    visible_line_range.clone(),
+                    &shape_style,
+                );
+
+                for line_ix in visible_line_range.clone() {
+                    let precomputed_runs = visible_window_runs_for_line_ix(
+                        streamed_line_runs.as_ref().map(|runs| runs.as_slice()),
+                        visible_line_range.start,
+                        line_ix,
+                    );
+                    let shaped = input.shape_plain_line_cached(
+                        LineShapeInput {
+                            line_ix,
+                            line_start: line_starts.get(line_ix).copied().unwrap_or(0),
+                            line_text: line_text_for_index(
+                                display_text_str,
+                                line_starts.as_slice(),
+                                line_ix,
+                            ),
+                        },
+                        precomputed_runs,
+                        &shape_style,
+                        window,
+                    );
+                    if let Some(slot) = lines.get_mut(line_ix) {
+                        *slot = shaped;
+                    }
+                }
+
+                let cursor_line_ix = line_index_for_offset(&line_starts, cursor, line_count);
+                if cursor_line_ix < line_count
+                    && (cursor_line_ix < visible_line_range.start
+                        || cursor_line_ix >= visible_line_range.end)
+                {
+                    let shaped = input.shape_plain_line_cached(
+                        LineShapeInput {
+                            line_ix: cursor_line_ix,
+                            line_start: line_starts.get(cursor_line_ix).copied().unwrap_or(0),
+                            line_text: line_text_for_index(
+                                display_text_str,
+                                line_starts.as_slice(),
+                                cursor_line_ix,
+                            ),
+                        },
+                        None,
+                        &shape_style,
+                        window,
+                    );
+                    if let Some(slot) = lines.get_mut(cursor_line_ix) {
+                        *slot = shaped;
+                    }
+                }
+
+                if !input.multiline && !lines.is_empty() {
+                    let viewport_w = bounds.size.width.max(px(0.0));
+                    let pad = px(8.0).min(viewport_w / 4.0);
+                    let (line_ix, local_ix) = line_for_offset(&line_starts, &lines, cursor);
+                    let cursor_x = lines[line_ix].x_for_index(local_ix);
+                    let max_scroll_x = (lines[line_ix].width - viewport_w).max(px(0.0));
+
+                    let left = scroll_x;
+                    let right = scroll_x + viewport_w;
+                    if cursor_x < left + pad {
+                        scroll_x = (cursor_x - pad).max(px(0.0));
+                    } else if cursor_x > right - pad {
+                        scroll_x = (cursor_x + pad - viewport_w).max(px(0.0));
+                    }
+                    scroll_x = scroll_x.min(max_scroll_x);
+                } else {
+                    scroll_x = px(0.0);
+                }
+
+                let mut selections = Vec::with_capacity(visible_line_range.len().max(1));
+                let cursor_quad = if selected_range.is_empty() {
+                    let (line_ix, local_ix) = line_for_offset(&line_starts, &lines, cursor);
+                    let x = lines[line_ix].x_for_index(local_ix) - scroll_x;
+                    let caret_inset_y = px(2.0);
+                    let caret_h = (line_height - caret_inset_y * 2.0).max(px(2.0));
+                    let top = bounds.top() + line_height * line_ix as f32 + caret_inset_y;
+                    Some(fill(
+                        Bounds::new(point(bounds.left() + x, top), size(px(1.0), caret_h)),
+                        style_colors.cursor,
+                    ))
+                } else {
+                    for ix in visible_line_range.clone() {
+                        let start = line_starts.get(ix).copied().unwrap_or(0);
+                        let next_start = line_starts
+                            .get(ix + 1)
+                            .copied()
+                            .unwrap_or(display_text.len());
+                        let line_len = lines[ix].len();
+                        let line_end = start + line_len;
+
+                        let seg_start = selected_range.start.max(start);
+                        let seg_end = selected_range.end.min(next_start);
+                        if seg_start >= seg_end {
+                            continue;
+                        }
+
+                        let local_start = seg_start.min(line_end) - start;
+                        let local_end = seg_end.min(line_end) - start;
+
+                        let x0 = lines[ix].x_for_index(local_start) - scroll_x;
+                        let x1 = lines[ix].x_for_index(local_end) - scroll_x;
+                        let top = bounds.top() + line_height * ix as f32;
+                        selections.push(fill(
+                            Bounds::from_corners(
+                                point(bounds.left() + x0, top),
+                                point(bounds.left() + x1, top + line_height),
+                            ),
+                            style_colors.selection,
+                        ));
+                    }
+                    None
+                };
+
+                return PrepaintState {
+                    layout: Some(TextInputLayout::Plain(lines)),
+                    cursor: cursor_quad,
+                    selections,
+                    line_starts: Some(line_starts),
+                    wrap_cache: None,
+                    scroll_x,
+                    visible_line_range,
+                };
             }
 
-            let mut selections = Vec::with_capacity(lines.len());
+            let wrap_width = bounds.size.width.max(px(0.0));
+            let rounded_wrap_width = wrap_width.round();
+            let wrap_width_key = wrap_width_cache_key(rounded_wrap_width);
+            if input.wrap_row_counts.len() != line_count {
+                input.wrap_row_counts.resize(line_count, 1);
+                input.request_wrap_recompute();
+            }
+            if input.wrap_row_counts_width != Some(rounded_wrap_width) {
+                input.wrap_row_counts_width = Some(rounded_wrap_width);
+                input.request_wrap_recompute();
+            }
+            for rows in &mut input.wrap_row_counts {
+                *rows = (*rows).max(1);
+            }
+            let started_wrap_job = input.maybe_recompute_wrap_rows(
+                display_text_str,
+                rounded_wrap_width,
+                font_size,
+                line_count,
+                cx,
+            );
+
+            let mut row_counts_changed = input.apply_pending_dirty_wrap_updates(
+                display_text_str,
+                line_starts.as_slice(),
+                wrap_width,
+                &shape_style,
+                !started_wrap_job,
+                window,
+            );
+
+            let mut y_offsets = vec![Pixels::ZERO; line_count];
+            let mut y = Pixels::ZERO;
+            for (ix, rows) in input.wrap_row_counts.iter().enumerate() {
+                y_offsets[ix] = y;
+                y += line_height * (*rows as f32).max(1.0);
+            }
+
+            let mut visible_line_range = visible_wrapped_line_range(
+                &y_offsets,
+                input.wrap_row_counts.as_slice(),
+                line_height,
+                visible_top,
+                visible_bottom,
+                TEXT_INPUT_GUARD_ROWS,
+            );
+            let mut lines = vec![WrappedLine::default(); line_count];
+            let mut shaped_mask = vec![false; line_count];
+            let job_accepts_interpolation = pending_wrap_job_accepts_interpolated_patch(
+                input.pending_wrap_job.as_ref(),
+                wrap_width_key,
+                line_count,
+                !started_wrap_job,
+            );
+            let mut streamed_line_runs = input.streamed_highlight_runs_for_visible_window(
+                display_text_str,
+                line_starts.as_slice(),
+                visible_line_range.clone(),
+                &shape_style,
+            );
+
+            for line_ix in visible_line_range.clone() {
+                let precomputed_runs = visible_window_runs_for_line_ix(
+                    streamed_line_runs.as_ref().map(|runs| runs.as_slice()),
+                    visible_line_range.start,
+                    line_ix,
+                );
+                let wrapped = input.shape_wrapped_line_cached(
+                    LineShapeInput {
+                        line_ix,
+                        line_start: line_starts.get(line_ix).copied().unwrap_or(0),
+                        line_text: line_text_for_index(
+                            display_text_str,
+                            line_starts.as_slice(),
+                            line_ix,
+                        ),
+                    },
+                    wrap_width,
+                    precomputed_runs,
+                    &shape_style,
+                    window,
+                );
+                let rows = wrapped.wrap_boundaries().len().saturating_add(1).max(1);
+                let old_rows = input
+                    .wrap_row_counts
+                    .get(line_ix)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
+                if old_rows != rows {
+                    if let Some(slot) = input.wrap_row_counts.get_mut(line_ix) {
+                        *slot = rows;
+                    }
+                    row_counts_changed = true;
+                    if job_accepts_interpolation {
+                        input.push_interpolated_wrap_patch(wrap_width_key, line_ix, old_rows, rows);
+                    }
+                }
+                if let Some(slot) = lines.get_mut(line_ix) {
+                    *slot = wrapped;
+                }
+                if let Some(mask) = shaped_mask.get_mut(line_ix) {
+                    *mask = true;
+                }
+            }
+
+            let cursor_line_ix = line_index_for_offset(&line_starts, cursor, line_count);
+            if cursor_line_ix < line_count
+                && (cursor_line_ix < visible_line_range.start
+                    || cursor_line_ix >= visible_line_range.end)
+            {
+                let wrapped = input.shape_wrapped_line_cached(
+                    LineShapeInput {
+                        line_ix: cursor_line_ix,
+                        line_start: line_starts.get(cursor_line_ix).copied().unwrap_or(0),
+                        line_text: line_text_for_index(
+                            display_text_str,
+                            line_starts.as_slice(),
+                            cursor_line_ix,
+                        ),
+                    },
+                    wrap_width,
+                    None,
+                    &shape_style,
+                    window,
+                );
+                let rows = wrapped.wrap_boundaries().len().saturating_add(1).max(1);
+                let old_rows = input
+                    .wrap_row_counts
+                    .get(cursor_line_ix)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
+                if old_rows != rows {
+                    if let Some(slot) = input.wrap_row_counts.get_mut(cursor_line_ix) {
+                        *slot = rows;
+                    }
+                    row_counts_changed = true;
+                    if job_accepts_interpolation {
+                        input.push_interpolated_wrap_patch(
+                            wrap_width_key,
+                            cursor_line_ix,
+                            old_rows,
+                            rows,
+                        );
+                    }
+                }
+                if let Some(slot) = lines.get_mut(cursor_line_ix) {
+                    *slot = wrapped;
+                }
+                if let Some(mask) = shaped_mask.get_mut(cursor_line_ix) {
+                    *mask = true;
+                }
+            }
+
+            if row_counts_changed {
+                y = Pixels::ZERO;
+                for (ix, rows) in input.wrap_row_counts.iter().enumerate() {
+                    y_offsets[ix] = y;
+                    y += line_height * (*rows as f32).max(1.0);
+                }
+                visible_line_range = visible_wrapped_line_range(
+                    &y_offsets,
+                    input.wrap_row_counts.as_slice(),
+                    line_height,
+                    visible_top,
+                    visible_bottom,
+                    TEXT_INPUT_GUARD_ROWS,
+                );
+                streamed_line_runs = input.streamed_highlight_runs_for_visible_window(
+                    display_text_str,
+                    line_starts.as_slice(),
+                    visible_line_range.clone(),
+                    &shape_style,
+                );
+                for line_ix in visible_line_range.clone() {
+                    if shaped_mask.get(line_ix).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let precomputed_runs = visible_window_runs_for_line_ix(
+                        streamed_line_runs.as_ref().map(|runs| runs.as_slice()),
+                        visible_line_range.start,
+                        line_ix,
+                    );
+                    let wrapped = input.shape_wrapped_line_cached(
+                        LineShapeInput {
+                            line_ix,
+                            line_start: line_starts.get(line_ix).copied().unwrap_or(0),
+                            line_text: line_text_for_index(
+                                display_text_str,
+                                line_starts.as_slice(),
+                                line_ix,
+                            ),
+                        },
+                        wrap_width,
+                        precomputed_runs,
+                        &shape_style,
+                        window,
+                    );
+                    let rows = wrapped.wrap_boundaries().len().saturating_add(1).max(1);
+                    let old_rows = input
+                        .wrap_row_counts
+                        .get(line_ix)
+                        .copied()
+                        .unwrap_or(1)
+                        .max(1);
+                    if let Some(slot) = input.wrap_row_counts.get_mut(line_ix) {
+                        *slot = rows;
+                    }
+                    if old_rows != rows && job_accepts_interpolation {
+                        input.push_interpolated_wrap_patch(wrap_width_key, line_ix, old_rows, rows);
+                    }
+                    if let Some(slot) = lines.get_mut(line_ix) {
+                        *slot = wrapped;
+                    }
+                    if let Some(mask) = shaped_mask.get_mut(line_ix) {
+                        *mask = true;
+                    }
+                }
+            }
+
+            let total_rows = total_wrap_rows(input.wrap_row_counts.as_slice());
+            let wrap_cache = Some(WrapCache {
+                width: rounded_wrap_width,
+                rows: total_rows,
+            });
+
+            let mut selections = Vec::with_capacity(visible_line_range.len().max(1));
             let cursor_quad = if selected_range.is_empty() {
-                let (line_ix, local_ix) = line_for_offset(&line_starts, &lines, cursor);
-                let x = lines[line_ix].x_for_index(local_ix) - scroll_x;
+                let line_ix = line_index_for_offset(&line_starts, cursor, line_count);
+                let start = line_starts.get(line_ix).copied().unwrap_or(0);
+                let local = cursor.saturating_sub(start).min(lines[line_ix].len());
                 let caret_inset_y = px(2.0);
                 let caret_h = (line_height - caret_inset_y * 2.0).max(px(2.0));
-                let top = bounds.top() + line_height * line_ix as f32 + caret_inset_y;
+                let pos = lines[line_ix]
+                    .position_for_index(local, line_height)
+                    .unwrap_or(point(Pixels::ZERO, Pixels::ZERO));
+                let top = bounds.top() + y_offsets[line_ix] + pos.y + caret_inset_y;
                 Some(fill(
-                    Bounds::new(point(bounds.left() + x, top), size(px(1.0), caret_h)),
+                    Bounds::new(point(bounds.left() + pos.x, top), size(px(1.0), caret_h)),
                     style_colors.cursor,
                 ))
             } else {
-                for ix in 0..lines.len() {
-                    let start = line_starts[ix];
+                for ix in visible_line_range.clone() {
+                    let start = line_starts.get(ix).copied().unwrap_or(0);
                     let next_start = line_starts
                         .get(ix + 1)
                         .copied()
@@ -2003,140 +2970,53 @@ impl Element for TextElement {
                     let local_start = seg_start.min(line_end) - start;
                     let local_end = seg_end.min(line_end) - start;
 
-                    let x0 = lines[ix].x_for_index(local_start) - scroll_x;
-                    let x1 = lines[ix].x_for_index(local_end) - scroll_x;
-                    let top = bounds.top() + line_height * ix as f32;
-                    selections.push(fill(
-                        Bounds::from_corners(
-                            point(bounds.left() + x0, top),
-                            point(bounds.left() + x1, top + line_height),
-                        ),
-                        style_colors.selection,
-                    ));
+                    let start_pos = lines[ix]
+                        .position_for_index(local_start, line_height)
+                        .unwrap_or(point(Pixels::ZERO, Pixels::ZERO));
+                    let end_pos = lines[ix]
+                        .position_for_index(local_end, line_height)
+                        .unwrap_or(point(Pixels::ZERO, Pixels::ZERO));
+
+                    let start_row = (start_pos.y / line_height).floor().max(0.0) as usize;
+                    let end_row = (end_pos.y / line_height).floor().max(0.0) as usize;
+
+                    for row in start_row..=end_row {
+                        let top = bounds.top() + y_offsets[ix] + line_height * row as f32;
+                        let (x0, x1) = if start_row == end_row {
+                            (start_pos.x, end_pos.x)
+                        } else if row == start_row {
+                            (start_pos.x, bounds.size.width)
+                        } else if row == end_row {
+                            (Pixels::ZERO, end_pos.x)
+                        } else {
+                            (Pixels::ZERO, bounds.size.width)
+                        };
+                        selections.push(fill(
+                            Bounds::from_corners(
+                                point(bounds.left() + x0, top),
+                                point(bounds.left() + x1, top + line_height),
+                            ),
+                            style_colors.selection,
+                        ));
+                    }
                 }
                 None
             };
 
-            return PrepaintState {
-                layout: Some(TextInputLayout::Plain(lines)),
+            PrepaintState {
+                layout: Some(TextInputLayout::Wrapped {
+                    lines,
+                    y_offsets,
+                    row_counts: input.wrap_row_counts.clone(),
+                }),
                 cursor: cursor_quad,
                 selections,
                 line_starts: Some(line_starts),
-                wrap_cache: None,
-                scroll_x,
-            };
-        }
-
-        let wrap_width = bounds.size.width.max(px(0.0));
-        let mut y_offsets: Vec<Pixels> = Vec::with_capacity(lines_text.len());
-        let mut lines: Vec<WrappedLine> = Vec::with_capacity(lines_text.len());
-        let mut y = Pixels::ZERO;
-        let mut total_rows = 0usize;
-
-        for (line_ix, line_text) in lines_text.iter().enumerate() {
-            let runs = runs_for_line(
-                &base_font,
-                text_color,
-                line_starts[line_ix],
-                line_text.as_ref(),
-                highlights.as_ref().map(|h| h.as_slice()),
-            );
-            let shaped = window
-                .text_system()
-                .shape_text(line_text.clone(), font_size, &runs, Some(wrap_width), None)
-                .unwrap_or_default();
-            let line = shaped.into_iter().next().unwrap_or_default();
-            y_offsets.push(y);
-            let rows = line.wrap_boundaries().len().saturating_add(1);
-            total_rows += rows;
-            y += line_height * rows as f32;
-            lines.push(line);
-        }
-
-        let wrap_cache = Some(WrapCache {
-            width: wrap_width.round(),
-            rows: total_rows.max(1),
-        });
-
-        let mut selections = Vec::with_capacity(total_rows.max(1));
-        let cursor_quad = if selected_range.is_empty() {
-            let mut ix = line_starts.partition_point(|&s| s <= cursor);
-            if ix == 0 {
-                ix = 1;
+                wrap_cache,
+                scroll_x: px(0.0),
+                visible_line_range,
             }
-            let line_ix = (ix - 1).min(lines.len().saturating_sub(1));
-            let start = line_starts.get(line_ix).copied().unwrap_or(0);
-            let local = cursor.saturating_sub(start).min(lines[line_ix].len());
-            let caret_inset_y = px(2.0);
-            let caret_h = (line_height - caret_inset_y * 2.0).max(px(2.0));
-            let pos = lines[line_ix]
-                .position_for_index(local, line_height)
-                .unwrap_or(point(Pixels::ZERO, Pixels::ZERO));
-            let top = bounds.top() + y_offsets[line_ix] + pos.y + caret_inset_y;
-            Some(fill(
-                Bounds::new(point(bounds.left() + pos.x, top), size(px(1.0), caret_h)),
-                style_colors.cursor,
-            ))
-        } else {
-            for ix in 0..lines.len() {
-                let start = line_starts[ix];
-                let next_start = line_starts
-                    .get(ix + 1)
-                    .copied()
-                    .unwrap_or(display_text.len());
-                let line_len = lines[ix].len();
-                let line_end = start + line_len;
-
-                let seg_start = selected_range.start.max(start);
-                let seg_end = selected_range.end.min(next_start);
-                if seg_start >= seg_end {
-                    continue;
-                }
-
-                let local_start = seg_start.min(line_end) - start;
-                let local_end = seg_end.min(line_end) - start;
-
-                let start_pos = lines[ix]
-                    .position_for_index(local_start, line_height)
-                    .unwrap_or(point(Pixels::ZERO, Pixels::ZERO));
-                let end_pos = lines[ix]
-                    .position_for_index(local_end, line_height)
-                    .unwrap_or(point(Pixels::ZERO, Pixels::ZERO));
-
-                let start_row = (start_pos.y / line_height).floor().max(0.0) as usize;
-                let end_row = (end_pos.y / line_height).floor().max(0.0) as usize;
-
-                for row in start_row..=end_row {
-                    let top = bounds.top() + y_offsets[ix] + line_height * row as f32;
-                    let (x0, x1) = if start_row == end_row {
-                        (start_pos.x, end_pos.x)
-                    } else if row == start_row {
-                        (start_pos.x, bounds.size.width)
-                    } else if row == end_row {
-                        (Pixels::ZERO, end_pos.x)
-                    } else {
-                        (Pixels::ZERO, bounds.size.width)
-                    };
-                    selections.push(fill(
-                        Bounds::from_corners(
-                            point(bounds.left() + x0, top),
-                            point(bounds.left() + x1, top + line_height),
-                        ),
-                        style_colors.selection,
-                    ));
-                }
-            }
-            None
-        };
-
-        PrepaintState {
-            layout: Some(TextInputLayout::Wrapped { lines, y_offsets }),
-            cursor: cursor_quad,
-            selections,
-            line_starts: Some(line_starts),
-            wrap_cache,
-            scroll_x: px(0.0),
-        }
+        })
     }
 
     fn paint(
@@ -2184,7 +3064,10 @@ impl Element for TextElement {
         if let Some(layout) = prepaint.layout.as_ref() {
             match layout {
                 TextInputLayout::Plain(lines) => {
-                    for (ix, line) in lines.iter().enumerate() {
+                    for ix in prepaint.visible_line_range.clone() {
+                        let Some(line) = lines.get(ix) else {
+                            continue;
+                        };
                         let painted = line.paint(
                             point(
                                 bounds.origin.x - prepaint.scroll_x,
@@ -2200,8 +3083,13 @@ impl Element for TextElement {
                         );
                     }
                 }
-                TextInputLayout::Wrapped { lines, y_offsets } => {
-                    for (ix, line) in lines.iter().enumerate() {
+                TextInputLayout::Wrapped {
+                    lines, y_offsets, ..
+                } => {
+                    for ix in prepaint.visible_line_range.clone() {
+                        let Some(line) = lines.get(ix) else {
+                            continue;
+                        };
                         let y = y_offsets.get(ix).copied().unwrap_or(Pixels::ZERO);
                         let _ = line.paint(
                             point(bounds.origin.x, bounds.origin.y + y),
@@ -2410,6 +3298,530 @@ impl Render for TextInput {
     }
 }
 
+fn hash_text_slice(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn truncate_line_for_shaping(line_text: &str, max_bytes: usize) -> (SharedString, u64) {
+    if line_text.len() <= max_bytes {
+        let hash = hash_text_slice(line_text);
+        return (line_text.to_string().into(), hash);
+    }
+
+    let suffix = TEXT_INPUT_TRUNCATION_SUFFIX;
+    let suffix_len = suffix.len();
+    let mut end = max_bytes.saturating_sub(suffix_len).min(line_text.len());
+    while end > 0 && !line_text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+
+    let mut truncated = String::with_capacity(end.saturating_add(suffix_len));
+    if end > 0 {
+        truncated.push_str(&line_text[..end]);
+    }
+    truncated.push_str(suffix);
+
+    let hash = hash_text_slice(truncated.as_str());
+    (truncated.into(), hash)
+}
+
+fn wrap_width_cache_key(wrap_width: Pixels) -> i32 {
+    let mut key = f32::from(wrap_width.round()) as i32;
+    if key == i32::MIN {
+        key = i32::MIN + 1;
+    }
+    key
+}
+
+fn line_index_for_offset(starts: &[usize], offset: usize, line_count: usize) -> usize {
+    if line_count == 0 {
+        return 0;
+    }
+    let mut ix = starts.partition_point(|&s| s <= offset);
+    if ix == 0 {
+        ix = 1;
+    }
+    (ix - 1).min(line_count.saturating_sub(1))
+}
+
+fn visible_vertical_window(
+    bounds: Bounds<Pixels>,
+    scroll_handle: Option<&ScrollHandle>,
+) -> (Pixels, Pixels) {
+    let full_top = Pixels::ZERO;
+    let full_bottom = bounds.size.height.max(px(0.0));
+    let Some(scroll_handle) = scroll_handle else {
+        return (full_top, full_bottom);
+    };
+
+    let viewport = scroll_handle.bounds();
+    let top = (viewport.top() - bounds.top()).max(Pixels::ZERO);
+    let bottom = (viewport.bottom() - bounds.top())
+        .max(Pixels::ZERO)
+        .min(full_bottom);
+    if bottom <= top {
+        (full_top, full_bottom)
+    } else {
+        (top, bottom)
+    }
+}
+
+fn visible_plain_line_range(
+    line_count: usize,
+    line_height: Pixels,
+    visible_top: Pixels,
+    visible_bottom: Pixels,
+    guard_rows: usize,
+) -> Range<usize> {
+    if line_count == 0 {
+        return 0..0;
+    }
+    let safe_line_height = if line_height <= px(0.0) {
+        px(1.0)
+    } else {
+        line_height
+    };
+    let start_row = (f32::from(visible_top) / f32::from(safe_line_height))
+        .floor()
+        .max(0.0) as usize;
+    let end_row = (f32::from(visible_bottom) / f32::from(safe_line_height))
+        .ceil()
+        .max(0.0) as usize;
+    let start = start_row
+        .saturating_sub(guard_rows)
+        .min(line_count.saturating_sub(1));
+    let mut end = end_row
+        .saturating_add(guard_rows.saturating_add(1))
+        .min(line_count);
+    if end <= start {
+        end = (start + 1).min(line_count);
+    }
+    start..end
+}
+
+fn wrapped_line_index_for_y(
+    y_offsets: &[Pixels],
+    row_counts: &[usize],
+    _line_height: Pixels,
+    local_y: Pixels,
+) -> usize {
+    let line_count = y_offsets.len().min(row_counts.len());
+    if line_count == 0 {
+        return 0;
+    }
+    y_offsets[..line_count]
+        .partition_point(|&y| y <= local_y)
+        .saturating_sub(1)
+        .min(line_count.saturating_sub(1))
+}
+
+fn visible_wrapped_line_range(
+    y_offsets: &[Pixels],
+    row_counts: &[usize],
+    line_height: Pixels,
+    visible_top: Pixels,
+    visible_bottom: Pixels,
+    guard_rows: usize,
+) -> Range<usize> {
+    let line_count = y_offsets.len().min(row_counts.len());
+    if line_count == 0 {
+        return 0..0;
+    }
+    let safe_line_height = if line_height <= px(0.0) {
+        px(1.0)
+    } else {
+        line_height
+    };
+
+    let guard = safe_line_height * guard_rows as f32;
+    let top = (visible_top - guard).max(Pixels::ZERO);
+    let bottom = (visible_bottom + guard).max(top);
+    let y_offsets = &y_offsets[..line_count];
+    let row_counts = &row_counts[..line_count];
+    let start = wrapped_line_index_for_y(y_offsets, row_counts, safe_line_height, top)
+        .min(line_count.saturating_sub(1));
+    let mut end = y_offsets.partition_point(|&y| y <= bottom).min(line_count);
+    if end <= start {
+        end = (start + 1).min(line_count);
+    }
+    start..end
+}
+
+fn total_wrap_rows(row_counts: &[usize]) -> usize {
+    row_counts
+        .iter()
+        .copied()
+        .map(|rows| rows.max(1))
+        .sum::<usize>()
+        .max(1)
+}
+
+fn wrap_columns_for_width(wrap_width: Pixels, font_size: Pixels) -> usize {
+    let width_px = f32::from(wrap_width.max(px(1.0)));
+    let font_px = f32::from(font_size.max(px(1.0)));
+    let advance_px = (font_px * TEXT_INPUT_WRAP_CHAR_ADVANCE_FACTOR).max(1.0);
+    (width_px / advance_px).floor().max(1.0) as usize
+}
+
+fn estimate_wrap_rows_for_text(text: &str, wrap_columns: usize) -> Vec<usize> {
+    let line_starts = compute_line_starts(text);
+    let line_count = line_starts.len().max(1);
+    let mut rows = vec![1; line_count];
+    for (line_ix, row_slot) in rows.iter_mut().take(line_count).enumerate() {
+        if line_ix > 0 && line_ix % TEXT_INPUT_WRAP_BACKGROUND_YIELD_EVERY_ROWS == 0 {
+            std::thread::yield_now();
+        }
+        let line_text = line_text_for_index(text, line_starts.as_slice(), line_ix);
+        *row_slot = estimate_wrap_rows_for_line(line_text, wrap_columns);
+    }
+    rows
+}
+
+fn estimate_wrap_rows_budgeted(
+    text: &str,
+    wrap_columns: usize,
+    rows: &mut [usize],
+    budget: Duration,
+) {
+    let line_starts = compute_line_starts(text);
+    let line_count = line_starts.len().min(rows.len());
+    if line_count == 0 {
+        return;
+    }
+
+    let start = Instant::now();
+    for (line_ix, row_slot) in rows.iter_mut().take(line_count).enumerate() {
+        if line_ix > 0
+            && line_ix % TEXT_INPUT_WRAP_BACKGROUND_YIELD_EVERY_ROWS == 0
+            && start.elapsed() >= budget
+        {
+            break;
+        }
+        let line_text = line_text_for_index(text, line_starts.as_slice(), line_ix);
+        *row_slot = estimate_wrap_rows_for_line(line_text, wrap_columns);
+    }
+}
+
+fn estimate_wrap_rows_for_line(line_text: &str, wrap_columns: usize) -> usize {
+    if line_text.is_empty() {
+        return 1;
+    }
+    let wrap_columns = wrap_columns.max(1);
+    let mut rows = 1usize;
+    let mut column = 0usize;
+    for ch in line_text.chars() {
+        let width = if ch == '\t' {
+            let rem = column % TEXT_INPUT_WRAP_TAB_STOP_COLUMNS;
+            if rem == 0 {
+                TEXT_INPUT_WRAP_TAB_STOP_COLUMNS
+            } else {
+                TEXT_INPUT_WRAP_TAB_STOP_COLUMNS - rem
+            }
+        } else {
+            1
+        };
+
+        if width >= wrap_columns {
+            if column > 0 {
+                rows = rows.saturating_add(1);
+            }
+            rows = rows.saturating_add(width / wrap_columns);
+            column = width % wrap_columns;
+            if column == 0 {
+                column = wrap_columns;
+            }
+            continue;
+        }
+
+        if column + width > wrap_columns {
+            rows = rows.saturating_add(1);
+            column = width;
+        } else {
+            column += width;
+        }
+    }
+    rows.max(1)
+}
+
+fn clamp_offset_to_char_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset = offset.saturating_sub(1);
+    }
+    offset
+}
+
+fn expanded_dirty_wrap_line_range_for_edit(
+    text: &str,
+    line_starts: &[usize],
+    old_range: &Range<usize>,
+    new_range: &Range<usize>,
+) -> Range<usize> {
+    let line_count = line_starts.len().max(1);
+    if line_count == 0 {
+        return 0..0;
+    }
+
+    let mut start_offset = old_range.start.min(new_range.start).min(text.len());
+    let mut end_offset = old_range.end.max(new_range.end).min(text.len());
+    start_offset = clamp_offset_to_char_boundary(text, start_offset);
+    end_offset = clamp_offset_to_char_boundary(text, end_offset.max(start_offset));
+
+    let start_line = line_index_for_offset(line_starts, start_offset, line_count);
+    let mut end_line = line_index_for_offset(line_starts, end_offset, line_count)
+        .saturating_add(1)
+        .min(line_count);
+    if end_line <= start_line {
+        end_line = (start_line + 1).min(line_count);
+    }
+
+    let mut expanded_start_line = start_line;
+    let mut expanded_end_line = end_line;
+    // Tab-aware invalidation: edits before tabs can shift downstream tab stops for the same row.
+    for line_ix in start_line..end_line {
+        let line_start = line_starts.get(line_ix).copied().unwrap_or(0);
+        let edit_local = start_offset.saturating_sub(line_start);
+        let line_text = line_text_for_index(text, line_starts, line_ix);
+        if let Some(tab_ix) = line_text.rfind('\t')
+            && edit_local <= tab_ix
+        {
+            expanded_start_line = expanded_start_line.min(line_ix);
+            expanded_end_line = expanded_end_line.max((line_ix + 1).min(line_count));
+        }
+    }
+
+    expanded_start_line.min(line_count)..expanded_end_line.min(line_count)
+}
+
+fn apply_interpolated_wrap_patch_delta(rows: &mut [usize], patch: &InterpolatedWrapPatch) {
+    for (ix, old_rows) in patch.old_rows.iter().copied().enumerate() {
+        let Some(new_rows) = patch.new_rows.get(ix).copied() else {
+            break;
+        };
+        let Some(slot) = rows.get_mut(patch.line_start.saturating_add(ix)) else {
+            break;
+        };
+        let delta = new_rows as isize - old_rows as isize;
+        let next = (*slot as isize + delta).max(1) as usize;
+        *slot = next;
+    }
+}
+
+fn reset_interpolated_wrap_patches_on_overflow(
+    interpolated_wrap_patches: &mut Vec<InterpolatedWrapPatch>,
+    wrap_recompute_requested: &mut bool,
+) -> bool {
+    if interpolated_wrap_patches.len() < TEXT_INPUT_MAX_INTERPOLATED_WRAP_PATCHES {
+        return false;
+    }
+    interpolated_wrap_patches.clear();
+    *wrap_recompute_requested = true;
+    true
+}
+
+fn pending_wrap_job_accepts_interpolated_patch(
+    pending_wrap_job: Option<&PendingWrapJob>,
+    width_key: i32,
+    line_count: usize,
+    allow_interpolated_patches: bool,
+) -> bool {
+    allow_interpolated_patches
+        && pending_wrap_job
+            .map(|job| job.width_key == width_key && job.line_count == line_count)
+            .unwrap_or(false)
+}
+
+fn visible_window_runs_for_line_ix(
+    line_runs_by_visible_line: Option<&[Vec<TextRun>]>,
+    visible_start: usize,
+    line_ix: usize,
+) -> Option<&[TextRun]> {
+    let visible_runs = line_runs_by_visible_line?;
+    let local_ix = line_ix.checked_sub(visible_start)?;
+    visible_runs.get(local_ix).map(Vec::as_slice)
+}
+
+#[derive(Clone)]
+struct ActiveHighlight<'a> {
+    order: usize,
+    range: Range<usize>,
+    style: &'a gpui::HighlightStyle,
+}
+
+struct HighlightCursor<'a> {
+    highlights: &'a [(Range<usize>, gpui::HighlightStyle)],
+    next_ix: usize,
+    active: Vec<ActiveHighlight<'a>>,
+}
+
+impl<'a> HighlightCursor<'a> {
+    fn new(highlights: &'a [(Range<usize>, gpui::HighlightStyle)]) -> Self {
+        Self {
+            highlights,
+            next_ix: 0,
+            active: Vec::new(),
+        }
+    }
+
+    fn advance_to_line_start(&mut self, line_start: usize) {
+        self.active
+            .retain(|highlight| highlight.range.end > line_start);
+        while let Some((range, style)) = self.highlights.get(self.next_ix) {
+            if range.end <= line_start {
+                self.next_ix = self.next_ix.saturating_add(1);
+                continue;
+            }
+            if range.start < line_start {
+                self.active.push(ActiveHighlight {
+                    order: self.next_ix,
+                    range: range.clone(),
+                    style,
+                });
+                self.next_ix = self.next_ix.saturating_add(1);
+                continue;
+            }
+            break;
+        }
+    }
+
+    fn top_style_for_offset(&self, offset: usize) -> Option<&'a gpui::HighlightStyle> {
+        self.active
+            .iter()
+            .filter(|highlight| highlight.range.start <= offset && highlight.range.end > offset)
+            .max_by_key(|highlight| highlight.order)
+            .map(|highlight| highlight.style)
+    }
+
+    fn runs_for_line(
+        &mut self,
+        base_font: &gpui::Font,
+        base_color: gpui::Hsla,
+        line_start: usize,
+        line_text: &str,
+    ) -> Vec<TextRun> {
+        if line_text.is_empty() {
+            return Vec::new();
+        }
+        let line_end = line_start + line_text.len();
+        self.advance_to_line_start(line_start);
+
+        let mut runs = Vec::new();
+        let mut offset = line_start;
+        while offset < line_end {
+            while let Some((range, style)) = self.highlights.get(self.next_ix) {
+                if range.end <= offset {
+                    self.next_ix = self.next_ix.saturating_add(1);
+                    continue;
+                }
+                if range.start > offset || range.start >= line_end {
+                    break;
+                }
+                self.active.push(ActiveHighlight {
+                    order: self.next_ix,
+                    range: range.clone(),
+                    style,
+                });
+                self.next_ix = self.next_ix.saturating_add(1);
+            }
+
+            let style = self.top_style_for_offset(offset);
+            let mut next_boundary = line_end;
+            if let Some((next_range, _)) = self.highlights.get(self.next_ix)
+                && next_range.start < line_end
+            {
+                next_boundary = next_boundary.min(next_range.start);
+            }
+            for highlight in &self.active {
+                if highlight.range.end > offset && highlight.range.end < next_boundary {
+                    next_boundary = highlight.range.end;
+                }
+            }
+            if next_boundary <= offset {
+                next_boundary = (offset + 1).min(line_end);
+            }
+
+            runs.push(text_run_for_style(
+                base_font,
+                base_color,
+                next_boundary - offset,
+                style,
+            ));
+            self.active
+                .retain(|highlight| highlight.range.end > next_boundary);
+            offset = next_boundary;
+        }
+
+        runs
+    }
+}
+
+fn build_streamed_highlight_runs_for_visible_window(
+    base_font: &gpui::Font,
+    base_color: gpui::Hsla,
+    display_text: &str,
+    line_starts: &[usize],
+    visible_line_range: Range<usize>,
+    highlights: &[(Range<usize>, gpui::HighlightStyle)],
+) -> Vec<Vec<TextRun>> {
+    let mut cursor = HighlightCursor::new(highlights);
+    let mut line_runs = Vec::with_capacity(visible_line_range.len());
+    for line_ix in visible_line_range {
+        let line_start = line_starts.get(line_ix).copied().unwrap_or(0);
+        let line_text = line_text_for_index(display_text, line_starts, line_ix);
+        let (capped_line_text, _) =
+            truncate_line_for_shaping(line_text, TEXT_INPUT_MAX_LINE_SHAPE_BYTES);
+        line_runs.push(cursor.runs_for_line(
+            base_font,
+            base_color,
+            line_start,
+            capped_line_text.as_ref(),
+        ));
+    }
+    line_runs
+}
+
+fn text_run_for_style(
+    base_font: &gpui::Font,
+    base_color: gpui::Hsla,
+    len: usize,
+    style: Option<&gpui::HighlightStyle>,
+) -> TextRun {
+    let mut font = base_font.clone();
+    let mut color = base_color;
+    let mut background_color = None;
+    let mut underline = None;
+    let mut strikethrough = None;
+
+    if let Some(style) = style {
+        if let Some(next_color) = style.color {
+            color = next_color;
+        }
+        if let Some(next_weight) = style.font_weight {
+            font.weight = next_weight;
+        }
+        if let Some(next_style) = style.font_style {
+            font.style = next_style;
+        }
+        background_color = style.background_color;
+        underline = style.underline;
+        strikethrough = style.strikethrough;
+        if let Some(fade_out) = style.fade_out {
+            color.a *= (1.0 - fade_out).clamp(0.0, 1.0);
+        }
+    }
+
+    TextRun {
+        len,
+        font,
+        color,
+        background_color,
+        underline,
+        strikethrough,
+    }
+}
+
 fn runs_for_line(
     base_font: &gpui::Font,
     base_color: gpui::Hsla,
@@ -2422,14 +3834,12 @@ fn runs_for_line(
     }
 
     let Some(highlights) = highlights else {
-        return vec![TextRun {
-            len: line_text.len(),
-            font: base_font.clone(),
-            color: base_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        }];
+        return vec![text_run_for_style(
+            base_font,
+            base_color,
+            line_text.len(),
+            None,
+        )];
     };
 
     let line_end = line_start + line_text.len();
@@ -2449,14 +3859,12 @@ fn runs_for_line(
     }
 
     if line_highlights.is_empty() {
-        return vec![TextRun {
-            len: line_text.len(),
-            font: base_font.clone(),
-            color: base_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        }];
+        return vec![text_run_for_style(
+            base_font,
+            base_color,
+            line_text.len(),
+            None,
+        )];
     }
 
     let mut boundaries = Vec::with_capacity(line_highlights.len() * 2 + 2);
@@ -2482,41 +3890,70 @@ fn runs_for_line(
             .find(|(start, end, _)| *start <= a && *end >= b)
             .map(|(_, _, style)| *style);
 
-        let mut font = base_font.clone();
-        let mut color = base_color;
-        let mut background_color = None;
-        let mut underline = None;
-        let mut strikethrough = None;
-
-        if let Some(style) = style {
-            if let Some(next_color) = style.color {
-                color = next_color;
-            }
-            if let Some(next_weight) = style.font_weight {
-                font.weight = next_weight;
-            }
-            if let Some(next_style) = style.font_style {
-                font.style = next_style;
-            }
-            background_color = style.background_color;
-            underline = style.underline;
-            strikethrough = style.strikethrough;
-            if let Some(fade_out) = style.fade_out {
-                color.a *= (1.0 - fade_out).clamp(0.0, 1.0);
-            }
-        }
-
-        runs.push(TextRun {
-            len: b - a,
-            font,
-            color,
-            background_color,
-            underline,
-            strikethrough,
-        });
+        runs.push(text_run_for_style(base_font, base_color, b - a, style));
     }
 
     runs
+}
+
+fn hash_text_runs_for_benchmark(runs: &[TextRun], hasher: &mut DefaultHasher) {
+    runs.len().hash(hasher);
+    let mut total = 0usize;
+    for run in runs {
+        total = total.saturating_add(run.len);
+        run.len.hash(hasher);
+        run.color.a.to_bits().hash(hasher);
+    }
+    total.hash(hasher);
+}
+
+pub(crate) fn benchmark_text_input_runs_legacy_visible_window(
+    text: &str,
+    line_starts: &[usize],
+    visible_line_range: Range<usize>,
+    highlights: &[(Range<usize>, gpui::HighlightStyle)],
+) -> u64 {
+    let base_font = gpui::font(".SystemUIFont");
+    let base_color = hsla(0.0, 0.0, 1.0, 1.0);
+    let mut hasher = DefaultHasher::new();
+    for line_ix in visible_line_range {
+        let line_start = line_starts.get(line_ix).copied().unwrap_or(0);
+        let line_text = line_text_for_index(text, line_starts, line_ix);
+        let (capped_line_text, _) =
+            truncate_line_for_shaping(line_text, TEXT_INPUT_MAX_LINE_SHAPE_BYTES);
+        let runs = runs_for_line(
+            &base_font,
+            base_color,
+            line_start,
+            capped_line_text.as_ref(),
+            Some(highlights),
+        );
+        hash_text_runs_for_benchmark(runs.as_slice(), &mut hasher);
+    }
+    hasher.finish()
+}
+
+pub(crate) fn benchmark_text_input_runs_streamed_visible_window(
+    text: &str,
+    line_starts: &[usize],
+    visible_line_range: Range<usize>,
+    highlights: &[(Range<usize>, gpui::HighlightStyle)],
+) -> u64 {
+    let base_font = gpui::font(".SystemUIFont");
+    let base_color = hsla(0.0, 0.0, 1.0, 1.0);
+    let line_runs = build_streamed_highlight_runs_for_visible_window(
+        &base_font,
+        base_color,
+        text,
+        line_starts,
+        visible_line_range,
+        highlights,
+    );
+    let mut hasher = DefaultHasher::new();
+    for runs in &line_runs {
+        hash_text_runs_for_benchmark(runs.as_slice(), &mut hasher);
+    }
+    hasher.finish()
 }
 
 fn with_alpha(mut color: Rgba, alpha: f32) -> Rgba {
@@ -2534,21 +3971,35 @@ fn primary_modifier_label() -> &'static str {
     "Ctrl"
 }
 
-fn split_lines_with_starts(text: &SharedString) -> (Vec<usize>, Vec<SharedString>) {
-    let s = text.as_ref();
+fn compute_line_starts(text: &str) -> Vec<usize> {
     let mut starts = Vec::with_capacity(8);
-    let mut lines = Vec::with_capacity(8);
     starts.push(0);
-    let mut start = 0usize;
-    for (ix, b) in s.bytes().enumerate() {
+    for (ix, b) in text.bytes().enumerate() {
         if b == b'\n' {
-            lines.push(s[start..ix].to_string().into());
-            start = ix + 1;
-            starts.push(start);
+            starts.push(ix + 1);
         }
     }
-    lines.push(s[start..].to_string().into());
-    (starts, lines)
+    starts
+}
+
+fn line_text_for_index<'a>(text: &'a str, starts: &[usize], line_ix: usize) -> &'a str {
+    let text_len = text.len();
+    let Some(start) = starts.get(line_ix).copied() else {
+        return "";
+    };
+    if start >= text_len {
+        return "";
+    }
+
+    let mut end = starts
+        .get(line_ix + 1)
+        .copied()
+        .unwrap_or(text_len)
+        .min(text_len);
+    if end > start && text.as_bytes().get(end - 1) == Some(&b'\n') {
+        end -= 1;
+    }
+    text.get(start..end).unwrap_or("")
 }
 
 fn mask_text_for_display(text: &str) -> String {
@@ -2576,7 +4027,7 @@ fn line_for_offset(starts: &[usize], lines: &[ShapedLine], offset: usize) -> (us
 
 #[cfg(test)]
 mod tests {
-    use super::mask_text_for_display;
+    use super::*;
 
     #[test]
     fn mask_text_preserves_length_and_newlines() {
@@ -2592,5 +4043,310 @@ mod tests {
         let masked = mask_text_for_display(input);
         assert_ne!(masked, input);
         assert!(masked.chars().all(|ch| ch == '*'));
+    }
+
+    #[test]
+    fn truncate_line_for_shaping_respects_utf8_boundary_and_appends_suffix() {
+        let input = "éééé";
+        let (truncated, hash) = truncate_line_for_shaping(input, 5);
+        assert_eq!(truncated.as_ref(), "é…");
+        assert_eq!(hash, hash_text_slice(truncated.as_ref()));
+    }
+
+    #[test]
+    fn visible_plain_line_range_applies_guard_rows() {
+        let range = visible_plain_line_range(100, px(20.0), px(200.0), px(260.0), 2);
+        assert_eq!(range, 8..16);
+    }
+
+    #[test]
+    fn wrapped_line_index_and_visible_range_use_row_counts() {
+        let row_counts = vec![1, 3, 1, 2, 1];
+        let y_offsets = vec![px(0.0), px(10.0), px(40.0), px(50.0), px(70.0)];
+        let line_height = px(10.0);
+
+        assert_eq!(
+            wrapped_line_index_for_y(&y_offsets, &row_counts, line_height, px(35.0)),
+            1
+        );
+        let range =
+            visible_wrapped_line_range(&y_offsets, &row_counts, line_height, px(42.0), px(58.0), 0);
+        assert_eq!(range, 2..4);
+    }
+
+    #[test]
+    fn compute_line_starts_and_line_text_handle_trailing_newline() {
+        let text = "alpha\nbeta\n";
+        let starts = compute_line_starts(text);
+        assert_eq!(starts, vec![0, 6, 11]);
+        assert_eq!(line_text_for_index(text, starts.as_slice(), 0), "alpha");
+        assert_eq!(line_text_for_index(text, starts.as_slice(), 1), "beta");
+        assert_eq!(line_text_for_index(text, starts.as_slice(), 2), "");
+        assert_eq!(line_text_for_index(text, starts.as_slice(), 3), "");
+    }
+
+    #[test]
+    fn wrapped_line_index_for_y_handles_row_boundaries() {
+        let row_counts = vec![2, 1, 3];
+        let y_offsets = vec![px(0.0), px(20.0), px(30.0)];
+        let line_height = px(10.0);
+
+        assert_eq!(
+            wrapped_line_index_for_y(&y_offsets, &row_counts, line_height, px(0.0)),
+            0
+        );
+        assert_eq!(
+            wrapped_line_index_for_y(&y_offsets, &row_counts, line_height, px(19.0)),
+            0
+        );
+        assert_eq!(
+            wrapped_line_index_for_y(&y_offsets, &row_counts, line_height, px(20.0)),
+            1
+        );
+        assert_eq!(
+            wrapped_line_index_for_y(&y_offsets, &row_counts, line_height, px(30.0)),
+            2
+        );
+        assert_eq!(
+            wrapped_line_index_for_y(&y_offsets, &row_counts, line_height, px(250.0)),
+            2
+        );
+    }
+
+    #[test]
+    fn estimate_wrap_rows_for_line_handles_tabs_and_overflow() {
+        assert_eq!(estimate_wrap_rows_for_line("abcd", 4), 1);
+        assert_eq!(estimate_wrap_rows_for_line("abcde", 4), 2);
+        assert_eq!(estimate_wrap_rows_for_line("a\tb", 4), 2);
+    }
+
+    #[test]
+    fn expanded_dirty_wrap_line_range_for_edit_keeps_tab_affected_line_dirty() {
+        let text = "ax\tbb\nnext";
+        let starts = compute_line_starts(text);
+        let dirty =
+            expanded_dirty_wrap_line_range_for_edit(text, starts.as_slice(), &(1..1), &(1..2));
+        assert_eq!(dirty, 0..1);
+    }
+
+    #[test]
+    fn apply_interpolated_wrap_patch_delta_adjusts_rows_by_delta() {
+        let mut rows = vec![6, 5, 4, 3];
+        let patch = InterpolatedWrapPatch {
+            width_key: 80,
+            line_start: 1,
+            old_rows: vec![3, 2],
+            new_rows: vec![5, 1],
+        };
+        apply_interpolated_wrap_patch_delta(rows.as_mut_slice(), &patch);
+        assert_eq!(rows, vec![6, 7, 3, 3]);
+    }
+
+    #[test]
+    fn reset_interpolated_wrap_patches_on_overflow_requests_full_recompute() {
+        let patch = InterpolatedWrapPatch {
+            width_key: 80,
+            line_start: 12,
+            old_rows: vec![1],
+            new_rows: vec![2],
+        };
+
+        let mut below_limit =
+            vec![patch.clone(); TEXT_INPUT_MAX_INTERPOLATED_WRAP_PATCHES.saturating_sub(1)];
+        let mut recompute_requested = false;
+        assert!(!reset_interpolated_wrap_patches_on_overflow(
+            &mut below_limit,
+            &mut recompute_requested
+        ));
+        assert_eq!(
+            below_limit.len(),
+            TEXT_INPUT_MAX_INTERPOLATED_WRAP_PATCHES.saturating_sub(1)
+        );
+        assert!(!recompute_requested);
+
+        let mut saturated = vec![patch; TEXT_INPUT_MAX_INTERPOLATED_WRAP_PATCHES];
+        assert!(reset_interpolated_wrap_patches_on_overflow(
+            &mut saturated,
+            &mut recompute_requested
+        ));
+        assert!(saturated.is_empty());
+        assert!(recompute_requested);
+    }
+
+    #[test]
+    fn pending_wrap_job_accepts_interpolated_patch_respects_prepaint_launch_gate() {
+        let job = PendingWrapJob {
+            sequence: 5,
+            width_key: 120,
+            line_count: 64,
+            wrap_columns: 80,
+        };
+
+        assert!(pending_wrap_job_accepts_interpolated_patch(
+            Some(&job),
+            120,
+            64,
+            true
+        ));
+        assert!(!pending_wrap_job_accepts_interpolated_patch(
+            Some(&job),
+            120,
+            64,
+            false
+        ));
+        assert!(!pending_wrap_job_accepts_interpolated_patch(
+            Some(&job),
+            121,
+            64,
+            true
+        ));
+        assert!(!pending_wrap_job_accepts_interpolated_patch(
+            Some(&job),
+            120,
+            63,
+            true
+        ));
+        assert!(!pending_wrap_job_accepts_interpolated_patch(
+            None, 120, 64, true
+        ));
+    }
+
+    fn runs_fingerprint(runs: &[TextRun]) -> Vec<String> {
+        runs.iter().map(|run| format!("{run:?}")).collect()
+    }
+
+    fn run_color_at_offset(runs: &[TextRun], offset: usize) -> gpui::Hsla {
+        let mut cursor = 0usize;
+        for run in runs {
+            let end = cursor.saturating_add(run.len);
+            if offset < end {
+                return run.color;
+            }
+            cursor = end;
+        }
+        panic!("offset {offset} is outside the run coverage");
+    }
+
+    #[test]
+    fn streamed_highlight_runs_match_legacy_visible_window() {
+        let mut text = String::new();
+        for ix in 0..160usize {
+            text.push_str(format!("line_{ix:03}_abcdefghijklmnopqrstuvwxyz0123456789\n").as_str());
+        }
+        let line_starts = compute_line_starts(text.as_str());
+
+        let style_a = gpui::HighlightStyle {
+            color: Some(hsla(0.0, 1.0, 0.5, 1.0)),
+            ..gpui::HighlightStyle::default()
+        };
+        let style_b = gpui::HighlightStyle {
+            color: Some(hsla(0.33, 1.0, 0.5, 1.0)),
+            ..gpui::HighlightStyle::default()
+        };
+        let style_c = gpui::HighlightStyle {
+            color: Some(hsla(0.66, 1.0, 0.5, 1.0)),
+            ..gpui::HighlightStyle::default()
+        };
+        let mut highlights: Vec<(Range<usize>, gpui::HighlightStyle)> = Vec::new();
+        for line_ix in 0..line_starts.len() {
+            let line_start = line_starts.get(line_ix).copied().unwrap_or(0);
+            let line_len =
+                line_text_for_index(text.as_str(), line_starts.as_slice(), line_ix).len();
+            if line_len < 24 {
+                continue;
+            }
+            if line_ix % 2 == 0 {
+                highlights.push((line_start + 1..line_start + 14, style_a.clone()));
+            }
+            if line_ix % 3 == 0 {
+                highlights.push((
+                    line_start + 6..line_start + line_len.min(24),
+                    style_b.clone(),
+                ));
+            }
+        }
+        let wide_start = line_starts.get(18).copied().unwrap_or(0).saturating_add(2);
+        let wide_end = line_starts
+            .get(140)
+            .copied()
+            .unwrap_or(text.len())
+            .saturating_add(20)
+            .min(text.len());
+        highlights.push((wide_start..wide_end, style_c));
+        highlights.sort_by(|(a, _), (b, _)| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
+
+        let visible_range = 47..121;
+        let base_font = gpui::font(".SystemUIFont");
+        let base_color = hsla(0.0, 0.0, 1.0, 1.0);
+        let streamed = build_streamed_highlight_runs_for_visible_window(
+            &base_font,
+            base_color,
+            text.as_str(),
+            line_starts.as_slice(),
+            visible_range.clone(),
+            highlights.as_slice(),
+        );
+        assert_eq!(streamed.len(), visible_range.len());
+
+        for (local_ix, streamed_runs) in streamed.iter().enumerate() {
+            let line_ix = visible_range.start + local_ix;
+            let line_start = line_starts.get(line_ix).copied().unwrap_or(0);
+            let line_text = line_text_for_index(text.as_str(), line_starts.as_slice(), line_ix);
+            let (capped, _) = truncate_line_for_shaping(line_text, TEXT_INPUT_MAX_LINE_SHAPE_BYTES);
+            let legacy_runs = runs_for_line(
+                &base_font,
+                base_color,
+                line_start,
+                capped.as_ref(),
+                Some(highlights.as_slice()),
+            );
+            assert_eq!(
+                runs_fingerprint(streamed_runs.as_slice()),
+                runs_fingerprint(legacy_runs.as_slice())
+            );
+        }
+    }
+
+    #[test]
+    fn streamed_highlight_runs_preserve_latest_overlap_precedence() {
+        let text = "abcdefghijklmnop";
+        let line_starts = compute_line_starts(text);
+        let style_low = gpui::HighlightStyle {
+            color: Some(hsla(0.0, 1.0, 0.5, 1.0)),
+            ..gpui::HighlightStyle::default()
+        };
+        let style_high = gpui::HighlightStyle {
+            color: Some(hsla(0.66, 1.0, 0.5, 1.0)),
+            ..gpui::HighlightStyle::default()
+        };
+        let mut highlights = vec![(2..12, style_low.clone()), (4..10, style_high.clone())];
+        highlights.sort_by(|(a, _), (b, _)| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
+
+        let base_font = gpui::font(".SystemUIFont");
+        let base_color = hsla(0.0, 0.0, 1.0, 1.0);
+        let streamed = build_streamed_highlight_runs_for_visible_window(
+            &base_font,
+            base_color,
+            text,
+            line_starts.as_slice(),
+            0..1,
+            highlights.as_slice(),
+        );
+        let streamed_runs = streamed.first().cloned().unwrap_or_default();
+        let legacy_runs =
+            runs_for_line(&base_font, base_color, 0, text, Some(highlights.as_slice()));
+        assert_eq!(
+            runs_fingerprint(streamed_runs.as_slice()),
+            runs_fingerprint(legacy_runs.as_slice())
+        );
+
+        assert_eq!(
+            run_color_at_offset(streamed_runs.as_slice(), 3),
+            style_low.color.expect("style_low color should exist")
+        );
+        assert_eq!(
+            run_color_at_offset(streamed_runs.as_slice(), 6),
+            style_high.color.expect("style_high color should exist")
+        );
     }
 }

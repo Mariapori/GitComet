@@ -296,7 +296,7 @@ impl MainPaneView {
                         };
                         if total_len == 0 {
                             components::empty_state(theme, "Diff", "Empty file.").into_any_element()
-                        } else if self.diff_visible_indices.is_empty() {
+                        } else if self.diff_visible_len() == 0 {
                             components::empty_state(theme, "Diff", "Nothing to render.")
                                 .into_any_element()
                         } else {
@@ -306,7 +306,7 @@ impl MainPaneView {
                                 DiffViewMode::Inline => {
                                     let list = uniform_list(
                                         "diff",
-                                        self.diff_visible_indices.len(),
+                                        self.diff_visible_len(),
                                         cx.processor(Self::render_diff_rows),
                                     )
                                     .h_full()
@@ -345,7 +345,7 @@ impl MainPaneView {
                                     self.sync_diff_split_vertical_scroll();
                                     let right_scroll_handle =
                                         self.diff_split_right_scroll.0.borrow().base_handle.clone();
-                                    let count = self.diff_visible_indices.len();
+                                    let count = self.diff_visible_len();
                                     let left = uniform_list(
                                         "diff_split_left",
                                         count,

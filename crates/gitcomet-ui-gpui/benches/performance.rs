@@ -2,8 +2,15 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use gitcomet_ui_gpui::benchmarks::{
     BranchSidebarFixture, CommitDetailsFixture, ConflictResolvedOutputGutterScrollFixture,
     ConflictSearchQueryUpdateFixture, ConflictSplitResizeStepFixture,
-    ConflictThreeWayScrollFixture, ConflictTwoWaySplitScrollFixture, HistoryGraphFixture,
-    LargeFileDiffScrollFixture, OpenRepoFixture,
+    ConflictThreeWayScrollFixture, ConflictThreeWayVisibleMapBuildFixture,
+    ConflictTwoWaySplitScrollFixture, FileDiffSyntaxCacheDropFixture, FileDiffSyntaxPrepareFixture,
+    FileDiffSyntaxReparseFixture, HistoryGraphFixture, LargeFileDiffScrollFixture, OpenRepoFixture,
+    PatchDiffPagedRowsFixture, PatchDiffSearchQueryUpdateFixture,
+    ResolvedOutputRecomputeIncrementalFixture, TextInputHighlightDensity,
+    TextInputLongLineCapFixture, TextInputPrepaintWindowedFixture,
+    TextInputRunsStreamedHighlightFixture, TextInputWrapIncrementalBurstEditsFixture,
+    TextInputWrapIncrementalTabsFixture, TextModelBulkLoadLargeFixture,
+    TextModelSnapshotCloneCostFixture, WorktreePreviewRenderFixture,
 };
 use std::env;
 use std::time::Duration;
@@ -204,6 +211,407 @@ fn bench_large_file_diff_scroll(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_text_input_prepaint_windowed(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_TEXT_INPUT_LINES", 20_000);
+    let line_bytes = env_usize("GITCOMET_BENCH_TEXT_INPUT_LINE_BYTES", 128);
+    let window_rows = env_usize("GITCOMET_BENCH_TEXT_INPUT_WINDOW_ROWS", 80);
+    let wrap_width = env_usize("GITCOMET_BENCH_TEXT_INPUT_WRAP_WIDTH_PX", 720);
+
+    let mut windowed_fixture = TextInputPrepaintWindowedFixture::new(lines, line_bytes, wrap_width);
+    let mut full_fixture = TextInputPrepaintWindowedFixture::new(lines, line_bytes, wrap_width);
+
+    let mut group = c.benchmark_group("text_input_prepaint_windowed");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_with_input(
+        BenchmarkId::new("window_rows", window_rows),
+        &window_rows,
+        |b, &window_rows| {
+            let mut start = 0usize;
+            b.iter(|| {
+                let h = windowed_fixture.run_windowed_step(start, window_rows.max(1));
+                start = start.wrapping_add(window_rows.max(1) / 2 + 1)
+                    % windowed_fixture.total_rows().max(1);
+                h
+            })
+        },
+    );
+    group.bench_function(BenchmarkId::from_parameter("full_document_control"), |b| {
+        b.iter(|| full_fixture.run_full_document_step())
+    });
+    group.finish();
+}
+
+fn bench_text_input_runs_streamed_highlight(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_TEXT_INPUT_LINES", 20_000);
+    let line_bytes = env_usize("GITCOMET_BENCH_TEXT_INPUT_LINE_BYTES", 128);
+    let window_rows = env_usize("GITCOMET_BENCH_TEXT_INPUT_WINDOW_ROWS", 80);
+
+    let dense_fixture = TextInputRunsStreamedHighlightFixture::new(
+        lines,
+        line_bytes,
+        window_rows,
+        TextInputHighlightDensity::Dense,
+    );
+    let sparse_fixture = TextInputRunsStreamedHighlightFixture::new(
+        lines,
+        line_bytes,
+        window_rows,
+        TextInputHighlightDensity::Sparse,
+    );
+
+    let mut dense_group = c.benchmark_group("text_input_runs_streamed_highlight_dense");
+    dense_group.sample_size(10);
+    dense_group.warm_up_time(Duration::from_secs(1));
+    dense_group.bench_function(BenchmarkId::from_parameter("legacy_scan"), |b| {
+        let mut start = 0usize;
+        b.iter(|| {
+            let h = dense_fixture.run_legacy_step(start);
+            start = dense_fixture.next_start_row(start);
+            h
+        })
+    });
+    dense_group.bench_function(BenchmarkId::from_parameter("streamed_cursor"), |b| {
+        let mut start = 0usize;
+        b.iter(|| {
+            let h = dense_fixture.run_streamed_step(start);
+            start = dense_fixture.next_start_row(start);
+            h
+        })
+    });
+    dense_group.finish();
+
+    let mut sparse_group = c.benchmark_group("text_input_runs_streamed_highlight_sparse");
+    sparse_group.sample_size(10);
+    sparse_group.warm_up_time(Duration::from_secs(1));
+    sparse_group.bench_function(BenchmarkId::from_parameter("legacy_scan"), |b| {
+        let mut start = 0usize;
+        b.iter(|| {
+            let h = sparse_fixture.run_legacy_step(start);
+            start = sparse_fixture.next_start_row(start);
+            h
+        })
+    });
+    sparse_group.bench_function(BenchmarkId::from_parameter("streamed_cursor"), |b| {
+        let mut start = 0usize;
+        b.iter(|| {
+            let h = sparse_fixture.run_streamed_step(start);
+            start = sparse_fixture.next_start_row(start);
+            h
+        })
+    });
+    sparse_group.finish();
+}
+
+fn bench_text_input_long_line_cap(c: &mut Criterion) {
+    let long_line_bytes = env_usize("GITCOMET_BENCH_TEXT_INPUT_LONG_LINE_BYTES", 256 * 1024);
+    let max_shape_bytes = env_usize("GITCOMET_BENCH_TEXT_INPUT_MAX_LINE_SHAPE_BYTES", 4 * 1024);
+    let fixture = TextInputLongLineCapFixture::new(long_line_bytes);
+
+    let mut group = c.benchmark_group("text_input_long_line_cap");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_function(BenchmarkId::new("capped_bytes", max_shape_bytes), |b| {
+        b.iter(|| fixture.run_with_cap(max_shape_bytes))
+    });
+    group.bench_function(BenchmarkId::from_parameter("uncapped_control"), |b| {
+        b.iter(|| fixture.run_without_cap())
+    });
+    group.finish();
+}
+
+fn bench_text_input_wrap_incremental_tabs(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_TEXT_INPUT_LINES", 20_000);
+    let line_bytes = env_usize("GITCOMET_BENCH_TEXT_INPUT_LINE_BYTES", 128);
+    let wrap_width = env_usize("GITCOMET_BENCH_TEXT_INPUT_WRAP_WIDTH_PX", 720);
+    let mut full_fixture = TextInputWrapIncrementalTabsFixture::new(lines, line_bytes, wrap_width);
+    let mut incremental_fixture =
+        TextInputWrapIncrementalTabsFixture::new(lines, line_bytes, wrap_width);
+
+    let mut group = c.benchmark_group("text_input_wrap_incremental_tabs");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_function(BenchmarkId::from_parameter("full_recompute"), |b| {
+        let mut edit_ix = 0usize;
+        b.iter(|| {
+            let h = full_fixture.run_full_recompute_step(edit_ix);
+            edit_ix = edit_ix.wrapping_add(17);
+            h
+        })
+    });
+    group.bench_function(BenchmarkId::from_parameter("incremental_patch"), |b| {
+        let mut edit_ix = 0usize;
+        b.iter(|| {
+            let h = incremental_fixture.run_incremental_step(edit_ix);
+            edit_ix = edit_ix.wrapping_add(17);
+            h
+        })
+    });
+    group.finish();
+}
+
+fn bench_text_input_wrap_incremental_burst_edits(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_TEXT_INPUT_LINES", 20_000);
+    let line_bytes = env_usize("GITCOMET_BENCH_TEXT_INPUT_LINE_BYTES", 128);
+    let wrap_width = env_usize("GITCOMET_BENCH_TEXT_INPUT_WRAP_WIDTH_PX", 720);
+    let edits_per_burst = env_usize("GITCOMET_BENCH_TEXT_INPUT_BURST_EDITS", 12);
+    let mut full_fixture =
+        TextInputWrapIncrementalBurstEditsFixture::new(lines, line_bytes, wrap_width);
+    let mut incremental_fixture =
+        TextInputWrapIncrementalBurstEditsFixture::new(lines, line_bytes, wrap_width);
+
+    let mut group = c.benchmark_group("text_input_wrap_incremental_burst_edits");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_with_input(
+        BenchmarkId::new("full_recompute", edits_per_burst),
+        &edits_per_burst,
+        |b, &edits_per_burst| {
+            b.iter(|| full_fixture.run_full_recompute_burst_step(edits_per_burst))
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("incremental_patch", edits_per_burst),
+        &edits_per_burst,
+        |b, &edits_per_burst| {
+            b.iter(|| incremental_fixture.run_incremental_burst_step(edits_per_burst))
+        },
+    );
+    group.finish();
+}
+
+fn bench_text_model_snapshot_clone_cost(c: &mut Criterion) {
+    let bytes = env_usize("GITCOMET_BENCH_TEXT_MODEL_BYTES", 2 * 1024 * 1024);
+    let clones = env_usize("GITCOMET_BENCH_TEXT_MODEL_SNAPSHOT_CLONES", 8_192);
+    let fixture = TextModelSnapshotCloneCostFixture::new(bytes);
+
+    let mut group = c.benchmark_group("text_model_snapshot_clone_cost");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_with_input(
+        BenchmarkId::new("piece_table_snapshot_clone", clones),
+        &clones,
+        |b, &clones| b.iter(|| fixture.run_snapshot_clone_step(clones)),
+    );
+    group.bench_with_input(
+        BenchmarkId::new("shared_string_clone_control", clones),
+        &clones,
+        |b, &clones| b.iter(|| fixture.run_string_clone_control_step(clones)),
+    );
+    group.finish();
+}
+
+fn bench_text_model_bulk_load_large(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_TEXT_MODEL_LINES", 20_000);
+    let line_bytes = env_usize("GITCOMET_BENCH_TEXT_MODEL_LINE_BYTES", 128);
+    let fixture = TextModelBulkLoadLargeFixture::new(lines, line_bytes);
+
+    let mut group = c.benchmark_group("text_model_bulk_load_large");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_function(
+        BenchmarkId::from_parameter("piece_table_append_large"),
+        |b| b.iter(|| fixture.run_piece_table_bulk_load_step()),
+    );
+    group.bench_function(
+        BenchmarkId::from_parameter("piece_table_from_large_text"),
+        |b| b.iter(|| fixture.run_piece_table_from_large_text_step()),
+    );
+    group.bench_function(BenchmarkId::from_parameter("string_push_control"), |b| {
+        b.iter(|| fixture.run_string_bulk_load_control_step())
+    });
+    group.finish();
+}
+
+fn bench_file_diff_syntax_prepare(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_LINES", 4_000);
+    let line_bytes = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_LINE_BYTES", 128);
+    let fixture = FileDiffSyntaxPrepareFixture::new(lines, line_bytes);
+    fixture.prewarm();
+
+    let mut group = c.benchmark_group("file_diff_syntax_prepare");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+
+    let mut cold_nonce = 0u64;
+    group.bench_function(
+        BenchmarkId::from_parameter("file_diff_syntax_prepare_cold"),
+        |b| {
+            b.iter(|| {
+                cold_nonce = cold_nonce.wrapping_add(1);
+                fixture.run_prepare_cold(cold_nonce)
+            })
+        },
+    );
+    group.bench_function(
+        BenchmarkId::from_parameter("file_diff_syntax_prepare_warm"),
+        |b| b.iter(|| fixture.run_prepare_warm()),
+    );
+    group.finish();
+}
+
+fn bench_file_diff_syntax_query_stress(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_STRESS_LINES", 256);
+    let line_bytes = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_STRESS_LINE_BYTES", 4_096);
+    let nesting_depth = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_STRESS_NESTING", 128);
+    let fixture = FileDiffSyntaxPrepareFixture::new_query_stress(lines, line_bytes, nesting_depth);
+
+    let mut group = c.benchmark_group("file_diff_syntax_query_stress");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+
+    let mut nonce = 0u64;
+    group.bench_function(BenchmarkId::from_parameter("nested_long_lines_cold"), |b| {
+        b.iter(|| {
+            nonce = nonce.wrapping_add(1);
+            fixture.run_prepare_cold(nonce)
+        })
+    });
+    group.finish();
+}
+
+fn bench_file_diff_syntax_reparse(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_LINES", 4_000);
+    let line_bytes = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_LINE_BYTES", 128);
+    let mut small_fixture = FileDiffSyntaxReparseFixture::new(lines, line_bytes);
+    let mut large_fixture = FileDiffSyntaxReparseFixture::new(lines, line_bytes);
+
+    let mut group = c.benchmark_group("file_diff_syntax_reparse");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_function(
+        BenchmarkId::from_parameter("file_diff_syntax_reparse_small_edit"),
+        |b| b.iter(|| small_fixture.run_small_edit_step()),
+    );
+    group.bench_function(
+        BenchmarkId::from_parameter("file_diff_syntax_reparse_large_edit"),
+        |b| b.iter(|| large_fixture.run_large_edit_step()),
+    );
+    group.finish();
+}
+
+fn bench_file_diff_syntax_cache_drop(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_DROP_LINES", 2_048);
+    let tokens_per_line = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_DROP_TOKENS_PER_LINE", 8);
+    let replacements = env_usize("GITCOMET_BENCH_FILE_DIFF_SYNTAX_DROP_REPLACEMENTS", 4);
+    let fixture = FileDiffSyntaxCacheDropFixture::new(lines, tokens_per_line, replacements);
+
+    let mut group = c.benchmark_group("file_diff_syntax_cache_drop");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_with_input(
+        BenchmarkId::new("deferred_drop", replacements),
+        &replacements,
+        |b, &_replacements| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                let mut seed = 0usize;
+                for _ in 0..iters {
+                    let _ = fixture.flush_deferred_drop_queue();
+                    total = total.saturating_add(fixture.run_deferred_drop_timed_step(seed));
+                    seed = seed.wrapping_add(1);
+                }
+                total
+            })
+        },
+    );
+    let _ = fixture.flush_deferred_drop_queue();
+    group.bench_with_input(
+        BenchmarkId::new("inline_drop_control", replacements),
+        &replacements,
+        |b, &_replacements| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                let mut seed = 0usize;
+                for _ in 0..iters {
+                    total = total.saturating_add(fixture.run_inline_drop_control_timed_step(seed));
+                    seed = seed.wrapping_add(1);
+                }
+                total
+            })
+        },
+    );
+    group.finish();
+}
+
+fn bench_prepared_syntax_multidoc_cache_hit_rate(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_PREPARED_SYNTAX_LINES", 4_000);
+    let line_bytes = env_usize("GITCOMET_BENCH_PREPARED_SYNTAX_LINE_BYTES", 128);
+    let docs = env_usize("GITCOMET_BENCH_PREPARED_SYNTAX_HOT_DOCS", 6);
+    let fixture = FileDiffSyntaxPrepareFixture::new(lines, line_bytes);
+
+    let mut group = c.benchmark_group("prepared_syntax_multidoc_cache_hit_rate");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    let mut nonce = 0u64;
+    group.bench_with_input(BenchmarkId::new("hot_docs", docs), &docs, |b, &docs| {
+        b.iter(|| {
+            nonce = nonce.wrapping_add(1);
+            fixture.run_prepared_syntax_multidoc_cache_hit_rate_step(docs, nonce)
+        })
+    });
+    group.finish();
+}
+
+fn bench_prepared_syntax_chunk_miss_cost(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_PREPARED_SYNTAX_LINES", 4_000);
+    let line_bytes = env_usize("GITCOMET_BENCH_PREPARED_SYNTAX_LINE_BYTES", 128);
+    let fixture = FileDiffSyntaxPrepareFixture::new(lines, line_bytes);
+
+    let mut group = c.benchmark_group("prepared_syntax_chunk_miss_cost");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    let mut nonce = 0u64;
+    group.bench_function(BenchmarkId::from_parameter("chunk_miss"), |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                nonce = nonce.wrapping_add(1);
+                total =
+                    total.saturating_add(fixture.run_prepared_syntax_chunk_miss_cost_step(nonce));
+            }
+            total
+        })
+    });
+    group.finish();
+}
+
+fn bench_worktree_preview_render(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_WORKTREE_PREVIEW_LINES", 4_000);
+    let window = env_usize("GITCOMET_BENCH_WORKTREE_PREVIEW_WINDOW", 200);
+    let line_bytes = env_usize("GITCOMET_BENCH_WORKTREE_PREVIEW_LINE_BYTES", 128);
+    let fixture = WorktreePreviewRenderFixture::new(lines, line_bytes);
+
+    let mut group = c.benchmark_group("worktree_preview_render");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_with_input(
+        BenchmarkId::new("cached_lookup_window", window),
+        &window,
+        |b, &window| {
+            let mut start = 0usize;
+            b.iter(|| {
+                let h = fixture.run_cached_lookup_step(start, window);
+                start = start.wrapping_add(window) % lines.max(1);
+                h
+            })
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("render_time_prepare_window", window),
+        &window,
+        |b, &window| {
+            let mut start = 0usize;
+            b.iter(|| {
+                let h = fixture.run_render_time_prepare_step(start, window);
+                start = start.wrapping_add(window) % lines.max(1);
+                h
+            })
+        },
+    );
+    group.finish();
+}
+
 fn bench_conflict_three_way_scroll(c: &mut Criterion) {
     let lines = env_usize("GITCOMET_BENCH_CONFLICT_LINES", 10_000);
     let conflict_blocks = env_usize("GITCOMET_BENCH_CONFLICT_BLOCKS", 300);
@@ -225,6 +633,23 @@ fn bench_conflict_three_way_scroll(c: &mut Criterion) {
             })
         },
     );
+    group.finish();
+}
+
+fn bench_conflict_three_way_visible_map_build(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_CONFLICT_LINES", 10_000);
+    let conflict_blocks = env_usize("GITCOMET_BENCH_CONFLICT_BLOCKS", 300);
+    let fixture = ConflictThreeWayVisibleMapBuildFixture::new(lines, conflict_blocks);
+
+    let mut group = c.benchmark_group("conflict_three_way_visible_map_build");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_function(BenchmarkId::from_parameter("linear_two_pointer"), |b| {
+        b.iter(|| fixture.run_linear_step())
+    });
+    group.bench_function(BenchmarkId::from_parameter("legacy_find_scan"), |b| {
+        b.iter(|| fixture.run_legacy_step())
+    });
     group.finish();
 }
 
@@ -306,6 +731,62 @@ fn bench_conflict_search_query_update(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_patch_diff_search_query_update(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_PATCH_DIFF_LINES", 10_000);
+    let window = env_usize("GITCOMET_BENCH_PATCH_DIFF_WINDOW", 200);
+    let mut fixture = PatchDiffSearchQueryUpdateFixture::new(lines);
+    let query_cycle = [
+        "s", "sh", "sha", "shar", "share", "shared", "shared_", "shared_1",
+    ];
+
+    let mut group = c.benchmark_group("patch_diff_search_query_update");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_with_input(
+        BenchmarkId::from_parameter(format!("window_{window}")),
+        &window,
+        |b, &window| {
+            let mut start = 0usize;
+            let mut query_ix = 0usize;
+            b.iter(|| {
+                let query = query_cycle[query_ix % query_cycle.len()];
+                let h = fixture.run_query_update_step(query, start, window);
+                query_ix = query_ix.wrapping_add(1);
+                start = start.wrapping_add(window.max(1) / 2 + 1) % fixture.visible_rows().max(1);
+                h
+            })
+        },
+    );
+    group.finish();
+}
+
+fn bench_patch_diff_paged_rows(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_PATCH_DIFF_LINES", 20_000);
+    let window = env_usize("GITCOMET_BENCH_PATCH_DIFF_WINDOW", 200);
+    let fixture = PatchDiffPagedRowsFixture::new(lines);
+
+    let mut group = c.benchmark_group("patch_diff_paged_rows");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_function(BenchmarkId::from_parameter("eager_full_materialize"), |b| {
+        b.iter(|| fixture.run_eager_full_materialize_step())
+    });
+    group.bench_with_input(
+        BenchmarkId::new("paged_first_window", window),
+        &window,
+        |b, &window| b.iter(|| fixture.run_paged_first_window_step(window)),
+    );
+    group.bench_function(
+        BenchmarkId::from_parameter("inline_visible_eager_scan"),
+        |b| b.iter(|| fixture.run_inline_visible_eager_scan_step()),
+    );
+    group.bench_function(
+        BenchmarkId::from_parameter("inline_visible_hidden_map"),
+        |b| b.iter(|| fixture.run_inline_visible_hidden_map_step()),
+    );
+    group.finish();
+}
+
 fn bench_conflict_split_resize_step(c: &mut Criterion) {
     let lines = env_usize("GITCOMET_BENCH_CONFLICT_LINES", 10_000);
     let conflict_blocks = env_usize("GITCOMET_BENCH_CONFLICT_BLOCKS", 300);
@@ -328,6 +809,25 @@ fn bench_conflict_split_resize_step(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_resolved_output_recompute_incremental(c: &mut Criterion) {
+    let lines = env_usize("GITCOMET_BENCH_CONFLICT_LINES", 10_000);
+    let conflict_blocks = env_usize("GITCOMET_BENCH_CONFLICT_BLOCKS", 300);
+    let mut full_fixture = ResolvedOutputRecomputeIncrementalFixture::new(lines, conflict_blocks);
+    let mut incremental_fixture =
+        ResolvedOutputRecomputeIncrementalFixture::new(lines, conflict_blocks);
+
+    let mut group = c.benchmark_group("resolved_output_recompute_incremental");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.bench_function(BenchmarkId::from_parameter("full_recompute"), |b| {
+        b.iter(|| full_fixture.run_full_recompute_step())
+    });
+    group.bench_function(BenchmarkId::from_parameter("incremental_recompute"), |b| {
+        b.iter(|| incremental_fixture.run_incremental_recompute_step())
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_open_repo,
@@ -335,10 +835,28 @@ criterion_group!(
     bench_history_graph,
     bench_commit_details,
     bench_large_file_diff_scroll,
+    bench_text_input_prepaint_windowed,
+    bench_text_input_runs_streamed_highlight,
+    bench_text_input_long_line_cap,
+    bench_text_input_wrap_incremental_tabs,
+    bench_text_input_wrap_incremental_burst_edits,
+    bench_text_model_snapshot_clone_cost,
+    bench_text_model_bulk_load_large,
+    bench_file_diff_syntax_prepare,
+    bench_file_diff_syntax_query_stress,
+    bench_file_diff_syntax_reparse,
+    bench_file_diff_syntax_cache_drop,
+    bench_prepared_syntax_multidoc_cache_hit_rate,
+    bench_prepared_syntax_chunk_miss_cost,
+    bench_worktree_preview_render,
     bench_conflict_three_way_scroll,
+    bench_conflict_three_way_visible_map_build,
     bench_conflict_two_way_split_scroll,
     bench_conflict_resolved_output_gutter_scroll,
     bench_conflict_search_query_update,
-    bench_conflict_split_resize_step
+    bench_patch_diff_search_query_update,
+    bench_patch_diff_paged_rows,
+    bench_conflict_split_resize_step,
+    bench_resolved_output_recompute_incremental
 );
 criterion_main!(benches);
