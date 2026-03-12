@@ -15,7 +15,7 @@ Fast, resource-efficient, fully open source Git GUI written in Rust, targeting G
 - Cross-platform (Windows, Linux, macOS)
 
 
-<img alt="GitComet screenshot" src="https://raw.githubusercontent.com/Auto-Explore/GitComet/refs/heads/main/assets/gitcomet_screenshot.png"/>
+<img alt="GitComet demo" src="assets/gitcomet.gif"/>
 
 ### Quick start
 
