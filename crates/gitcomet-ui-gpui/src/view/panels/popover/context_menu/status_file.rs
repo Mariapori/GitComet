@@ -128,20 +128,6 @@ pub(super) fn model(
             },
         }),
     });
-    items.push(ContextMenuItem::Entry {
-        label: "Blame".into(),
-        icon: Some("≡".into()),
-        shortcut: Some("B".into()),
-        disabled: false,
-        action: Box::new(ContextMenuAction::OpenPopover {
-            kind: PopoverKind::Blame {
-                repo_id,
-                path: path.clone(),
-                rev: None,
-            },
-        }),
-    });
-
     if is_conflicted {
         items.push(ContextMenuItem::Separator);
         let n = selected_count;

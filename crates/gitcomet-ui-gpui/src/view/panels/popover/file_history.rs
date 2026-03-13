@@ -74,7 +74,7 @@ pub(super) fn panel(
                 .collect::<Vec<SharedString>>();
 
             if let Some(search) = this.file_history_search_input.clone() {
-                components::PickerPrompt::new(search)
+                components::PickerPrompt::new(search, this.picker_prompt_scroll.clone())
                     .items(items)
                     .empty_text("No commits")
                     .max_height(px(340.0))

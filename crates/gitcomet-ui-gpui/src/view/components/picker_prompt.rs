@@ -1,13 +1,16 @@
 use super::CONTROL_HEIGHT_MD_PX;
-use crate::kit::TextInput;
+use crate::kit::{Scrollbar, TextInput};
 use crate::theme::AppTheme;
 use gpui::prelude::*;
-use gpui::{ClickEvent, CursorStyle, Div, Entity, FontWeight, SharedString, Window, div, px};
+use gpui::{
+    ClickEvent, CursorStyle, Div, Entity, FontWeight, ScrollHandle, SharedString, Window, div, px,
+};
 use std::ops::Range;
 use std::sync::Arc;
 
 pub struct PickerPrompt {
     query_input: Entity<TextInput>,
+    scroll_handle: ScrollHandle,
     items: Vec<SharedString>,
     empty_text: SharedString,
     max_height: gpui::Pixels,
@@ -17,9 +20,10 @@ type OnSelectFn<V> =
     dyn Fn(&mut V, usize, &ClickEvent, &mut Window, &mut gpui::Context<V>) + 'static;
 
 impl PickerPrompt {
-    pub fn new(query_input: Entity<TextInput>) -> Self {
+    pub fn new(query_input: Entity<TextInput>, scroll_handle: ScrollHandle) -> Self {
         Self {
             query_input,
+            scroll_handle,
             items: Vec::new(),
             empty_text: "No matches".into(),
             max_height: px(360.0),
@@ -48,6 +52,7 @@ impl PickerPrompt {
         on_select: impl Fn(&mut V, usize, &ClickEvent, &mut Window, &mut gpui::Context<V>) + 'static,
     ) -> Div {
         let on_select: Arc<OnSelectFn<V>> = Arc::new(on_select);
+        let scroll_handle = self.scroll_handle;
 
         let query = self
             .query_input
@@ -72,7 +77,8 @@ impl PickerPrompt {
             .flex()
             .flex_col()
             .overflow_y_scroll()
-            .max_h(self.max_height);
+            .max_h(self.max_height)
+            .track_scroll(&scroll_handle);
 
         if matches.is_empty() {
             list = list.child(
@@ -111,7 +117,22 @@ impl PickerPrompt {
             }
         }
 
-        body.child(list)
+        let scrollbar = {
+            let scrollbar = Scrollbar::new("picker_prompt_scrollbar", scroll_handle);
+            #[cfg(test)]
+            let scrollbar = scrollbar.debug_selector("picker_prompt_scrollbar");
+            scrollbar.render(theme)
+        };
+
+        body.child(
+            div()
+                .id("picker_prompt_list_container")
+                .relative()
+                .w_full()
+                .min_w(px(0.0))
+                .child(list)
+                .child(scrollbar),
+        )
     }
 }
 
@@ -158,21 +179,22 @@ fn highlighted_label(
     query: &str,
     range: Option<Range<usize>>,
 ) -> Div {
+    let base = div()
+        .flex()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_sm();
+
     let Some(range) = range.filter(|_| !query.is_empty()) else {
-        return div().min_w(px(0.0)).text_sm().child(label.to_string());
+        return base.child(label.to_string());
     };
 
     let prefix = label.get(..range.start).unwrap_or("");
     let hit = label.get(range.clone()).unwrap_or("");
     let suffix = label.get(range.end..).unwrap_or("");
 
-    div()
-        .flex()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_sm()
-        .child(prefix.to_string())
+    base.child(prefix.to_string())
         .child(
             div()
                 .font_weight(FontWeight::BOLD)

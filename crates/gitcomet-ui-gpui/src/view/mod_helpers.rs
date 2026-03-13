@@ -645,11 +645,6 @@ pub(super) enum PopoverKind {
         repo_id: RepoId,
         path: std::path::PathBuf,
     },
-    Blame {
-        repo_id: RepoId,
-        path: std::path::PathBuf,
-        rev: Option<String>,
-    },
     PushSetUpstreamPrompt {
         repo_id: RepoId,
         remote: String,

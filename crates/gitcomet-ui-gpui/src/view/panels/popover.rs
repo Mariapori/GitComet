@@ -1,7 +1,6 @@
 use super::*;
 
 mod app_menu;
-mod blame;
 mod branch_picker;
 mod checkout_remote_branch_prompt;
 mod clone_repo;
@@ -86,6 +85,7 @@ pub(in super::super) struct PopoverHost {
     worktree_picker_search_input: Option<Entity<components::TextInput>>,
     submodule_picker_search_input: Option<Entity<components::TextInput>>,
     diff_hunk_picker_search_input: Option<Entity<components::TextInput>>,
+    picker_prompt_scroll: ScrollHandle,
 
     clone_repo_url_input: Entity<components::TextInput>,
     clone_repo_parent_dir_input: Entity<components::TextInput>,
@@ -102,7 +102,6 @@ pub(in super::super) struct PopoverHost {
     submodule_url_input: Entity<components::TextInput>,
     submodule_path_input: Entity<components::TextInput>,
 
-    blame_scroll: UniformListScrollHandle,
     open_source_licenses_scroll: ScrollHandle,
 }
 
@@ -410,6 +409,7 @@ impl PopoverHost {
             worktree_picker_search_input: None,
             submodule_picker_search_input: None,
             diff_hunk_picker_search_input: None,
+            picker_prompt_scroll: ScrollHandle::new(),
             clone_repo_url_input,
             clone_repo_parent_dir_input,
             rebase_onto_input,
@@ -424,7 +424,6 @@ impl PopoverHost {
             worktree_ref_input,
             submodule_url_input,
             submodule_path_input,
-            blame_scroll: UniformListScrollHandle::default(),
             open_source_licenses_scroll: ScrollHandle::new(),
         }
     }
@@ -788,14 +787,6 @@ impl PopoverHost {
                         repo_id: *repo_id,
                         path: path.clone(),
                         limit: 200,
-                    });
-                }
-                PopoverKind::Blame { repo_id, path, rev } => {
-                    self.blame_scroll = UniformListScrollHandle::default();
-                    self.store.dispatch(Msg::LoadBlame {
-                        repo_id: *repo_id,
-                        path: path.clone(),
-                        rev: rev.clone(),
                     });
                 }
                 PopoverKind::PushSetUpstreamPrompt { repo_id, .. } => {
@@ -1530,7 +1521,6 @@ impl PopoverHost {
             PopoverKind::FileHistory { repo_id, path } => {
                 file_history::panel(self, repo_id, path, cx)
             }
-            PopoverKind::Blame { repo_id, path, rev } => blame::panel(self, repo_id, path, rev, cx),
             PopoverKind::PushSetUpstreamPrompt { repo_id, remote } => {
                 push_set_upstream_prompt::panel(self, repo_id, remote, cx)
             }

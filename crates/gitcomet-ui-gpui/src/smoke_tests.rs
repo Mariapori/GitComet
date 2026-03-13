@@ -8,7 +8,7 @@ use gitcomet_state::store::AppStore;
 use gpui::prelude::*;
 use gpui::{
     ClipboardItem, Decorations, KeyBinding, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    Pixels, ScrollDelta, ScrollHandle, ScrollWheelEvent, Tiling, div, px,
+    Pixels, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Tiling, div, px,
 };
 use std::path::Path;
 use std::path::PathBuf;
@@ -1329,6 +1329,119 @@ fn panel_allows_flex_body_to_have_height(cx: &mut gpui::TestAppContext) {
         .debug_bounds("diff_body")
         .expect("expected diff_body to be painted");
     assert!(bounds.size.height > px(50.0));
+}
+
+struct PickerPromptScrollbarTestView {
+    theme: AppTheme,
+    input: gpui::Entity<components::TextInput>,
+    scroll_handle: ScrollHandle,
+}
+
+impl PickerPromptScrollbarTestView {
+    fn new(window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> Self {
+        let input = cx.new(|cx| {
+            components::TextInput::new(
+                components::TextInputOptions {
+                    placeholder: "Filter commits".into(),
+                    multiline: false,
+                    read_only: false,
+                    chromeless: false,
+                    soft_wrap: false,
+                },
+                window,
+                cx,
+            )
+        });
+
+        Self {
+            theme: AppTheme::zed_ayu_dark(),
+            input,
+            scroll_handle: ScrollHandle::new(),
+        }
+    }
+}
+
+impl gpui::Render for PickerPromptScrollbarTestView {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let items = (0..50)
+            .map(|ix| SharedString::from(format!("Commit {ix:02}  Synthetic history entry")))
+            .collect::<Vec<_>>();
+
+        div().size_full().bg(self.theme.colors.window_bg).child(
+            div().w(px(360.0)).child(
+                components::PickerPrompt::new(self.input.clone(), self.scroll_handle.clone())
+                    .items(items)
+                    .max_height(px(120.0))
+                    .render(self.theme, cx, |_this, _ix, _event, _window, _cx| {}),
+            ),
+        )
+    }
+}
+
+#[gpui::test]
+fn picker_prompt_scrollbar_thumb_visible_when_overflowing(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(PickerPromptScrollbarTestView::new);
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    let bounds = cx
+        .debug_bounds("picker_prompt_scrollbar")
+        .expect("expected picker_prompt_scrollbar in debug bounds");
+    assert!(bounds.size.height > px(50.0));
+
+    cx.update(|_window, app| {
+        let handle = &view.read(app).scroll_handle;
+        assert!(
+            components::Scrollbar::thumb_visible_for_test(handle, px(120.0)),
+            "expected picker prompt scrollbar thumb to be visible when overflowing"
+        );
+    });
+}
+
+#[gpui::test]
+fn picker_prompt_scrollbar_drag_scrolls_list(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(PickerPromptScrollbarTestView::new);
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    let bounds = cx
+        .debug_bounds("picker_prompt_scrollbar")
+        .expect("expected picker_prompt_scrollbar in debug bounds");
+    let start = gpui::point(bounds.right() - px(2.0), bounds.top() + px(6.0));
+
+    cx.simulate_mouse_move(start, None, Modifiers::default());
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(
+        gpui::point(start.x, start.y + px(5.0)),
+        Some(MouseButton::Left),
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_move(
+        gpui::point(start.x, start.y + px(50.0)),
+        Some(MouseButton::Left),
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        gpui::point(start.x, start.y + px(50.0)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+        let offset_y = view.read(app).scroll_handle.offset().y;
+        assert!(
+            offset_y < px(0.0),
+            "expected picker prompt scrollbar drag to scroll (offset should become negative)"
+        );
+    });
 }
 
 #[gpui::test]

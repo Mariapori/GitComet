@@ -16,7 +16,7 @@ pub(super) fn panel(this: &mut PopoverHost, cx: &mut gpui::Context<PopoverHost>)
                         .collect::<Vec<SharedString>>();
 
                     menu = menu.child(
-                        components::PickerPrompt::new(search)
+                        components::PickerPrompt::new(search, this.picker_prompt_scroll.clone())
                             .items(items)
                             .empty_text("No branches")
                             .max_height(px(240.0))

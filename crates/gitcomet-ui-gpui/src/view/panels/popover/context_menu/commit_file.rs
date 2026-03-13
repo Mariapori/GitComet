@@ -65,19 +65,6 @@ pub(super) fn model(
         }),
     });
     items.push(ContextMenuItem::Entry {
-        label: "Blame (this commit)".into(),
-        icon: Some("≡".into()),
-        shortcut: Some("B".into()),
-        disabled: false,
-        action: Box::new(ContextMenuAction::OpenPopover {
-            kind: PopoverKind::Blame {
-                repo_id,
-                path: path.to_path_buf(),
-                rev: Some(commit_id.as_ref().to_string()),
-            },
-        }),
-    });
-    items.push(ContextMenuItem::Entry {
         label: "Copy path".into(),
         icon: Some("⧉".into()),
         shortcut: Some("C".into()),

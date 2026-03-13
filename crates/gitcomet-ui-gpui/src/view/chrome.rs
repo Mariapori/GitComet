@@ -454,10 +454,8 @@ impl Render for TitleBarView {
             theme.colors.text_muted,
             if theme.is_dark { 0.34 } else { 0.28 },
         );
-        let free_badge_text = with_alpha(
-            theme.colors.text,
-            if theme.is_dark { 0.72 } else { 0.62 },
-        );
+        let free_badge_text =
+            with_alpha(theme.colors.text, if theme.is_dark { 0.72 } else { 0.62 });
         let free_badge = div()
             .id("free_badge")
             .h(px(18.0))

@@ -378,6 +378,16 @@ impl HistoryView {
                         let show_author_pref = this.history_show_author;
                         let show_date_pref = this.history_show_date;
                         let show_sha_pref = this.history_show_sha;
+                        let drag_layout = super::HistoryColumnDragLayout {
+                            show_author: show_author_pref,
+                            show_date: show_date_pref,
+                            show_sha: show_sha_pref,
+                            branch_w: this.history_col_branch,
+                            graph_w: this.history_col_graph,
+                            author_w: this.history_col_author,
+                            date_w: this.history_col_date,
+                            sha_w: this.history_col_sha,
+                        };
                         let mut changed = false;
                         match state.handle {
                             HistoryColResizeHandle::Branch => {
@@ -386,14 +396,7 @@ impl HistoryView {
                                     HistoryColResizeHandle::Branch,
                                     candidate,
                                     available_width,
-                                    show_author_pref,
-                                    show_date_pref,
-                                    show_sha_pref,
-                                    this.history_col_branch,
-                                    this.history_col_graph,
-                                    this.history_col_author,
-                                    this.history_col_date,
-                                    this.history_col_sha,
+                                    drag_layout,
                                 );
                                 if this.history_col_branch != next {
                                     this.history_col_branch = next;
@@ -406,14 +409,7 @@ impl HistoryView {
                                     HistoryColResizeHandle::Graph,
                                     candidate,
                                     available_width,
-                                    show_author_pref,
-                                    show_date_pref,
-                                    show_sha_pref,
-                                    this.history_col_branch,
-                                    this.history_col_graph,
-                                    this.history_col_author,
-                                    this.history_col_date,
-                                    this.history_col_sha,
+                                    drag_layout,
                                 );
                                 if this.history_col_graph != next {
                                     this.history_col_graph = next;
@@ -426,14 +422,7 @@ impl HistoryView {
                                     HistoryColResizeHandle::Author,
                                     candidate,
                                     available_width,
-                                    show_author_pref,
-                                    show_date_pref,
-                                    show_sha_pref,
-                                    this.history_col_branch,
-                                    this.history_col_graph,
-                                    this.history_col_author,
-                                    this.history_col_date,
-                                    this.history_col_sha,
+                                    drag_layout,
                                 );
                                 if this.history_col_author != next {
                                     this.history_col_author = next;
@@ -446,14 +435,7 @@ impl HistoryView {
                                     HistoryColResizeHandle::Date,
                                     candidate,
                                     available_width,
-                                    show_author_pref,
-                                    show_date_pref,
-                                    show_sha_pref,
-                                    this.history_col_branch,
-                                    this.history_col_graph,
-                                    this.history_col_author,
-                                    this.history_col_date,
-                                    this.history_col_sha,
+                                    drag_layout,
                                 );
                                 if this.history_col_date != next {
                                     this.history_col_date = next;
@@ -466,14 +448,7 @@ impl HistoryView {
                                     HistoryColResizeHandle::Sha,
                                     candidate,
                                     available_width,
-                                    show_author_pref,
-                                    show_date_pref,
-                                    show_sha_pref,
-                                    this.history_col_branch,
-                                    this.history_col_graph,
-                                    this.history_col_author,
-                                    this.history_col_date,
-                                    this.history_col_sha,
+                                    drag_layout,
                                 );
                                 if this.history_col_sha != next {
                                     this.history_col_sha = next;

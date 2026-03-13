@@ -22,7 +22,7 @@ pub(super) fn panel(
                 if let Some(search) = this.submodule_picker_search_input.clone() {
                     components::context_menu(
                         theme,
-                        components::PickerPrompt::new(search)
+                        components::PickerPrompt::new(search, this.picker_prompt_scroll.clone())
                             .items(items)
                             .empty_text("No submodules")
                             .max_height(px(260.0))

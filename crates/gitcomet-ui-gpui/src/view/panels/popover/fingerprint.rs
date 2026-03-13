@@ -89,7 +89,6 @@ fn repo_for_popover<'a>(state: &'a AppState, popover: &PopoverKind) -> Option<&'
         | PopoverKind::CreateTagPrompt { repo_id, .. }
         | PopoverKind::Repo { repo_id, .. }
         | PopoverKind::FileHistory { repo_id, .. }
-        | PopoverKind::Blame { repo_id, .. }
         | PopoverKind::PushSetUpstreamPrompt { repo_id, .. }
         | PopoverKind::ForcePushConfirm { repo_id }
         | PopoverKind::MergeAbortConfirm { repo_id }
@@ -161,12 +160,6 @@ fn hash_repo_for_popover<H: Hasher>(repo: &RepoState, popover: &PopoverKind, has
         PopoverKind::FileHistory { .. } => {
             repo.history_state.file_history_path.hash(hasher);
             view_fingerprint::hash_loadable_arc(&repo.history_state.file_history, hasher);
-        }
-
-        PopoverKind::Blame { .. } => {
-            repo.history_state.blame_path.hash(hasher);
-            repo.history_state.blame_rev.hash(hasher);
-            view_fingerprint::hash_loadable_arc(&repo.history_state.blame, hasher);
         }
 
         PopoverKind::DiffHunks
@@ -305,13 +298,6 @@ fn hash_popover_kind<H: Hasher>(kind: &PopoverKind, hasher: &mut H) {
             repo_id.hash(hasher);
             path.hash(hasher);
         }
-        PopoverKind::Blame { repo_id, path, rev } => {
-            29u8.hash(hasher);
-            repo_id.hash(hasher);
-            path.hash(hasher);
-            rev.hash(hasher);
-        }
-
         PopoverKind::PushSetUpstreamPrompt { repo_id, remote } => {
             30u8.hash(hasher);
             repo_id.hash(hasher);

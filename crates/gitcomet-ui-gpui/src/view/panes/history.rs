@@ -27,10 +27,8 @@ fn history_column_static_bounds(handle: HistoryColResizeHandle) -> (Pixels, Pixe
     }
 }
 
-fn history_column_drag_clamped_width(
-    handle: HistoryColResizeHandle,
-    candidate: Pixels,
-    available_width: Pixels,
+#[derive(Copy, Clone)]
+struct HistoryColumnDragLayout {
     show_author: bool,
     show_date: bool,
     show_sha: bool,
@@ -39,38 +37,93 @@ fn history_column_drag_clamped_width(
     author_w: Pixels,
     date_w: Pixels,
     sha_w: Pixels,
+}
+
+fn history_column_drag_clamped_width(
+    handle: HistoryColResizeHandle,
+    candidate: Pixels,
+    available_width: Pixels,
+    layout: HistoryColumnDragLayout,
 ) -> Pixels {
     let (min_w, static_max_w) = history_column_static_bounds(handle);
     let right_fixed_w = match handle {
         HistoryColResizeHandle::Branch => {
-            graph_w
-                + if show_author { author_w } else { px(0.0) }
-                + if show_date { date_w } else { px(0.0) }
-                + if show_sha { sha_w } else { px(0.0) }
+            layout.graph_w
+                + if layout.show_author {
+                    layout.author_w
+                } else {
+                    px(0.0)
+                }
+                + if layout.show_date {
+                    layout.date_w
+                } else {
+                    px(0.0)
+                }
+                + if layout.show_sha {
+                    layout.sha_w
+                } else {
+                    px(0.0)
+                }
         }
         HistoryColResizeHandle::Graph => {
-            branch_w
-                + if show_author { author_w } else { px(0.0) }
-                + if show_date { date_w } else { px(0.0) }
-                + if show_sha { sha_w } else { px(0.0) }
+            layout.branch_w
+                + if layout.show_author {
+                    layout.author_w
+                } else {
+                    px(0.0)
+                }
+                + if layout.show_date {
+                    layout.date_w
+                } else {
+                    px(0.0)
+                }
+                + if layout.show_sha {
+                    layout.sha_w
+                } else {
+                    px(0.0)
+                }
         }
         HistoryColResizeHandle::Author => {
-            branch_w
-                + graph_w
-                + if show_date { date_w } else { px(0.0) }
-                + if show_sha { sha_w } else { px(0.0) }
+            layout.branch_w
+                + layout.graph_w
+                + if layout.show_date {
+                    layout.date_w
+                } else {
+                    px(0.0)
+                }
+                + if layout.show_sha {
+                    layout.sha_w
+                } else {
+                    px(0.0)
+                }
         }
         HistoryColResizeHandle::Date => {
-            branch_w
-                + graph_w
-                + if show_author { author_w } else { px(0.0) }
-                + if show_sha { sha_w } else { px(0.0) }
+            layout.branch_w
+                + layout.graph_w
+                + if layout.show_author {
+                    layout.author_w
+                } else {
+                    px(0.0)
+                }
+                + if layout.show_sha {
+                    layout.sha_w
+                } else {
+                    px(0.0)
+                }
         }
         HistoryColResizeHandle::Sha => {
-            branch_w
-                + graph_w
-                + if show_author { author_w } else { px(0.0) }
-                + if show_date { date_w } else { px(0.0) }
+            layout.branch_w
+                + layout.graph_w
+                + if layout.show_author {
+                    layout.author_w
+                } else {
+                    px(0.0)
+                }
+                + if layout.show_date {
+                    layout.date_w
+                } else {
+                    px(0.0)
+                }
         }
     };
 
@@ -1008,6 +1061,19 @@ mod tests {
         }
     }
 
+    fn all_columns_visible_drag_layout() -> HistoryColumnDragLayout {
+        HistoryColumnDragLayout {
+            show_author: true,
+            show_date: true,
+            show_sha: true,
+            branch_w: px(HISTORY_COL_BRANCH_PX),
+            graph_w: px(HISTORY_COL_GRAPH_PX),
+            author_w: px(HISTORY_COL_AUTHOR_PX),
+            date_w: px(HISTORY_COL_DATE_PX),
+            sha_w: px(HISTORY_COL_SHA_PX),
+        }
+    }
+
     #[test]
     fn stash_tip_detection_requires_stash_like_message_and_multiple_parents() {
         assert!(is_probable_stash_tip(&commit(
@@ -1048,18 +1114,12 @@ mod tests {
     #[test]
     fn history_column_drag_clamp_respects_static_maximums() {
         let available = history_columns_available_width(px(2200.0));
+        let layout = all_columns_visible_drag_layout();
         let next = history_column_drag_clamped_width(
             HistoryColResizeHandle::Branch,
             px(900.0),
             available,
-            true,
-            true,
-            true,
-            px(HISTORY_COL_BRANCH_PX),
-            px(HISTORY_COL_GRAPH_PX),
-            px(HISTORY_COL_AUTHOR_PX),
-            px(HISTORY_COL_DATE_PX),
-            px(HISTORY_COL_SHA_PX),
+            layout,
         );
         assert_eq!(next, px(HISTORY_COL_BRANCH_MAX_PX));
     }
@@ -1067,18 +1127,12 @@ mod tests {
     #[test]
     fn history_column_drag_clamp_preserves_message_space() {
         let available = history_columns_available_width(px(1600.0));
+        let layout = all_columns_visible_drag_layout();
         let next = history_column_drag_clamped_width(
             HistoryColResizeHandle::Branch,
             px(500.0),
             available,
-            true,
-            true,
-            true,
-            px(HISTORY_COL_BRANCH_PX),
-            px(HISTORY_COL_GRAPH_PX),
-            px(HISTORY_COL_AUTHOR_PX),
-            px(HISTORY_COL_DATE_PX),
-            px(HISTORY_COL_SHA_PX),
+            layout,
         );
 
         let next_f: f32 = next.into();
@@ -1088,18 +1142,12 @@ mod tests {
     #[test]
     fn history_column_drag_clamp_never_goes_below_minimum() {
         let available = history_columns_available_width(px(2200.0));
+        let layout = all_columns_visible_drag_layout();
         let next = history_column_drag_clamped_width(
             HistoryColResizeHandle::Sha,
             px(0.0),
             available,
-            true,
-            true,
-            true,
-            px(HISTORY_COL_BRANCH_PX),
-            px(HISTORY_COL_GRAPH_PX),
-            px(HISTORY_COL_AUTHOR_PX),
-            px(HISTORY_COL_DATE_PX),
-            px(HISTORY_COL_SHA_PX),
+            layout,
         );
         assert_eq!(next, px(HISTORY_COL_SHA_MIN_PX));
     }

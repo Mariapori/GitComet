@@ -15,7 +15,7 @@ pub(super) fn panel(this: &mut PopoverHost, cx: &mut gpui::Context<PopoverHost>)
 
         components::context_menu(
             theme,
-            components::PickerPrompt::new(search)
+            components::PickerPrompt::new(search, this.picker_prompt_scroll.clone())
                 .items(items)
                 .empty_text("No repositories")
                 .max_height(px(260.0))
