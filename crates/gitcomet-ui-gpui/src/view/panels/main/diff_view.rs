@@ -617,7 +617,7 @@ impl MainPaneView {
                             .child(
                                 components::Scrollbar::new(
                                     "worktree_preview_scrollbar",
-                                    scroll_handle.clone(),
+                                    self.worktree_preview_scroll.clone(),
                                 )
                                 .render(theme),
                             )
@@ -1544,13 +1544,6 @@ impl MainPaneView {
                                 )
                                 .track_scroll(self.conflict_resolver_diff_scroll.clone());
 
-                                let scroll_handle = self
-                                    .conflict_resolver_diff_scroll
-                                    .0
-                                    .borrow()
-                                    .base_handle
-                                    .clone();
-
                                 div()
                                     .id("conflict_resolver_diff_scroll")
                                     .relative()
@@ -1561,7 +1554,7 @@ impl MainPaneView {
                                     .child(
                                         components::Scrollbar::new(
                                             "conflict_resolver_diff_scrollbar",
-                                            scroll_handle,
+                                            self.conflict_resolver_diff_scroll.clone(),
                                         )
                                         .always_visible()
                                         .render(theme),
@@ -1710,12 +1703,6 @@ impl MainPaneView {
                                             .bg(theme.colors.window_bg)
                                             .child(
                                                 {
-                                                    let output_scroll_handle = self
-                                                        .conflict_resolved_preview_scroll
-                                                        .0
-                                                        .borrow()
-                                                        .base_handle
-                                                        .clone();
                                                     let outline_len =
                                                         self.conflict_resolved_preview_line_count;
                                                     let outline_list = uniform_list(
@@ -1814,7 +1801,8 @@ impl MainPaneView {
                                                         .child(
                                                             components::Scrollbar::new(
                                                                 "conflict_resolver_output_scrollbar",
-                                                                output_scroll_handle.clone(),
+                                                                self.conflict_resolved_preview_scroll
+                                                                    .clone(),
                                                             )
                                                             .always_visible()
                                                             .render(theme),
@@ -1931,7 +1919,7 @@ impl MainPaneView {
                                                 .child(
                                                     components::Scrollbar::new(
                                                         "conflict_compare_scrollbar",
-                                                        scroll_handle.clone(),
+                                                        self.diff_scroll.clone(),
                                                     )
                                                     .always_visible()
                                                     .render(theme),
@@ -2057,7 +2045,7 @@ impl MainPaneView {
                                                 .child(
                                                     components::Scrollbar::new(
                                                         "diff_scrollbar",
-                                                        scroll_handle.clone(),
+                                                        self.diff_scroll.clone(),
                                                     )
                                                     .markers(markers)
                                                     .always_visible()
@@ -2306,7 +2294,7 @@ impl MainPaneView {
                                                 .child(
                                                     components::Scrollbar::new(
                                                         "diff_scrollbar",
-                                                        scroll_handle.clone(),
+                                                        self.diff_scroll.clone(),
                                                     )
                                                     .markers(markers)
                                                     .always_visible()
