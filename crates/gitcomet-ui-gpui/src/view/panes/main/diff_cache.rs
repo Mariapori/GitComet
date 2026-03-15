@@ -2653,6 +2653,71 @@ mod tests {
     }
 
     #[test]
+    fn build_single_markdown_preview_document_from_deleted_markdown_table_preview_parses() {
+        let diff = vec![
+            AnnotatedDiffLine {
+                kind: gitcomet_core::domain::DiffLineKind::Header,
+                text: Arc::from("diff --git a/docs/table.md b/docs/table.md"),
+                old_line: None,
+                new_line: None,
+            },
+            AnnotatedDiffLine {
+                kind: gitcomet_core::domain::DiffLineKind::Header,
+                text: Arc::from("deleted file mode 100644"),
+                old_line: None,
+                new_line: None,
+            },
+            AnnotatedDiffLine {
+                kind: gitcomet_core::domain::DiffLineKind::Remove,
+                text: Arc::from("-| **Header Bold** | B |"),
+                old_line: Some(1),
+                new_line: None,
+            },
+            AnnotatedDiffLine {
+                kind: gitcomet_core::domain::DiffLineKind::Remove,
+                text: Arc::from("-| --- | --- |"),
+                old_line: Some(2),
+                new_line: None,
+            },
+            AnnotatedDiffLine {
+                kind: gitcomet_core::domain::DiffLineKind::Remove,
+                text: Arc::from("-| [link](https://example.com) | plain |"),
+                old_line: Some(3),
+                new_line: None,
+            },
+        ];
+        let workdir = PathBuf::from("repo");
+        let target = DiffTarget::WorkingTree {
+            path: PathBuf::from("docs/table.md"),
+            area: DiffArea::Unstaged,
+        };
+
+        let preview = crate::view::diff_preview::build_deleted_file_preview_from_diff(
+            &diff,
+            &workdir,
+            Some(&target),
+        )
+        .expect("deleted markdown preview should reconstruct from diff");
+        let document =
+            build_single_markdown_preview_document_from_lines(&preview.lines, preview.source_len)
+                .expect("deleted markdown table preview should parse");
+        let table_rows = document
+            .rows
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.kind,
+                    crate::view::markdown_preview::MarkdownPreviewRowKind::TableRow { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(table_rows.len(), 2);
+        assert_eq!(table_rows[0].text.as_ref(), "Header Bold | B");
+        assert_eq!(table_rows[1].text.as_ref(), "link        | plain");
+    }
+
+    #[test]
     fn prepared_syntax_document_key_includes_repo_rev_path_and_view_mode() {
         let path = Path::new("src/lib.rs");
         let base = prepared_syntax_document_key(

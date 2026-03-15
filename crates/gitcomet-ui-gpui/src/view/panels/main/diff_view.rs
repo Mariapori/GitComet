@@ -678,6 +678,7 @@ impl MainPaneView {
                                         .relative()
                                         .h_full()
                                         .min_h(px(0.0))
+                                        .bg(theme.colors.window_bg)
                                         .child(list)
                                         .child(
                                             components::Scrollbar::new(
@@ -713,6 +714,7 @@ impl MainPaneView {
                         });
                         div()
                             .id("worktree_preview_error_scroll")
+                            .bg(theme.colors.window_bg)
                             .flex()
                             .flex_col()
                             .flex_1()
@@ -745,6 +747,7 @@ impl MainPaneView {
                                 .relative()
                                 .h_full()
                                 .min_h(px(0.0))
+                                .bg(theme.colors.window_bg)
                                 .child(list)
                                 .child(
                                     components::Scrollbar::new(

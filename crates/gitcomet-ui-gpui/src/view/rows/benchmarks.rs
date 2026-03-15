@@ -2107,6 +2107,8 @@ impl MarkdownPreviewFixture {
             start..end,
             None,
             px(0.0),
+            "benchmark_markdown_preview",
+            None,
         )
     }
 }

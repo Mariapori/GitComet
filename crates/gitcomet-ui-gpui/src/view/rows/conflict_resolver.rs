@@ -67,6 +67,32 @@ fn render_conflict_markdown_preview_rows(
         return Vec::new();
     };
     let document = Arc::clone(document);
+    let (row_id_prefix, horizontal_scroll_handle) = match side {
+        ThreeWayColumn::Base => (
+            "conflict_markdown_preview_base",
+            this.conflict_resolver_diff_scroll
+                .0
+                .borrow()
+                .base_handle
+                .clone(),
+        ),
+        ThreeWayColumn::Ours => (
+            "conflict_markdown_preview_ours",
+            this.conflict_preview_ours_scroll
+                .0
+                .borrow()
+                .base_handle
+                .clone(),
+        ),
+        ThreeWayColumn::Theirs => (
+            "conflict_markdown_preview_theirs",
+            this.conflict_preview_theirs_scroll
+                .0
+                .borrow()
+                .base_handle
+                .clone(),
+        ),
+    };
     this.update_markdown_preview_horizontal_min_width(
         document.as_ref(),
         range.clone(),
@@ -80,6 +106,8 @@ fn render_conflict_markdown_preview_rows(
         range,
         None,
         this.diff_horizontal_min_width,
+        row_id_prefix,
+        Some(horizontal_scroll_handle),
     )
 }
 
