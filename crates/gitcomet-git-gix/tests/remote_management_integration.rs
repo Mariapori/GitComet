@@ -201,13 +201,17 @@ fn require_git_local_push_for_remote_management_tests() -> bool {
     true
 }
 
-fn init_repo_with_user(repo: &Path) {
-    run_git(repo, &["init"]);
+fn configure_repo_with_user(repo: &Path) {
     run_git(repo, &["config", "user.email", "you@example.com"]);
     run_git(repo, &["config", "user.name", "You"]);
     run_git(repo, &["config", "commit.gpgsign", "false"]);
     run_git(repo, &["config", "core.autocrlf", "false"]);
     run_git(repo, &["config", "core.eol", "lf"]);
+}
+
+fn init_repo_with_user(repo: &Path) {
+    run_git(repo, &["init"]);
+    configure_repo_with_user(repo);
 }
 
 #[test]
@@ -343,6 +347,64 @@ fn push_with_output_sets_upstream_when_missing() {
         !remote_head.trim().is_empty(),
         "expected pushed feature branch on origin"
     );
+}
+
+#[test]
+fn push_with_output_uses_tracked_upstream_when_branch_names_differ() {
+    let _guard = remote_management_test_lock();
+    if !require_git_local_push_for_remote_management_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let remote_repo = root.join("remote.git");
+    let work_repo = root.join("work");
+    fs::create_dir_all(&remote_repo).expect("create remote repo dir");
+    fs::create_dir_all(&work_repo).expect("create work repo dir");
+
+    run_git(&remote_repo, &["init", "--bare", "-b", "main"]);
+    run_git(&work_repo, &["init", "-b", "main"]);
+    configure_repo_with_user(&work_repo);
+
+    let remote_str = git_remote_url(&remote_repo);
+    run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
+    run_git(&work_repo, &["config", "push.default", "simple"]);
+
+    fs::write(work_repo.join("file.txt"), "base\n").expect("write base file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+    run_git(&work_repo, &["push", "-u", "origin", "main"]);
+
+    run_git(&work_repo, &["checkout", "-b", "main2"]);
+    run_git(
+        &work_repo,
+        &["branch", "--set-upstream-to", "origin/main", "main2"],
+    );
+
+    fs::write(work_repo.join("file.txt"), "base\nnext\n").expect("write updated file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "next"],
+    );
+
+    let local_head = run_git_capture(&work_repo, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    let backend = GixBackend;
+    let opened = backend.open(&work_repo).expect("open work repo");
+    let output = opened.push_with_output().expect("push tracked upstream");
+    assert_eq!(output.exit_code, Some(0));
+
+    let remote_head = run_git_capture(&remote_repo, &["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_string();
+    assert_eq!(remote_head, local_head);
 }
 
 #[test]
@@ -508,7 +570,7 @@ fn push_force_without_output_updates_remote_head_after_rewrite() {
 
     run_git(&remote_repo, &["init", "--bare", "-b", "main"]);
     run_git(&work_repo, &["init", "-b", "main"]);
-    init_repo_with_user(&work_repo);
+    configure_repo_with_user(&work_repo);
 
     let remote_str = git_remote_url(&remote_repo);
     run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
@@ -557,6 +619,76 @@ fn push_force_without_output_updates_remote_head_after_rewrite() {
 }
 
 #[test]
+fn push_force_with_output_uses_tracked_upstream_when_branch_names_differ() {
+    let _guard = remote_management_test_lock();
+    if !require_git_local_push_for_remote_management_tests() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path();
+
+    let remote_repo = root.join("remote.git");
+    let work_repo = root.join("work");
+    fs::create_dir_all(&remote_repo).expect("create remote repo dir");
+    fs::create_dir_all(&work_repo).expect("create work repo dir");
+
+    run_git(&remote_repo, &["init", "--bare", "-b", "main"]);
+    run_git(&work_repo, &["init", "-b", "main"]);
+    configure_repo_with_user(&work_repo);
+
+    let remote_str = git_remote_url(&remote_repo);
+    run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
+    run_git(&work_repo, &["config", "push.default", "simple"]);
+
+    fs::write(work_repo.join("file.txt"), "base\n").expect("write base file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+    );
+    run_git(&work_repo, &["push", "-u", "origin", "main"]);
+
+    run_git(&work_repo, &["checkout", "-b", "main2"]);
+    run_git(
+        &work_repo,
+        &["branch", "--set-upstream-to", "origin/main", "main2"],
+    );
+
+    fs::write(work_repo.join("file.txt"), "base\nnext\n").expect("write updated file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "next"],
+    );
+    run_git(&work_repo, &["push", "origin", "HEAD:refs/heads/main"]);
+    run_git(&work_repo, &["fetch", "origin"]);
+
+    run_git(&work_repo, &["reset", "--hard", "HEAD~1"]);
+    fs::write(work_repo.join("file.txt"), "base\nrewritten\n").expect("write rewritten file");
+    run_git(&work_repo, &["add", "file.txt"]);
+    run_git(
+        &work_repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "rewritten"],
+    );
+
+    let local_head = run_git_capture(&work_repo, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    let backend = GixBackend;
+    let opened = backend.open(&work_repo).expect("open work repo");
+    let output = opened
+        .push_force_with_output()
+        .expect("force push tracked upstream");
+    assert_eq!(output.exit_code, Some(0));
+
+    let remote_head = run_git_capture(&remote_repo, &["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_string();
+    assert_eq!(remote_head, local_head);
+}
+
+#[test]
 fn pull_non_output_supports_all_modes_when_upstream_exists() {
     let _guard = remote_management_test_lock();
     if !require_git_local_push_for_remote_management_tests() {
@@ -574,7 +706,7 @@ fn pull_non_output_supports_all_modes_when_upstream_exists() {
     run_git(&origin, &["init", "--bare", "-b", "main"]);
 
     run_git(&repo_a, &["init", "-b", "main"]);
-    init_repo_with_user(&repo_a);
+    configure_repo_with_user(&repo_a);
     fs::write(repo_a.join("a.txt"), "one\n").expect("write initial file");
     run_git(&repo_a, &["add", "a.txt"]);
     run_git(
@@ -593,7 +725,7 @@ fn pull_non_output_supports_all_modes_when_upstream_exists() {
             repo_b.to_string_lossy().as_ref(),
         ],
     );
-    init_repo_with_user(&repo_b);
+    configure_repo_with_user(&repo_b);
 
     fs::write(repo_a.join("a.txt"), "one\ntwo\n").expect("write updated file");
     run_git(&repo_a, &["add", "a.txt"]);
@@ -723,7 +855,7 @@ fn pull_branch_with_output_merges_named_remote_branch() {
 
     run_git(&remote_repo, &["init", "--bare", "-b", "main"]);
     run_git(&work_repo, &["init", "-b", "main"]);
-    init_repo_with_user(&work_repo);
+    configure_repo_with_user(&work_repo);
 
     let remote_str = git_remote_url(&remote_repo);
     run_git(&work_repo, &["remote", "add", "origin", &remote_str]);
