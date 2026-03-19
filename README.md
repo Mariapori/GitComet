@@ -4,6 +4,9 @@
 [![Discord](https://img.shields.io/badge/Discord-Join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/2ufDGP8RnA)
 [![Website](https://img.shields.io/badge/Website-gitcomet.dev-0A66C2?logo=googlechrome&logoColor=white)](https://gitcomet.dev)
 [![AutoExplore](https://img.shields.io/badge/AutoExplore-autoexplore.ai-0B7A75?logo=safari&logoColor=white)](https://autoexplore.ai)
+[![license](https://img.shields.io/github/license/Auto-Explore/gitcomet.svg)](LICENSE)
+[![latest](https://img.shields.io/github/v/release/Auto-Explore/gitcomet.svg)](https://github.com/Auto-Explore/gitcomet/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/Auto-Explore/gitcomet/total)](https://github.com/Auto-Explore/gitcomet/releases)
 
 **Fastest Open Source Git GUI**
 
