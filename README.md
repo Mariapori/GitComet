@@ -5,7 +5,7 @@
 [![Website](https://img.shields.io/badge/Website-gitcomet.dev-0A66C2?logo=googlechrome&logoColor=white)](https://gitcomet.dev)
 [![AutoExplore](https://img.shields.io/badge/AutoExplore-autoexplore.ai-0B7A75?logo=safari&logoColor=white)](https://autoexplore.ai)
 
-**Speed is a feature.**
+**Fastest Open Source Git GUI**
 
 GitComet is built for teams that want fast Git operations with local-first privacy, familiar workflows, and open source freedom.
 
