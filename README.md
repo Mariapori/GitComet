@@ -20,7 +20,7 @@ Available for Linux, Windows, and macOS.
 
 Download the latest prebuilt binaries/installers from [GitHub Releases](https://github.com/Auto-Explore/GitComet/releases).
 
-#### Homebrew
+#### Homebrew (macOs / Linux)
 
 install app from tap (recommended):
 
@@ -40,6 +40,22 @@ optional CLI install:
 
 ```bash
 brew install gitcomet-cli
+```
+
+#### AUR (Arch Linux)
+
+```bash
+git clone https://aur.archlinux.org/gitcomet.git
+cd gitcomet && makepkg -si
+```
+
+#### apt (Debian/Ubuntu)
+
+```bash
+curl -fsSL https://apt.gitcomet.dev/gitcomet-archive-keyring.gpg | sudo tee /usr/share/keyrings/gitcomet-archive-keyring.gpg >/dev/null
+curl -fsSL https://apt.gitcomet.dev/gitcomet.sources | sudo tee /etc/apt/sources.list.d/gitcomet.sources >/dev/null
+sudo apt update
+sudo apt install gitcomet
 ```
 
 ### Fast, Free, Familiar
