@@ -112,12 +112,12 @@ You can also run `.github/workflows/deploy-homebrew-tap.yml` manually for backfi
 
 To push `PKGBUILD` and `.SRCINFO` into the live AUR repository automatically on release:
 
-1. Ensure the `gitcomet` AUR package repository exists and, if you keep a GitHub mirror, note its `OWNER/REPO`.
+1. Ensure the `gitcomet` AUR package repository exists.
 2. In this repo, configure:
-   - secret `AUR_SSH_PRIVATE_KEY`: the AUR-authorized SSH private key.
-   - secret `AUR_SSH_PASSPHRASE`: the passphrase for that SSH key.
-   - optional variable `AUR_GIT_REPOSITORY`: GitHub remote in `OWNER/REPO` form (default: `OWNER/aur-gitcomet`).
-   - optional variable `AUR_GIT_BRANCH`: GitHub branch for that remote (default `main`).
+   - secret `AUR_PRIVATE_SSH_KEY`: the AUR-authorized SSH private key.
+   - secret `AUR_PRIVATE_SSH_KEY_PASSPHRASE`: the passphrase for that SSH key.
+   - optional variable `AUR_GIT_REPOSITORY`: AUR Git remote URL (default: `ssh://aur@aur.archlinux.org/gitcomet.git`).
+   - optional variable `AUR_GIT_BRANCH`: AUR branch for that remote (default `master`).
 3. Run `.github/workflows/release-manual-main.yml` with `draft=false`.
 
 This release flow will:
@@ -126,9 +126,8 @@ This release flow will:
 - update `PKGBUILD` `pkgver` and `sha256sums`
 - regenerate `.SRCINFO`
 - validate sources with `makepkg --verifysource`
-- clone `https://aur.archlinux.org/gitcomet.git`
-- configure a `github` remote from `AUR_GIT_REPOSITORY`
-- push the updated metadata into AUR over SSH using the configured key
+- clone the configured AUR repo over HTTPS for read access
+- push the updated metadata into the configured AUR repo over SSH using the configured key
 
 The previous `AUR_REPO_TOKEN` secret is no longer used.
 
