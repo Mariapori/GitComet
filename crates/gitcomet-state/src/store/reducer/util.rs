@@ -4,7 +4,9 @@ use crate::model::{
     RepoState,
 };
 use crate::msg::{ConflictAutosolveMode, ConflictAutosolveStats, Effect, RepoCommandKind};
-use gitcomet_core::auth::{GitAuthKind, StagedGitAuth, clear_staged_git_auth, stage_git_auth};
+#[cfg(test)]
+use gitcomet_core::auth::stage_git_auth;
+use gitcomet_core::auth::{GitAuthKind, StagedGitAuth, clear_staged_git_auth};
 use gitcomet_core::domain::{DiffArea, DiffTarget, FileStatusKind};
 use gitcomet_core::error::{Error, ErrorKind, GitFailure};
 use gitcomet_core::services::CommandOutput;
@@ -486,6 +488,8 @@ fn summarize_command(
             RepoCommandKind::Push => "Push",
             RepoCommandKind::ForcePush => "Force push",
             RepoCommandKind::PushSetUpstream { .. } => "Push",
+            RepoCommandKind::SetUpstreamBranch { .. } => "Set as tracking upstream",
+            RepoCommandKind::UnsetUpstreamBranch { .. } => "Unlink upstream branch",
             RepoCommandKind::DeleteRemoteBranch { .. } => "Delete remote branch",
             RepoCommandKind::PushTag { .. } => "Push tag",
             RepoCommandKind::DeleteRemoteTag { .. } => "Delete remote tag",
@@ -621,6 +625,12 @@ fn summarize_command(
                 "Completed"
             };
             format!("Push -u {remote}/{branch}: {base}")
+        }
+        RepoCommandKind::SetUpstreamBranch { branch, upstream } => {
+            format!("Branch {branch}: Upstream set to {upstream}")
+        }
+        RepoCommandKind::UnsetUpstreamBranch { branch } => {
+            format!("Branch {branch}: Upstream unlinked")
         }
         RepoCommandKind::DeleteRemoteBranch { remote, branch } => {
             format!("Remote branch {remote}/{branch}: Deleted")
@@ -783,11 +793,11 @@ pub(super) fn clear_staged_git_auth_env() {
     clear_staged_git_auth();
 }
 
-pub(super) fn stage_git_auth_env(
+pub(super) fn prepare_staged_git_auth(
     kind: AuthPromptKind,
     username: Option<&str>,
     secret: &str,
-) -> Result<(), Error> {
+) -> Result<StagedGitAuth, Error> {
     let normalized_secret = match kind {
         AuthPromptKind::HostVerification => {
             let trimmed = secret.trim();
@@ -811,7 +821,7 @@ pub(super) fn stage_git_auth_env(
         )));
     }
 
-    stage_git_auth(StagedGitAuth {
+    Ok(StagedGitAuth {
         kind: match kind {
             AuthPromptKind::UsernamePassword => GitAuthKind::UsernamePassword,
             AuthPromptKind::Passphrase => GitAuthKind::Passphrase,
@@ -819,7 +829,16 @@ pub(super) fn stage_git_auth_env(
         },
         username: username.map(ToOwned::to_owned),
         secret: normalized_secret,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(super) fn stage_git_auth_env(
+    kind: AuthPromptKind,
+    username: Option<&str>,
+    secret: &str,
+) -> Result<(), Error> {
+    stage_git_auth(prepare_staged_git_auth(kind, username, secret)?);
     Ok(())
 }
 
@@ -1173,6 +1192,19 @@ mod tests {
                 "Push",
             ),
             (
+                RepoCommandKind::SetUpstreamBranch {
+                    branch: "main".into(),
+                    upstream: "origin/main".into(),
+                },
+                "Set as tracking upstream",
+            ),
+            (
+                RepoCommandKind::UnsetUpstreamBranch {
+                    branch: "main".into(),
+                },
+                "Unlink upstream branch",
+            ),
+            (
                 RepoCommandKind::DeleteRemoteBranch {
                     remote: "origin".into(),
                     branch: "old".into(),
@@ -1366,6 +1398,34 @@ mod tests {
             push_upstream_uptodate,
             "Push -u origin/main: Everything up-to-date"
         );
+
+        let (_, set_upstream_summary) = summarize_command(
+            &RepoCommandKind::SetUpstreamBranch {
+                branch: "feature".into(),
+                upstream: "origin/feature".into(),
+            },
+            &command_output(
+                "git branch --set-upstream-to origin/feature feature",
+                "",
+                "",
+            ),
+            true,
+            None,
+        );
+        assert_eq!(
+            set_upstream_summary,
+            "Branch feature: Upstream set to origin/feature"
+        );
+
+        let (_, unset_upstream_summary) = summarize_command(
+            &RepoCommandKind::UnsetUpstreamBranch {
+                branch: "feature".into(),
+            },
+            &command_output("git branch --unset-upstream feature", "", ""),
+            true,
+            None,
+        );
+        assert_eq!(unset_upstream_summary, "Branch feature: Upstream unlinked");
 
         let (_, push_tag_uptodate) = summarize_command(
             &RepoCommandKind::PushTag {

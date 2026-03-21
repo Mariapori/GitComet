@@ -188,15 +188,15 @@ jobs:
     secrets: inherit
 
   deploy_aur:
-    name: Deploy AUR mirror metadata
+    name: Deploy AUR metadata
     needs: [validate, build_and_upload, publish_release]
     if: ${{ fromJSON(needs.validate.outputs.draft) == false && needs.build_and_upload.result == 'success' }}
     uses: ./.github/workflows/deploy-aur.yml
     with:
       tag: ${{ needs.validate.outputs.tag }}
       version: ${{ needs.validate.outputs.version }}
-      aur_repo: ${{ vars.AUR_GITHUB_REPO }}
-      aur_branch: ${{ vars.AUR_GITHUB_BRANCH }}
+      aur_repo: ${{ vars.AUR_GIT_REPOSITORY }}
+      aur_branch: ${{ vars.AUR_GIT_BRANCH }}
       dry_run: false
     secrets: inherit
 
@@ -213,7 +213,7 @@ jobs:
       storage_prefix: ${{ vars.APT_STORAGE_PREFIX }}
       distribution: ${{ vars.APT_REPO_DISTRIBUTION }}
       component: ${{ vars.APT_REPO_COMPONENT }}
-      architecture: "amd64"
+      architecture: "amd64,arm64"
       repo_origin: ${{ vars.APT_REPO_ORIGIN }}
       repo_label: ${{ vars.APT_REPO_LABEL }}
       repo_description: ${{ vars.APT_REPO_DESCRIPTION }}

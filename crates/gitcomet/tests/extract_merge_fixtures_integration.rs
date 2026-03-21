@@ -1,16 +1,12 @@
+use gitcomet_core::process::background_command as no_window_command;
+mod test_git_env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-#[cfg(windows)]
-const NULL_DEVICE: &str = "NUL";
-#[cfg(not(windows))]
-const NULL_DEVICE: &str = "/dev/null";
-
 fn apply_isolated_git_config_env(cmd: &mut Command) {
-    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
-    cmd.env("GIT_CONFIG_GLOBAL", NULL_DEVICE);
+    test_git_env::apply(cmd);
     // Force deterministic git output for string assertions in tests.
     cmd.env("LC_ALL", "C");
     cmd.env("LANG", "C");
@@ -55,14 +51,14 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    Command::new(gitcomet_bin())
+    no_window_command(gitcomet_bin())
         .args(args)
         .output()
         .expect("gitcomet command to run")
 }
 
 fn run_git_capture(repo: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new("git");
+    let mut cmd = no_window_command("git");
     apply_isolated_git_config_env(&mut cmd);
     cmd.arg("-c")
         .arg("commit.gpgsign=false")

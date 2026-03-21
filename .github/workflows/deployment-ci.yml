@@ -11,6 +11,7 @@ on:
       - ".github/workflows/release-manual-main.yml"
       - "scripts/update-aur.sh"
       - "scripts/package-macos.sh"
+      - "scripts/macos-cargo-config.sh"
       - "scripts/generate-homebrew-formula.sh"
       - "scripts/generate-homebrew-cask.sh"
       - "scripts/build-apt-repo.sh"
@@ -24,6 +25,7 @@ on:
       - ".github/workflows/release-manual-main.yml"
       - "scripts/update-aur.sh"
       - "scripts/package-macos.sh"
+      - "scripts/macos-cargo-config.sh"
       - "scripts/generate-homebrew-formula.sh"
       - "scripts/generate-homebrew-cask.sh"
       - "scripts/build-apt-repo.sh"
@@ -47,6 +49,7 @@ jobs:
         run: |
           bash -n scripts/update-aur.sh
           bash -n scripts/package-macos.sh
+          bash -n scripts/macos-cargo-config.sh
           bash -n scripts/generate-homebrew-formula.sh
           bash -n scripts/generate-homebrew-cask.sh
           bash -n scripts/build-apt-repo.sh
@@ -65,8 +68,8 @@ jobs:
       - name: Validate deployment workflow config keys
         run: |
           set -euo pipefail
-          grep -Fq 'vars.AUR_GITHUB_REPO' .github/workflows/release-manual-main.yml
-          grep -Fq 'vars.AUR_GITHUB_BRANCH' .github/workflows/release-manual-main.yml
+          grep -Fq 'vars.AUR_GIT_REPOSITORY' .github/workflows/release-manual-main.yml
+          grep -Fq 'vars.AUR_GIT_BRANCH' .github/workflows/release-manual-main.yml
           grep -Fq 'vars.APT_STORAGE_ACCOUNT' .github/workflows/release-manual-main.yml
           grep -Fq 'vars.APT_STORAGE_CONTAINER' .github/workflows/release-manual-main.yml
           grep -Fq 'vars.APT_REPO_DISTRIBUTION' .github/workflows/release-manual-main.yml
@@ -83,9 +86,11 @@ jobs:
           grep -Fq 'vars.APT_REPO_LABEL' .github/workflows/deploy-apt-repo.yml
           grep -Fq 'vars.APT_REPO_DESCRIPTION' .github/workflows/deploy-apt-repo.yml
           grep -Fq 'vars.APT_STORAGE_PUBLIC_ACCESS' .github/workflows/deploy-apt-repo.yml
-          grep -Fq 'vars.AUR_GITHUB_REPO' .github/workflows/deploy-aur.yml
-          grep -Fq 'vars.AUR_GITHUB_BRANCH' .github/workflows/deploy-aur.yml
-          grep -Fq 'AUR_REPO_TOKEN' .github/workflows/deploy-aur.yml
+          grep -Fq 'vars.AUR_GIT_REPOSITORY' .github/workflows/deploy-aur.yml
+          grep -Fq 'vars.AUR_GIT_BRANCH' .github/workflows/deploy-aur.yml
+          grep -Fq 'AUR_PRIVATE_SSH_KEY' .github/workflows/deploy-aur.yml
+          grep -Fq 'AUR_PRIVATE_SSH_KEY_PASSPHRASE' .github/workflows/deploy-aur.yml
+          grep -Fq 'ssh://aur@aur.archlinux.org/gitcomet.git' .github/workflows/deploy-aur.yml
           grep -Fq 'HOMEBREW_TAP_TOKEN' .github/workflows/deploy-homebrew-tap.yml
 
       - name: Generate Homebrew cask and formula from synthetic artifacts
@@ -94,6 +99,7 @@ jobs:
           mkdir -p dist/deployment-ci
           printf 'arm64-test' > dist/deployment-ci/gitcomet-v0.0.0-ci-macos-arm64.tar.gz
           printf 'intel-test' > dist/deployment-ci/gitcomet-v0.0.0-ci-macos-x86_64.tar.gz
+          printf 'linux-arm-test' > dist/deployment-ci/gitcomet-v0.0.0-ci-linux-arm64.tar.gz
           printf 'linux-test' > dist/deployment-ci/gitcomet-v0.0.0-ci-linux-x86_64.tar.gz
           printf 'arm64-dmg-test' > dist/deployment-ci/gitcomet-v0.0.0-ci-macos-arm64.dmg
           printf 'intel-dmg-test' > dist/deployment-ci/gitcomet-v0.0.0-ci-macos-x86_64.dmg
@@ -103,7 +109,8 @@ jobs:
             --github-repo "Auto-Explore/GitComet" \
             --arm-tar "dist/deployment-ci/gitcomet-v0.0.0-ci-macos-arm64.tar.gz" \
             --intel-tar "dist/deployment-ci/gitcomet-v0.0.0-ci-macos-x86_64.tar.gz" \
-            --linux-tar "dist/deployment-ci/gitcomet-v0.0.0-ci-linux-x86_64.tar.gz" \
+            --linux-arm-tar "dist/deployment-ci/gitcomet-v0.0.0-ci-linux-arm64.tar.gz" \
+            --linux-intel-tar "dist/deployment-ci/gitcomet-v0.0.0-ci-linux-x86_64.tar.gz" \
             --output "dist/deployment-ci/gitcomet-cli.rb"
 
           scripts/generate-homebrew-cask.sh \
@@ -120,6 +127,8 @@ jobs:
           grep -q 'brew install gitcomet-cli' dist/deployment-ci/gitcomet.rb
           grep -q 'class GitcometCli < Formula' dist/deployment-ci/gitcomet-cli.rb
           grep -q "on_linux do" dist/deployment-ci/gitcomet-cli.rb
+          grep -q 'gitcomet-v0.0.0-ci-linux-arm64.tar.gz' dist/deployment-ci/gitcomet-cli.rb
+          grep -q 'gitcomet-v0.0.0-ci-linux-x86_64.tar.gz' dist/deployment-ci/gitcomet-cli.rb
           grep -q 'bin.install "gitcomet"' dist/deployment-ci/gitcomet-cli.rb
 
       - name: Validate Homebrew tap publish detection
@@ -248,24 +257,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dpkg-dev gnupg
 
-      - name: Build synthetic .deb
+      - name: Build synthetic .debs
         run: |
           set -euo pipefail
-          pkg_root="dist/apt-ci/pkg"
-          mkdir -p "${pkg_root}/DEBIAN" "${pkg_root}/usr/bin"
+          for architecture in amd64 arm64; do
+            pkg_root="dist/apt-ci/pkg-${architecture}"
+            mkdir -p "${pkg_root}/DEBIAN" "${pkg_root}/usr/bin"
 
-          printf '%s\n' '#!/usr/bin/env bash' 'echo "GitComet CI"' > "${pkg_root}/usr/bin/gitcomet"
-          chmod +x "${pkg_root}/usr/bin/gitcomet"
+            printf '%s\n' '#!/usr/bin/env bash' "echo \"GitComet CI ${architecture}\"" > "${pkg_root}/usr/bin/gitcomet"
+            chmod +x "${pkg_root}/usr/bin/gitcomet"
 
-          {
-            echo "Package: gitcomet"
-            echo "Version: 0.0.0~ci1"
-            echo "Architecture: amd64"
-            echo "Maintainer: GitComet CI <ci@autoexplore.ai>"
-            echo "Description: Synthetic GitComet package for deployment CI."
-          } > "${pkg_root}/DEBIAN/control"
+            {
+              echo "Package: gitcomet"
+              echo "Version: 0.0.0~ci1"
+              echo "Architecture: ${architecture}"
+              echo "Maintainer: GitComet CI <ci@autoexplore.ai>"
+              echo "Description: Synthetic GitComet package for deployment CI."
+            } > "${pkg_root}/DEBIAN/control"
 
-          dpkg-deb --build "${pkg_root}" "dist/apt-ci/gitcomet_0.0.0~ci1_amd64.deb"
+            dpkg-deb --build "${pkg_root}" "dist/apt-ci/gitcomet_0.0.0~ci1_${architecture}.deb"
+          done
 
       - name: Generate temporary signing key
         env:
@@ -298,9 +309,11 @@ jobs:
           scripts/build-apt-repo.sh \
             --repo-dir dist/apt-ci/repo \
             --deb dist/apt-ci/gitcomet_0.0.0~ci1_amd64.deb \
+            --deb dist/apt-ci/gitcomet_0.0.0~ci1_arm64.deb \
             --distribution stable \
             --component main \
             --architecture amd64 \
+            --architecture arm64 \
             --origin GitComet \
             --label GitComet \
             --description "GitComet deployment CI repository" \
@@ -315,6 +328,8 @@ jobs:
           set -euo pipefail
           test -f dist/apt-ci/repo/dists/stable/main/binary-amd64/Packages
           test -f dist/apt-ci/repo/dists/stable/main/binary-amd64/Packages.gz
+          test -f dist/apt-ci/repo/dists/stable/main/binary-arm64/Packages
+          test -f dist/apt-ci/repo/dists/stable/main/binary-arm64/Packages.gz
           test -f dist/apt-ci/repo/dists/stable/InRelease
           test -f dist/apt-ci/repo/dists/stable/Release.gpg
           test -f dist/apt-ci/repo/gitcomet-archive-keyring.gpg
@@ -322,7 +337,12 @@ jobs:
 
           grep -q "^Package: gitcomet$" dist/apt-ci/repo/dists/stable/main/binary-amd64/Packages
           grep -q "^Filename: pool/main/g/gitcomet/gitcomet_0.0.0~ci1_amd64.deb$" dist/apt-ci/repo/dists/stable/main/binary-amd64/Packages
+          grep -q "^Package: gitcomet$" dist/apt-ci/repo/dists/stable/main/binary-arm64/Packages
+          grep -q "^Filename: pool/main/g/gitcomet/gitcomet_0.0.0~ci1_arm64.deb$" dist/apt-ci/repo/dists/stable/main/binary-arm64/Packages
+          grep -q "^Architectures: amd64 arm64$" dist/apt-ci/repo/dists/stable/Release
           grep -q "^URIs: https://example.invalid/gitcomet/apt$" dist/apt-ci/repo/gitcomet.sources
+          grep -q "^Architectures: amd64 arm64$" dist/apt-ci/repo/gitcomet.sources
+          grep -q '^deb \[arch=amd64,arm64 signed-by=/usr/share/keyrings/gitcomet-archive-keyring.gpg\] https://example.invalid/gitcomet/apt stable main$' dist/apt-ci/repo/gitcomet.list
 
           mkdir -p "$GNUPGHOME"
           chmod 700 "$GNUPGHOME"
@@ -361,16 +381,18 @@ jobs:
             | grep -q '0.0.0~ci1'
 
   macos-packaging-smoke:
-    name: macOS packaging smoke (${{ matrix.arch }})
+    name: macOS packaging smoke (${{ matrix.target_platform }})
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: arm64
+          - target_platform: aarch64-darwin
+            arch: arm64
             runs_on: macos-latest
-          - arch: x86_64
+          - target_platform: x86_64-darwin
+            arch: x86_64
             runs_on: macos-15-intel
     steps:
       - uses: actions/checkout@v6
@@ -382,7 +404,17 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build -p gitcomet --release --locked --features ui-gpui,gix --bins
+        run: |
+          set -euo pipefail
+          cargo_config_output="$(scripts/macos-cargo-config.sh "${{ matrix.arch }}" release)"
+          set --
+          if [[ -n "$cargo_config_output" ]]; then
+            while IFS= read -r arg; do
+              set -- "$@" "$arg"
+            done <<<"$cargo_config_output"
+          fi
+          set -- "$@" -p gitcomet --release --locked --features ui-gpui,gix --bins
+          cargo build "$@"
 
       - name: Package macOS artifacts
         run: |
