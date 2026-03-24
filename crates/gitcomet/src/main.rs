@@ -383,6 +383,33 @@ fn maybe_relaunch_browser_from_macos_app_bundle() -> bool {
 }
 
 #[cfg(all(target_os = "macos", feature = "ui-gpui-runtime"))]
+fn ad_hoc_codesign(path: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new("codesign")
+        .arg("--force")
+        .arg("--sign")
+        .arg("-")
+        .arg(path)
+        .output()
+        .map_err(|e| format!("failed to run codesign for {}: {e}", path.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(": {stdout}"),
+            (true, false) => format!(": {stderr}"),
+            (false, false) => format!(": stdout={stdout}; stderr={stderr}"),
+        };
+        return Err(format!(
+            "codesign returned non-zero exit status while signing {}{}",
+            path.display(),
+            details
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "ui-gpui-runtime"))]
 fn ensure_macos_dev_app_bundle(
     current_exe: &std::path::Path,
     app_bundle: &std::path::Path,
@@ -403,19 +430,32 @@ fn ensure_macos_dev_app_bundle(
     std::fs::write(&icon_png, MACOS_APP_ICON_PNG)
         .map_err(|e| format!("failed to write icon PNG: {e}"))?;
 
-    let icon_status = std::process::Command::new("sips")
+    let icon_output = std::process::Command::new("sips")
         .arg("-s")
         .arg("format")
         .arg("icns")
         .arg(&icon_png)
         .arg("--out")
         .arg(&icon_icns)
-        .status()
+        .output()
         .map_err(|e| format!("failed to run sips: {e}"))?;
-    if !icon_status.success() {
+    if !icon_output.status.success() {
+        let stderr = String::from_utf8_lossy(&icon_output.stderr)
+            .trim()
+            .to_string();
+        let stdout = String::from_utf8_lossy(&icon_output.stdout)
+            .trim()
+            .to_string();
+        let details = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(": {stdout}"),
+            (true, false) => format!(": {stderr}"),
+            (false, false) => format!(": stdout={stdout}; stderr={stderr}"),
+        };
         return Err(format!(
-            "sips returned non-zero exit status while generating {}",
-            icon_icns.display()
+            "sips returned non-zero exit status while generating {}{}",
+            icon_icns.display(),
+            details
         ));
     }
     let _ = std::fs::remove_file(icon_png);
@@ -456,6 +496,8 @@ fn ensure_macos_dev_app_bundle(
     );
     std::fs::write(contents.join("Info.plist"), plist)
         .map_err(|e| format!("failed to write Info.plist: {e}"))?;
+
+    ad_hoc_codesign(app_bundle)?;
 
     Ok(app_exe)
 }
@@ -796,6 +838,38 @@ mod tests {
             Some(&std::path::PathBuf::from("/opt/homebrew/bin/GitComet.app"))
         );
         assert_eq!(candidates.last(), Some(&macos_user_app_bundle_path()));
+    }
+
+    #[test]
+    #[cfg(all(feature = "ui-gpui-runtime", target_os = "macos"))]
+    fn ensure_macos_dev_app_bundle_replaces_stale_signature_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_bundle = temp.path().join("GitComet.app");
+        let stale_signature = app_bundle.join("Contents/_CodeSignature/CodeResources");
+
+        fs::create_dir_all(stale_signature.parent().unwrap()).unwrap();
+        fs::write(&stale_signature, b"stale-signature").unwrap();
+
+        let current_exe = std::env::current_exe().expect("current test executable path");
+        let app_exe =
+            ensure_macos_dev_app_bundle(&current_exe, &app_bundle).expect("prepare app bundle");
+
+        assert_eq!(
+            app_exe,
+            app_bundle.join(std::path::Path::new("Contents/MacOS/gitcomet"))
+        );
+
+        let status = std::process::Command::new("codesign")
+            .arg("--verify")
+            .arg("--strict")
+            .arg("--verbose=2")
+            .arg(&app_bundle)
+            .status()
+            .expect("run codesign verification");
+        assert!(
+            status.success(),
+            "expected rebuilt app bundle to pass codesign verification"
+        );
     }
 
     #[test]
