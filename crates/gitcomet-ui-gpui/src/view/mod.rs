@@ -148,19 +148,7 @@ const TOAST_FADE_IN_MS: u64 = 180;
 const TOAST_FADE_OUT_MS: u64 = 220;
 const TOAST_SLIDE_PX: f32 = 12.0;
 
-#[cfg(target_os = "windows")]
-pub(crate) const UI_MONOSPACE_FONT_FAMILY: &str = "Consolas";
-#[cfg(target_os = "macos")]
-pub(crate) const UI_MONOSPACE_FONT_FAMILY: &str = "Menlo";
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub(crate) const UI_MONOSPACE_FONT_FAMILY: &str = "DejaVu Sans Mono";
-#[cfg(not(any(
-    target_os = "windows",
-    target_os = "macos",
-    target_os = "linux",
-    target_os = "freebsd"
-)))]
-pub(crate) const UI_MONOSPACE_FONT_FAMILY: &str = "monospace";
+pub(crate) const UI_MONOSPACE_FONT_FAMILY: &str = crate::bundled_fonts::LILEX_FONT_FAMILY;
 
 impl GitCometView {
     #[cfg(test)]
@@ -267,6 +255,8 @@ impl GitCometView {
         let store = Arc::new(store);
 
         let mut ui_session = session::load();
+        let _font_preferences =
+            crate::font_preferences::current_or_initialize_from_session(window, &ui_session, cx);
         if should_seed_initial_repository_from_session(
             view_mode,
             initial_path.as_deref(),
@@ -670,6 +660,26 @@ impl GitCometView {
             .update(cx, |input, cx| input.set_theme(theme, cx));
         self.auth_prompt_secret_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
+    }
+
+    fn notify_font_preferences_changed(&mut self, cx: &mut gpui::Context<Self>) {
+        self.title_bar.update(cx, |_bar, cx| cx.notify());
+        self.sidebar_pane.update(cx, |_pane, cx| cx.notify());
+        self.main_pane
+            .update(cx, |pane, cx| pane.invalidate_font_metrics(cx));
+        self.details_pane.update(cx, |_pane, cx| cx.notify());
+        self.repo_tabs_bar.update(cx, |_bar, cx| cx.notify());
+        self.action_bar.update(cx, |_bar, cx| cx.notify());
+        self.tooltip_host.update(cx, |_host, cx| cx.notify());
+        self.toast_host.update(cx, |_host, cx| cx.notify());
+        self.popover_host.update(cx, |_host, cx| cx.notify());
+        self.open_repo_input.update(cx, |_input, cx| cx.notify());
+        self.error_banner_input.update(cx, |_input, cx| cx.notify());
+        self.auth_prompt_username_input
+            .update(cx, |_input, cx| cx.notify());
+        self.auth_prompt_secret_input
+            .update(cx, |_input, cx| cx.notify());
+        cx.notify();
     }
 
     fn set_theme_mode(
@@ -1257,6 +1267,7 @@ impl GitCometView {
 impl Render for GitCometView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let font_preferences = crate::font_preferences::current(cx);
         debug_assert!(matches!(
             self.view_mode,
             GitCometViewMode::Normal | GitCometViewMode::FocusedMergetool
@@ -1319,6 +1330,9 @@ impl Render for GitCometView {
             .flex()
             .flex_col()
             .size_full()
+            .font_family(crate::font_preferences::applied_ui_font_family(
+                &font_preferences.ui_font_family,
+            ))
             .text_color(theme.colors.text)
             .child(self.title_bar.clone())
             .child(center_content);

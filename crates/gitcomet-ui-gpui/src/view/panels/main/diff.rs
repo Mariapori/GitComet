@@ -27,6 +27,7 @@ impl MainPaneView {
         theme: AppTheme,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
+        let editor_font_family = crate::font_preferences::current_editor_font_family(cx);
         let (wants_image, wants_markdown_preview, rendered_preview_kind) = self
             .active_repo()
             .map(|repo| {
@@ -89,6 +90,7 @@ impl MainPaneView {
                     div()
                         .id("diff_file_image_error_scroll")
                         .bg(theme.colors.window_bg)
+                        .font_family(editor_font_family.clone())
                         .flex()
                         .flex_col()
                         .flex_1()
@@ -284,6 +286,7 @@ impl MainPaneView {
                         div()
                             .id("diff_file_error_scroll")
                             .bg(theme.colors.window_bg)
+                            .font_family(editor_font_family.clone())
                             .flex()
                             .flex_col()
                             .flex_1()
@@ -349,6 +352,7 @@ impl MainPaneView {
                             return div()
                                 .id("diff_word_wrap_scroll")
                                 .bg(theme.colors.window_bg)
+                                .font_family(editor_font_family.clone())
                                 .flex()
                                 .flex_col()
                                 .flex_1()
@@ -393,6 +397,7 @@ impl MainPaneView {
                                         .h_full()
                                         .min_h(px(0.0))
                                         .bg(theme.colors.window_bg)
+                                        .font_family(editor_font_family.clone())
                                         .child(
                                             div()
                                                 .h_full()
@@ -615,6 +620,7 @@ impl MainPaneView {
                                             .flex()
                                             .flex_col()
                                             .bg(theme.colors.window_bg)
+                                            .font_family(editor_font_family.clone())
                                             .child(
                                                 div()
                                                     .pr(scrollbar_gutter)
