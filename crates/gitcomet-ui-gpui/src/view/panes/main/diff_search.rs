@@ -1,5 +1,54 @@
 use super::*;
 
+#[cfg(feature = "benchmarks")]
+#[derive(Clone, Copy, Debug)]
+pub(in crate::view) struct AsciiCaseInsensitiveNeedle<'a> {
+    needle: &'a [u8],
+}
+
+#[cfg(feature = "benchmarks")]
+impl<'a> AsciiCaseInsensitiveNeedle<'a> {
+    pub(in crate::view) fn new(needle: &'a str) -> Option<Self> {
+        let needle = needle.trim();
+        (!needle.is_empty()).then_some(Self {
+            needle: needle.as_bytes(),
+        })
+    }
+
+    pub(in crate::view) fn is_match(self, haystack: &str) -> bool {
+        contains_ascii_case_insensitive_bytes(haystack.as_bytes(), self.needle)
+    }
+}
+
+#[cfg(feature = "benchmarks")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::view) enum DiffSearchQueryReuse {
+    SameSemantics,
+    Refinement,
+    None,
+}
+
+#[cfg(feature = "benchmarks")]
+pub(in crate::view) fn diff_search_query_reuse(
+    previous_query: &str,
+    current_query: &str,
+) -> DiffSearchQueryReuse {
+    let previous = previous_query.trim();
+    let current = current_query.trim();
+    if previous.eq_ignore_ascii_case(current) {
+        return DiffSearchQueryReuse::SameSemantics;
+    }
+    if !previous.is_empty()
+        && current.len() >= previous.len()
+        && current
+            .get(..previous.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(previous))
+    {
+        return DiffSearchQueryReuse::Refinement;
+    }
+    DiffSearchQueryReuse::None
+}
+
 impl MainPaneView {
     pub(in crate::view) fn active_conflict_target(
         &self,
@@ -174,8 +223,10 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         return true;
     }
 
-    let haystack_bytes = haystack.as_bytes();
-    let needle_bytes = needle.as_bytes();
+    contains_ascii_case_insensitive_bytes(haystack.as_bytes(), needle.as_bytes())
+}
+
+fn contains_ascii_case_insensitive_bytes(haystack_bytes: &[u8], needle_bytes: &[u8]) -> bool {
     if needle_bytes.len() > haystack_bytes.len() {
         return false;
     }
@@ -556,8 +607,13 @@ mod tests {
             choice: ConflictChoice::Theirs,
             resolved: true,
         })];
-        let three_way_visible_projection =
-            build_three_way_visible_projection(1, &[0..1], &marker_segments, false);
+        let conflict_range = 0..1;
+        let three_way_visible_projection = build_three_way_visible_projection(
+            1,
+            std::slice::from_ref(&conflict_range),
+            &marker_segments,
+            false,
+        );
         let three_way_base_text = "base text\n";
         let three_way_ours_text = "needle\n";
         let three_way_theirs_text = "remote text\n";
@@ -623,8 +679,13 @@ mod tests {
             choice: ConflictChoice::Theirs,
             resolved: true,
         })];
-        let three_way_visible_projection =
-            build_three_way_visible_projection(1, &[0..1], &marker_segments, true);
+        let conflict_range = 0..1;
+        let three_way_visible_projection = build_three_way_visible_projection(
+            1,
+            std::slice::from_ref(&conflict_range),
+            &marker_segments,
+            true,
+        );
 
         let ctx = three_way_search_context(
             &marker_segments,
@@ -653,7 +714,7 @@ mod tests {
             choice: ConflictChoice::Ours,
             resolved: false,
         })];
-        let conflict_ranges = vec![0..1];
+        let conflict_ranges = std::iter::once(0..1).collect::<Vec<_>>();
         let three_way_visible_projection =
             build_three_way_visible_projection(1, &conflict_ranges, &marker_segments, false);
 
@@ -690,7 +751,7 @@ mod tests {
 
         // Three-way line count = max(text_lines) across segments = 1 + 2 + 1 = 4
         let three_way_len = 4;
-        let conflict_ranges = vec![1..3]; // lines 1..3 are the conflict block
+        let conflict_ranges = std::iter::once(1..3).collect::<Vec<_>>(); // lines 1..3 are the conflict block
 
         let base_text = "header\nbase_needle\nbase_plain\nfooter\n";
         let ours_text = "header\nours_plain\nours_needle\nfooter\n";
@@ -806,7 +867,7 @@ mod tests {
             choice: ConflictChoice::Theirs,
             resolved: true,
         })];
-        let conflict_ranges = vec![0..1];
+        let conflict_ranges = std::iter::once(0..1).collect::<Vec<_>>();
         let projection =
             build_three_way_visible_projection(1, &conflict_ranges, &marker_segments, true);
 

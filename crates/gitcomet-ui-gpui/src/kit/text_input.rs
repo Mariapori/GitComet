@@ -4394,6 +4394,20 @@ fn hash_text_runs_for_benchmark(runs: &[TextRun], hasher: &mut FxHasher) {
 }
 
 #[cfg(feature = "benchmarks")]
+pub(crate) fn benchmark_text_input_shaping_slice(text: &str, max_bytes: usize) -> (u64, usize) {
+    let (truncated, hash) = truncate_line_for_shaping(text, max_bytes.max(1));
+    (hash, truncated.len())
+}
+
+#[cfg(feature = "benchmarks")]
+pub(crate) fn benchmark_text_input_wrap_rows_for_line(
+    line_text: &str,
+    wrap_columns: usize,
+) -> usize {
+    estimate_wrap_rows_for_line(line_text, wrap_columns)
+}
+
+#[cfg(feature = "benchmarks")]
 pub(crate) fn benchmark_text_input_runs_legacy_visible_window(
     text: &str,
     line_starts: &[usize],
@@ -4549,10 +4563,7 @@ mod tests {
 
     #[test]
     fn provider_prefetch_byte_range_extends_visible_window_with_guard_rows() {
-        let text = std::iter::repeat("x")
-            .take(100)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = std::iter::repeat_n("x", 100).collect::<Vec<_>>().join("\n");
         let line_starts = compute_line_starts(text.as_str());
         let range = provider_prefetch_byte_range_for_visible_window(
             line_starts.as_slice(),
@@ -4568,10 +4579,7 @@ mod tests {
 
     #[test]
     fn provider_prefetch_byte_range_clamps_to_document_bounds() {
-        let text = std::iter::repeat("x")
-            .take(10)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = std::iter::repeat_n("x", 10).collect::<Vec<_>>().join("\n");
         let line_starts = compute_line_starts(text.as_str());
         let range = provider_prefetch_byte_range_for_visible_window(
             line_starts.as_slice(),
@@ -4782,13 +4790,10 @@ mod tests {
                 continue;
             }
             if line_ix % 2 == 0 {
-                highlights.push((line_start + 1..line_start + 14, style_a.clone()));
+                highlights.push((line_start + 1..line_start + 14, style_a));
             }
             if line_ix % 3 == 0 {
-                highlights.push((
-                    line_start + 6..line_start + line_len.min(24),
-                    style_b.clone(),
-                ));
+                highlights.push((line_start + 6..line_start + line_len.min(24), style_b));
             }
         }
         let wide_start = line_starts.get(18).copied().unwrap_or(0).saturating_add(2);
@@ -4845,7 +4850,7 @@ mod tests {
             color: Some(gpui::hsla(0.66, 1.0, 0.5, 1.0)),
             ..gpui::HighlightStyle::default()
         };
-        let mut highlights = vec![(2..12, style_low.clone()), (4..10, style_high.clone())];
+        let mut highlights = vec![(2..12, style_low), (4..10, style_high)];
         highlights.sort_by(|(a, _), (b, _)| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
 
         let base_font = gpui::font(".SystemUIFont");
