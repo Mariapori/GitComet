@@ -734,7 +734,7 @@ impl PagedFileDiffRows {
         self.source.split_modify_pair_texts(row_ix)
     }
 
-    #[cfg(any(test, feature = "benchmarks"))]
+    #[cfg(test)]
     pub(in crate::view) fn cached_page_count(&self) -> usize {
         self.pages.lock().map(|pages| pages.len()).unwrap_or(0)
     }
@@ -864,7 +864,7 @@ impl PagedFileDiffInlineRows {
             .clone()
     }
 
-    #[cfg(any(test, feature = "benchmarks"))]
+    #[cfg(test)]
     pub(in crate::view) fn cached_page_count(&self) -> usize {
         self.pages.lock().map(|pages| pages.len()).unwrap_or(0)
     }

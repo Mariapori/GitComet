@@ -3239,7 +3239,7 @@ pub fn bootstrap_resolved_output_text(
 
 #[cfg(feature = "benchmarks")]
 #[derive(Clone, Debug, Default)]
-pub struct ConflictSplitStyledTextCache(
+pub(in crate::view) struct ConflictSplitStyledTextCache(
     rustc_hash::FxHashMap<
         (usize, ConflictPickSide),
         crate::view::diff_text_model::CachedDiffStyledText,
@@ -3248,21 +3248,21 @@ pub struct ConflictSplitStyledTextCache(
 
 #[cfg(feature = "benchmarks")]
 impl ConflictSplitStyledTextCache {
-    pub fn with_row_capacity(row_capacity: usize) -> Self {
+    pub(in crate::view) fn with_row_capacity(row_capacity: usize) -> Self {
         Self(rustc_hash::FxHashMap::with_capacity_and_hasher(
             row_capacity.saturating_mul(2),
             Default::default(),
         ))
     }
 
-    pub fn get(
+    pub(in crate::view) fn get(
         &self,
         key: &(usize, ConflictPickSide),
     ) -> Option<&crate::view::diff_text_model::CachedDiffStyledText> {
         self.0.get(key)
     }
 
-    pub fn insert(
+    pub(in crate::view) fn insert(
         &mut self,
         key: (usize, ConflictPickSide),
         value: crate::view::diff_text_model::CachedDiffStyledText,
@@ -3270,11 +3270,11 @@ impl ConflictSplitStyledTextCache {
         self.0.insert(key, value);
     }
 
-    pub fn clear(&mut self) {
+    pub(in crate::view) fn clear(&mut self) {
         self.0.clear();
     }
 
-    pub fn len(&self) -> usize {
+    pub(in crate::view) fn len(&self) -> usize {
         self.0.len()
     }
 }
