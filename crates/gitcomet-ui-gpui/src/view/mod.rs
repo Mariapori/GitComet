@@ -13,7 +13,7 @@ use gitcomet_core::process::refresh_git_runtime;
 use gitcomet_core::services::{PullMode, RemoteUrlKind, ResetMode};
 use gitcomet_state::model::{
     AppNotificationKind, AppState, AuthPromptKind, CloneOpState, CloneOpStatus, DiagnosticKind,
-    Loadable, RepoId, RepoState,
+    Loadable, RepoId, RepoState, SubmoduleTrustPromptOperation,
 };
 use gitcomet_state::msg::{Msg, RepoExternalChange, StoreEvent};
 use gitcomet_state::session;
@@ -145,6 +145,8 @@ const HISTORY_COL_DATE_MAX_PX: f32 = 240.0;
 const HISTORY_COL_SHA_MIN_PX: f32 = 60.0;
 const HISTORY_COL_SHA_MAX_PX: f32 = 160.0;
 const HISTORY_COL_MESSAGE_MIN_PX: f32 = 220.0;
+const ERROR_BANNER_OVERFLOW_HINT_MIN_LINES: usize = 8;
+const ERROR_BANNER_OVERFLOW_HINT_MIN_CHARS: usize = 240;
 
 const HISTORY_GRAPH_COL_GAP_PX: f32 = 16.0;
 const HISTORY_GRAPH_MARGIN_X_PX: f32 = 10.0;
@@ -827,6 +829,7 @@ impl GitCometView {
             pending_pull_reconcile_prompt: None,
             pending_force_delete_branch_prompt: None,
             pending_force_remove_worktree_prompt: None,
+            pending_submodule_trust_prompt: None,
             pending_worktree_branch_removals: HashMap::default(),
             startup_crash_report,
             #[cfg(target_os = "macos")]
@@ -1477,6 +1480,11 @@ impl GitCometView {
         (Some(command.into()), collapsed.join("\n").into())
     }
 
+    fn should_show_error_banner_overflow_hint(err_text: &str) -> bool {
+        err_text.lines().count() > ERROR_BANNER_OVERFLOW_HINT_MIN_LINES
+            || err_text.len() > ERROR_BANNER_OVERFLOW_HINT_MIN_CHARS
+    }
+
     fn should_render_generic_error_banner(auth_prompt_active: bool) -> bool {
         !auth_prompt_active
     }
@@ -1630,6 +1638,17 @@ impl Render for GitCometView {
                     path,
                     branch,
                 },
+                self.last_mouse_pos,
+                window,
+                cx,
+            );
+        }
+
+        if let Some(prompt) = self.pending_submodule_trust_prompt.take()
+            && self.active_repo_id() == Some(prompt.repo_id)
+        {
+            self.open_popover_at(
+                PopoverKind::submodule(prompt.repo_id, SubmodulePopoverKind::TrustConfirm),
                 self.last_mouse_pos,
                 window,
                 cx,
@@ -1922,6 +1941,8 @@ impl Render for GitCometView {
         if let Some(err_text) = banner_error {
             let (error_command, display_error) =
                 Self::split_error_banner_message(err_text.as_ref());
+            let show_overflow_hint =
+                Self::should_show_error_banner_overflow_hint(err_text.as_ref());
             self.error_banner_input.update(cx, |input, cx| {
                 input.set_theme(theme, cx);
                 input.set_text(display_error.clone(), cx);
@@ -1979,6 +2000,15 @@ impl Render for GitCometView {
                                     .child(self.error_banner_input.clone()),
                             ),
                     )
+                    .when(show_overflow_hint, |this| {
+                        this.child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme.colors.text_muted)
+                                .child("Scroll for full output"),
+                        )
+                    })
                     .child(div().absolute().top(px(6.0)).right(px(6.0)).child(dismiss)),
             );
         }
