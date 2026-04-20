@@ -244,11 +244,15 @@ jobs:
 
       - name: Emit deployment summary
         env:
+          DRY_RUN: ${{ steps.norm.outputs.dry_run }}
+          TAG: ${{ steps.norm.outputs.tag }}
           STORAGE_ACCOUNT: ${{ steps.norm.outputs.storage_account }}
+          STORAGE_CONTAINER: ${{ steps.norm.outputs.storage_container }}
+          STORAGE_PREFIX: ${{ steps.norm.outputs.storage_prefix }}
         run: |
           set -euo pipefail
 
-          if [ "${{ steps.norm.outputs.dry_run }}" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ]; then
             mode="Validated Windows MSI release assets without Azure upload"
             storage_account_display="n/a (dry run)"
           else
@@ -259,11 +263,11 @@ jobs:
           {
             echo "### ${mode}"
             echo
-            echo "- Release tag: \`${{ steps.norm.outputs.tag }}\`"
+            echo "- Release tag: \`${TAG}\`"
             echo "- Storage account: \`${storage_account_display}\`"
-            echo "- Container: \`${{ steps.norm.outputs.storage_container }}\`"
-            if [ -n "${{ steps.norm.outputs.storage_prefix }}" ]; then
-              echo "- Prefix: \`${{ steps.norm.outputs.storage_prefix }}\`"
+            echo "- Container: \`${STORAGE_CONTAINER}\`"
+            if [ -n "$STORAGE_PREFIX" ]; then
+              echo "- Prefix: \`${STORAGE_PREFIX}\`"
             fi
             echo "- Installers:"
             sed 's#^#  - `#;s#$#`#' dist/windows-installers.txt
