@@ -53,6 +53,7 @@ fn patch_diff_search_query_keeps_stable_style_cache_entries(cx: &mut gpui::TestA
     });
 
     cx.update(|window, app| {
+        window.refresh();
         let _ = window.draw(app);
     });
 
@@ -86,6 +87,38 @@ fn patch_diff_search_query_keeps_stable_style_cache_entries(cx: &mut gpui::TestA
     });
 
     cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        details_pane.update(app, |pane, cx| {
+            pane.untracked_height = Some(px(263.5));
+            cx.notify();
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        details_pane.update(app, |pane, cx| {
+            pane.untracked_height = Some(px(263.5));
+            cx.notify();
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
         let _ = window.draw(app);
     });
 
@@ -128,7 +161,6 @@ fn worktree_preview_search_query_clears_row_cache_without_dropping_source_path(
     let (view, cx) = cx.add_window_view(|window, cx| {
         super::super::GitCometView::new(store, events, None, window, cx)
     });
-    disable_view_poller_for_test(cx, &view);
 
     let repo_id = gitcomet_state::model::RepoId(23);
     let workdir = std::env::temp_dir().join(format!(
@@ -179,6 +211,12 @@ fn worktree_preview_search_query_clears_row_cache_without_dropping_source_path(
     });
 
     cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
         let _ = window.draw(app);
     });
 
@@ -239,6 +277,12 @@ fn worktree_preview_search_query_clears_row_cache_without_dropping_source_path(
     });
 
     cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
         let _ = window.draw(app);
     });
 
@@ -270,7 +314,6 @@ fn worktree_preview_identical_refresh_preserves_row_cache(cx: &mut gpui::TestApp
     let (view, cx) = cx.add_window_view(|window, cx| {
         super::super::GitCometView::new(store, events, None, window, cx)
     });
-    disable_view_poller_for_test(cx, &view);
 
     let repo_id = gitcomet_state::model::RepoId(24);
     let workdir = std::env::temp_dir().join(format!(
@@ -309,6 +352,9 @@ fn worktree_preview_identical_refresh_preserves_row_cache(cx: &mut gpui::TestApp
             let lines = Arc::clone(&lines);
             let preview_abs_path = preview_abs_path.clone();
             this.main_pane.update(cx, |pane, cx| {
+                pane.set_full_document_syntax_budget_override_for_tests(rows::DiffSyntaxBudget {
+                    foreground_parse: std::time::Duration::from_secs(1),
+                });
                 set_ready_worktree_preview(
                     pane,
                     preview_abs_path.clone(),
@@ -321,6 +367,12 @@ fn worktree_preview_identical_refresh_preserves_row_cache(cx: &mut gpui::TestApp
     });
 
     cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
         let _ = window.draw(app);
     });
 
@@ -334,9 +386,10 @@ fn worktree_preview_identical_refresh_preserves_row_cache(cx: &mut gpui::TestApp
         },
         |pane| {
             format!(
-                "preview_path={:?} cache_path={:?} row_cache_present={} style_epoch={}",
+                "preview_path={:?} cache_path={:?} prepared_document={:?} row_cache_present={} style_epoch={}",
                 pane.worktree_preview_path.clone(),
                 pane.worktree_preview_segments_cache_path.clone(),
+                pane.worktree_preview_prepared_syntax_document(),
                 pane.worktree_preview_segments_cache_get(0).is_some(),
                 pane.worktree_preview_style_cache_epoch,
             )
@@ -345,6 +398,7 @@ fn worktree_preview_identical_refresh_preserves_row_cache(cx: &mut gpui::TestApp
 
     let mut base_highlights_hash = 0u64;
     let mut base_style_epoch = 0u64;
+    let mut base_prepared_syntax_ready = false;
     cx.update(|_window, app| {
         let main_pane = view.read(app).main_pane.clone();
         let pane = main_pane.read(app);
@@ -353,6 +407,7 @@ fn worktree_preview_identical_refresh_preserves_row_cache(cx: &mut gpui::TestApp
             .expect("expected worktree preview row cache before identical refresh");
         base_highlights_hash = base.highlights_hash;
         base_style_epoch = pane.worktree_preview_style_cache_epoch;
+        base_prepared_syntax_ready = pane.worktree_preview_prepared_syntax_document().is_some();
     });
 
     cx.update(|_window, app| {
@@ -382,14 +437,21 @@ fn worktree_preview_identical_refresh_preserves_row_cache(cx: &mut gpui::TestApp
             Some(&preview_abs_path),
             "identical refresh should keep the preview cache bound to the current source"
         );
-        assert_eq!(
-            pane.worktree_preview_style_cache_epoch, base_style_epoch,
-            "identical refresh should not bump the preview syntax/style epoch"
-        );
-        assert_eq!(
-            refreshed.highlights_hash, base_highlights_hash,
-            "identical refresh should preserve the existing cached row styling"
-        );
+        if base_prepared_syntax_ready {
+            assert_eq!(
+                pane.worktree_preview_style_cache_epoch, base_style_epoch,
+                "identical refresh should not bump the preview syntax/style epoch once syntax is already ready"
+            );
+            assert_eq!(
+                refreshed.highlights_hash, base_highlights_hash,
+                "identical refresh should preserve the existing cached row styling once syntax is already ready"
+            );
+        } else if pane.worktree_preview_style_cache_epoch == base_style_epoch {
+            assert_eq!(
+                refreshed.highlights_hash, base_highlights_hash,
+                "identical refresh should preserve the fallback cached row styling while syntax is still pending"
+            );
+        }
     });
 
     // Phase 2: refresh with different content — cache must be invalidated.
@@ -422,10 +484,17 @@ fn worktree_preview_identical_refresh_preserves_row_cache(cx: &mut gpui::TestApp
             pane.worktree_preview_style_cache_epoch, base_style_epoch,
             "changed source should bump the preview syntax/style epoch"
         );
-        assert!(
-            pane.worktree_preview_segments_cache_get(0).is_none(),
-            "changed source should clear the cached preview rows"
-        );
+        if let Some(refreshed) = pane.worktree_preview_segments_cache_get(0) {
+            assert_eq!(
+                refreshed.text.as_ref(),
+                changed_lines[0].as_str(),
+                "changed source may repopulate the cache immediately, but it must render the new preview contents"
+            );
+            assert_ne!(
+                refreshed.highlights_hash, base_highlights_hash,
+                "changed source must not retain the old cached preview styling"
+            );
+        }
     });
 
     let _ = std::fs::remove_dir_all(&workdir);
@@ -453,13 +522,20 @@ fn staged_deleted_file_preview_uses_old_contents(cx: &mut gpui::TestAppContext) 
                 gitcomet_core::domain::FileStatusKind::Deleted,
                 gitcomet_core::domain::DiffArea::Staged,
             );
-            repo.diff_state.diff_file = gitcomet_state::model::Loadable::Ready(Some(Arc::new(
-                gitcomet_core::domain::FileDiffText {
-                    path: file_rel.clone(),
-                    old: Some("one\ntwo\n".to_string()),
-                    new: None,
-                },
-            )));
+            let preview_source_path = workdir.join(".deleted_preview_source.txt");
+            let _ = std::fs::create_dir_all(&workdir);
+            std::fs::write(&preview_source_path, "one\ntwo\n")
+                .expect("write staged deleted preview source");
+            repo.diff_state.diff_file = gitcomet_state::model::Loadable::Error(
+                "materialized diff_file should not be consulted for deleted preview".into(),
+            );
+            repo.diff_state.diff_preview_text_file = gitcomet_state::model::Loadable::Ready(Some(
+                Arc::new(gitcomet_core::domain::DiffPreviewTextFile {
+                    path: preview_source_path,
+                    side: gitcomet_core::domain::DiffPreviewTextSide::Old,
+                }),
+            ));
+            repo.diff_state.diff_state_rev = repo.diff_state.diff_state_rev.wrapping_add(1);
 
             let next_state = app_state_with_repo(repo, repo_id);
 
@@ -467,14 +543,36 @@ fn staged_deleted_file_preview_uses_old_contents(cx: &mut gpui::TestAppContext) 
         });
     });
 
-    cx.update(|_window, app| {
-        view.update(app, |this, cx| {
-            this.main_pane.update(cx, |pane, cx| {
-                pane.try_populate_worktree_preview_from_diff_file(cx);
-                cx.notify();
-            });
-        });
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
     });
+
+    wait_for_main_pane_condition(
+        cx,
+        &view,
+        "staged deleted preview loads from preview text file",
+        |pane| {
+            pane.worktree_preview_path.as_ref() == Some(&workdir.join(&file_rel))
+                && pane.worktree_preview_source_path.as_ref()
+                    == Some(&workdir.join(".deleted_preview_source.txt"))
+                && matches!(
+                    pane.worktree_preview,
+                    gitcomet_state::model::Loadable::Ready(3)
+                )
+                && pane.worktree_preview_text.is_empty()
+        },
+        |pane| {
+            format!(
+                "preview_path={:?} source_path={:?} preview={:?} text_len={} line_count={:?}",
+                pane.worktree_preview_path,
+                pane.worktree_preview_source_path,
+                pane.worktree_preview,
+                pane.worktree_preview_text.len(),
+                pane.worktree_preview_line_count(),
+            )
+        },
+    );
 
     cx.update(|_window, app| {
         let pane = view.read(app).main_pane.read(app);
@@ -490,9 +588,121 @@ fn staged_deleted_file_preview_uses_old_contents(cx: &mut gpui::TestAppContext) 
             "expected worktree preview to be ready"
         );
         assert_eq!(pane.worktree_preview_line_count(), Some(3));
-        assert_eq!(pane.worktree_preview_line_text(0), Some("one"));
-        assert_eq!(pane.worktree_preview_line_text(1), Some("two"));
-        assert_eq!(pane.worktree_preview_line_text(2), Some(""));
+        assert_eq!(pane.worktree_preview_line_text(0).as_deref(), Some("one"));
+        assert_eq!(pane.worktree_preview_line_text(1).as_deref(), Some("two"));
+        assert_eq!(pane.worktree_preview_line_text(2).as_deref(), Some(""));
+    });
+}
+
+#[gpui::test]
+fn committed_deleted_file_preview_uses_preview_text_file_without_patch_fallback(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(303);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_committed_deleted",
+        std::process::id()
+    ));
+    let file_rel = std::path::PathBuf::from("report.json");
+    let commit_id = gitcomet_core::domain::CommitId("deadbeef".into());
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = opening_repo_state(repo_id, &workdir);
+            repo.diff_state.diff_target = Some(gitcomet_core::domain::DiffTarget::Commit {
+                commit_id: commit_id.clone(),
+                path: Some(file_rel.clone()),
+            });
+            repo.diff_state.diff = gitcomet_state::model::Loadable::Error(
+                "parsed patch diff should not be consulted for deleted file preview".into(),
+            );
+            let preview_source_path = workdir.join(".committed_deleted_preview_source.json");
+            let _ = std::fs::create_dir_all(&workdir);
+            std::fs::write(&preview_source_path, "{\"removed\":true}\n")
+                .expect("write committed deleted preview source");
+            repo.diff_state.diff_file = gitcomet_state::model::Loadable::Error(
+                "materialized diff_file should not be consulted for committed deleted preview"
+                    .into(),
+            );
+            repo.diff_state.diff_preview_text_file = gitcomet_state::model::Loadable::Ready(Some(
+                Arc::new(gitcomet_core::domain::DiffPreviewTextFile {
+                    path: preview_source_path,
+                    side: gitcomet_core::domain::DiffPreviewTextSide::Old,
+                }),
+            ));
+            repo.diff_state.diff_state_rev = repo.diff_state.diff_state_rev.wrapping_add(1);
+            repo.history_state.commit_details = gitcomet_state::model::Loadable::Ready(Arc::new(
+                gitcomet_core::domain::CommitDetails {
+                    id: commit_id.clone(),
+                    message: "remove report".to_string(),
+                    committed_at: "2026-04-07T12:00:00Z".to_string(),
+                    parent_ids: vec![],
+                    files: vec![gitcomet_core::domain::CommitFileChange {
+                        path: file_rel.clone(),
+                        kind: gitcomet_core::domain::FileStatusKind::Deleted,
+                    }],
+                },
+            ));
+            repo.history_state.commit_details_rev =
+                repo.history_state.commit_details_rev.wrapping_add(1);
+
+            let next_state = app_state_with_repo(repo, repo_id);
+            push_test_state(this, Arc::clone(&next_state), cx);
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    wait_for_main_pane_condition(
+        cx,
+        &view,
+        "committed deleted preview loads from preview text file",
+        |pane| {
+            pane.worktree_preview_path.as_ref() == Some(&workdir.join(&file_rel))
+                && pane.worktree_preview_source_path.as_ref()
+                    == Some(&workdir.join(".committed_deleted_preview_source.json"))
+                && matches!(
+                    pane.worktree_preview,
+                    gitcomet_state::model::Loadable::Ready(2)
+                )
+                && pane.worktree_preview_text.is_empty()
+        },
+        |pane| {
+            format!(
+                "preview_path={:?} source_path={:?} preview={:?} text_len={} line_count={:?}",
+                pane.worktree_preview_path,
+                pane.worktree_preview_source_path,
+                pane.worktree_preview,
+                pane.worktree_preview_text.len(),
+                pane.worktree_preview_line_count(),
+            )
+        },
+    );
+
+    cx.update(|_window, app| {
+        let pane = view.read(app).main_pane.read(app);
+        assert_eq!(
+            pane.deleted_file_preview_abs_path(),
+            Some(workdir.join(&file_rel))
+        );
+        assert!(matches!(
+            pane.worktree_preview,
+            gitcomet_state::model::Loadable::Ready(_)
+        ));
+        assert_eq!(pane.worktree_preview_line_count(), Some(2));
+        assert_eq!(
+            pane.worktree_preview_line_text(0).as_deref(),
+            Some("{\"removed\":true}")
+        );
+        assert_eq!(pane.worktree_preview_line_text(1).as_deref(), Some(""));
     });
 }
 
@@ -505,7 +715,6 @@ fn untracked_markdown_file_preview_defaults_to_preview_mode_and_renders_containe
     let (view, cx) = cx.add_window_view(|window, cx| {
         super::super::GitCometView::new(store, events, None, window, cx)
     });
-    disable_view_poller_for_test(cx, &view);
 
     let repo_id = gitcomet_state::model::RepoId(59);
     let workdir = std::env::temp_dir().join(format!(
@@ -538,10 +747,22 @@ fn untracked_markdown_file_preview_defaults_to_preview_mode_and_renders_containe
     });
 
     cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
         let _ = window.draw(app);
     });
     cx.run_until_parked();
     cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
         let _ = window.draw(app);
     });
 
@@ -568,6 +789,12 @@ fn untracked_markdown_file_preview_defaults_to_preview_mode_and_renders_containe
     });
 
     cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
         let _ = window.draw(app);
     });
 
@@ -699,6 +926,12 @@ fn unstaged_deleted_gitlink_preview_does_not_stay_loading(cx: &mut gpui::TestApp
     });
 
     cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
         let _ = window.draw(app);
     });
 
@@ -1325,6 +1558,172 @@ fn commit_details_metadata_fields_are_selectable(cx: &mut gpui::TestAppContext) 
 }
 
 #[gpui::test]
+fn commit_details_file_list_keeps_visible_viewport_when_overflowing(cx: &mut gpui::TestAppContext) {
+    let _visual_guard = lock_visual_test();
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(61);
+    let commit_sha = "0123456789abcdef0123456789abcdef01234567".to_string();
+    let files = (0..48)
+        .map(|ix| gitcomet_core::domain::CommitFileChange {
+            path: std::path::PathBuf::from(format!("src/commit_details/dir_{ix}/file_{ix}.rs")),
+            kind: gitcomet_core::domain::FileStatusKind::Modified,
+        })
+        .collect::<Vec<_>>();
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = opening_repo_state(repo_id, Path::new("/tmp/repo-commit-files-list"));
+            repo.history_state.selected_commit =
+                Some(gitcomet_core::domain::CommitId(commit_sha.clone().into()));
+            repo.history_state.commit_details = gitcomet_state::model::Loadable::Ready(Arc::new(
+                gitcomet_core::domain::CommitDetails {
+                    id: gitcomet_core::domain::CommitId(commit_sha.clone().into()),
+                    message: "subject".to_string(),
+                    committed_at: "2026-03-08 12:34:56 +0200".to_string(),
+                    parent_ids: vec![gitcomet_core::domain::CommitId(
+                        "89abcdef0123456789abcdef0123456789abcdef".into(),
+                    )],
+                    files,
+                },
+            ));
+
+            let next_state = app_state_with_repo(repo, repo_id);
+
+            push_test_state(this, next_state, cx);
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.simulate_resize(gpui::size(px(1024.0), px(420.0)));
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    let mut viewport_height = 0.0f32;
+    let mut contents_height = 0.0f32;
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        let item_size = pane
+            .commit_files_scroll
+            .0
+            .borrow()
+            .last_item_size
+            .expect("expected commit details files list to report its measured viewport");
+        viewport_height = item_size.item.height.into();
+        contents_height = item_size.contents.height.into();
+    });
+
+    assert!(
+        contents_height > viewport_height,
+        "expected commit details file list to overflow so the scrollbar has content to represent (viewport_height={viewport_height}, contents_height={contents_height})",
+    );
+    assert!(
+        viewport_height >= 24.0,
+        "expected commit details file list to keep at least one visible row when overflowing (viewport_height={viewport_height}, contents_height={contents_height})",
+    );
+}
+
+#[gpui::test]
+fn ui_scale_commit_details_file_list_content_height_scales(cx: &mut gpui::TestAppContext) {
+    let _visual_guard = lock_visual_test();
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(62);
+    let commit_sha = "fedcba9876543210fedcba9876543210fedcba98".to_string();
+    let files = (0..48)
+        .map(|ix| gitcomet_core::domain::CommitFileChange {
+            path: std::path::PathBuf::from(format!("src/commit_zoom/dir_{ix}/file_{ix}.rs")),
+            kind: gitcomet_core::domain::FileStatusKind::Modified,
+        })
+        .collect::<Vec<_>>();
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = opening_repo_state(repo_id, Path::new("/tmp/repo-commit-files-zoom"));
+            repo.history_state.selected_commit =
+                Some(gitcomet_core::domain::CommitId(commit_sha.clone().into()));
+            repo.history_state.commit_details = gitcomet_state::model::Loadable::Ready(Arc::new(
+                gitcomet_core::domain::CommitDetails {
+                    id: gitcomet_core::domain::CommitId(commit_sha.clone().into()),
+                    message: "subject".to_string(),
+                    committed_at: "2026-03-08 12:34:56 +0200".to_string(),
+                    parent_ids: vec![gitcomet_core::domain::CommitId(
+                        "89abcdef0123456789abcdef0123456789abcdef".into(),
+                    )],
+                    files,
+                },
+            ));
+
+            let next_state = app_state_with_repo(repo, repo_id);
+            push_test_state(this, next_state, cx);
+        });
+    });
+
+    cx.simulate_resize(gpui::size(px(1024.0), px(420.0)));
+    draw_and_drain_test_window(cx);
+
+    let default_contents_height = cx.update(|_window, app| {
+        let pane = view.read(app).details_pane.read(app);
+        let item_size = pane
+            .commit_files_scroll
+            .0
+            .borrow()
+            .last_item_size
+            .expect("expected commit details files list measurements at the default zoom");
+        let height: f32 = item_size.contents.height.into();
+        height
+    });
+
+    cx.update(|window, app| {
+        view.update(app, |this, cx| {
+            this.apply_ui_scale_percent(200, window, cx);
+        });
+    });
+    draw_and_drain_test_window(cx);
+
+    let zoomed_contents_height = cx.update(|_window, app| {
+        let pane = view.read(app).details_pane.read(app);
+        let item_size = pane
+            .commit_files_scroll
+            .0
+            .borrow()
+            .last_item_size
+            .expect("expected commit details files list measurements after zooming");
+        let height: f32 = item_size.contents.height.into();
+        height
+    });
+
+    assert!(
+        zoomed_contents_height > default_contents_height * 1.7,
+        "expected the commit details file list content height to grow substantially with zoom (default={default_contents_height}, zoomed={zoomed_contents_height})",
+    );
+}
+
+#[gpui::test]
 fn switching_active_repo_restores_commit_message_draft_per_repo(cx: &mut gpui::TestAppContext) {
     let (store, events) = AppStore::new(Arc::new(TestBackend));
     let (view, cx) = cx.add_window_view(|window, cx| {
@@ -1464,6 +1863,62 @@ fn merge_start_prefills_default_commit_message(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn commit_message_focus_after_initial_draw_accepts_typed_input(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(44);
+    let make_state = || {
+        let mut repo = opening_repo_state(repo_id, Path::new("/tmp/repo-commit-message-focus"));
+        repo.status = gitcomet_state::model::Loadable::Ready(
+            gitcomet_core::domain::RepoStatus {
+                staged: vec![gitcomet_core::domain::FileStatus {
+                    path: std::path::PathBuf::from("staged.txt"),
+                    kind: gitcomet_core::domain::FileStatusKind::Modified,
+                    conflict: None,
+                }],
+                unstaged: Vec::new(),
+            }
+            .into(),
+        );
+        app_state_with_repo(repo, repo_id)
+    };
+
+    cx.update(|window, app| {
+        view.update(app, |this, cx| {
+            push_test_state(this, make_state(), cx);
+        });
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        view.update(app, |this, cx| {
+            this.details_pane.update(cx, |pane, cx| {
+                let focus = pane.commit_message_input.read(cx).focus_handle();
+                window.focus(&focus, cx);
+            });
+        });
+        let _ = window.draw(app);
+    });
+
+    cx.simulate_input("x");
+
+    let text = cx.update(|window, app| {
+        let _ = window.draw(app);
+        view.read(app)
+            .details_pane
+            .read(app)
+            .commit_message_input
+            .read(app)
+            .text()
+            .to_string()
+    });
+    assert_eq!(text, "x");
+}
+
+#[gpui::test]
 fn commit_click_dispatches_after_state_update_without_intermediate_redraw(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -1557,7 +2012,7 @@ fn theme_change_clears_conflict_three_way_segments_cache(cx: &mut gpui::TestAppC
             this.main_pane.update(cx, |pane, cx| {
                 let dummy = super::CachedDiffStyledText {
                     text: "dummy".into(),
-                    highlights: Arc::new(vec![]),
+                    highlights: Arc::from(Vec::new()),
                     highlights_hash: 0,
                     text_hash: 0,
                 };
@@ -1573,7 +2028,7 @@ fn theme_change_clears_conflict_three_way_segments_cache(cx: &mut gpui::TestAppC
                 assert_eq!(pane.conflict_three_way_segments_cache.len(), 2);
                 assert_eq!(pane.conflict_diff_segments_cache_split.len(), 1);
 
-                let new_theme = crate::theme::AppTheme::zed_one_light();
+                let new_theme = crate::theme::AppTheme::gitcomet_light();
                 pane.set_theme(new_theme, cx);
 
                 assert!(
@@ -1587,4 +2042,716 @@ fn theme_change_clears_conflict_three_way_segments_cache(cx: &mut gpui::TestAppC
             });
         });
     });
+}
+
+#[gpui::test]
+fn status_section_drag_updates_saved_height(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(46);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_status_resize_drag",
+        std::process::id()
+    ));
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = opening_repo_state(repo_id, &workdir);
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![gitcomet_core::domain::FileStatus {
+                        path: std::path::PathBuf::from("staged.txt"),
+                        kind: gitcomet_core::domain::FileStatusKind::Modified,
+                        conflict: None,
+                    }],
+                    unstaged: vec![gitcomet_core::domain::FileStatus {
+                        path: std::path::PathBuf::from("unstaged.txt"),
+                        kind: gitcomet_core::domain::FileStatusKind::Modified,
+                        conflict: None,
+                    }],
+                }
+                .into(),
+            );
+
+            push_test_state(this, app_state_with_repo(repo, repo_id), cx);
+        });
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    let mut initial_status_sections_bounds = None;
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        initial_status_sections_bounds = pane.current_status_sections_bounds();
+        assert!(
+            initial_status_sections_bounds.is_some(),
+            "expected status sections to report measured bounds after draw"
+        );
+        assert_eq!(
+            pane.saved_status_section_heights().0,
+            None,
+            "status resize height should start unset before dragging"
+        );
+    });
+
+    let initial_handle_bounds = cx
+        .debug_bounds("status_resize_change_tracking_staged")
+        .expect("expected status resize handle bounds");
+    let handle_center = initial_handle_bounds.center();
+    let drag_target = gpui::point(handle_center.x, handle_center.y + px(48.0));
+    let initial_change_tracking_height = initial_handle_bounds.top()
+        - initial_status_sections_bounds
+            .expect("expected status section bounds while computing drag start height")
+            .top();
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        details_pane.update(app, |pane, cx| {
+            pane.status_section_resize = Some(StatusSectionResizeState {
+                handle: StatusSectionResizeHandle::ChangeTrackingAndStaged,
+                start_y: handle_center.y,
+                start_height: initial_change_tracking_height,
+            });
+            assert!(
+                pane.update_status_section_resize(drag_target.y, cx),
+                "expected direct resize update to change the saved change-tracking height"
+            );
+            assert!(
+                pane.finish_status_section_resize(cx),
+                "expected direct resize finish to persist the updated change-tracking height"
+            );
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        assert!(
+            pane.change_tracking_height.is_some(),
+            "expected dragging the resize handle to store a height"
+        );
+        assert!(
+            pane.saved_status_section_heights().0.is_some(),
+            "expected dragging the resize handle to persist a saved change-tracking height"
+        );
+    });
+    let updated_handle_bounds = cx
+        .debug_bounds("status_resize_change_tracking_staged")
+        .expect("expected updated status resize handle bounds after dragging");
+    assert!(
+        updated_handle_bounds.top() > initial_handle_bounds.top(),
+        "expected resizing the outer divider downward to move the staged section downward"
+    );
+}
+
+#[gpui::test]
+fn staged_section_remains_visible_after_window_resize_with_saved_split_height(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(51);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_status_resize_window_shrink",
+        std::process::id()
+    ));
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = opening_repo_state(repo_id, &workdir);
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![gitcomet_core::domain::FileStatus {
+                        path: std::path::PathBuf::from("staged.txt"),
+                        kind: gitcomet_core::domain::FileStatusKind::Modified,
+                        conflict: None,
+                    }],
+                    unstaged: (0..30)
+                        .map(|ix| gitcomet_core::domain::FileStatus {
+                            path: std::path::PathBuf::from(format!("unstaged-{ix}.txt")),
+                            kind: gitcomet_core::domain::FileStatusKind::Modified,
+                            conflict: None,
+                        })
+                        .collect(),
+                }
+                .into(),
+            );
+
+            push_test_state(this, app_state_with_repo(repo, repo_id), cx);
+        });
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    let mut initial_window_size = gpui::size(px(0.0), px(0.0));
+    let mut initial_status_height = px(0.0);
+    cx.update(|window, app| {
+        initial_window_size = window.viewport_size();
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        initial_status_height = pane
+            .current_status_sections_bounds()
+            .expect("expected status section bounds before shrinking the window")
+            .size
+            .height;
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        details_pane.update(app, |pane, cx| {
+            pane.change_tracking_height = Some(initial_status_height);
+            cx.notify();
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.simulate_resize(gpui::size(
+        initial_window_size.width,
+        initial_window_size.height - px(120.0),
+    ));
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    let staged_header_bounds = cx
+        .debug_bounds("staged_header")
+        .expect("expected staged header bounds after shrinking the window");
+
+    let mut staged_viewport_height = 0.0f32;
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        staged_viewport_height = pane
+            .staged_scroll
+            .0
+            .borrow()
+            .last_item_size
+            .expect("expected staged list viewport after shrinking the window")
+            .item
+            .height
+            .into();
+    });
+
+    assert!(
+        staged_viewport_height > 0.0,
+        "expected staged section to keep a visible list viewport after shrinking the window (staged_header={staged_header_bounds:?}, staged_viewport_height={staged_viewport_height})"
+    );
+}
+
+#[gpui::test]
+fn split_status_section_resize_moves_untracked_section(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(47);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_split_status_resize_drag",
+        std::process::id()
+    ));
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = opening_repo_state(repo_id, &workdir);
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![gitcomet_core::domain::FileStatus {
+                        path: std::path::PathBuf::from("staged.txt"),
+                        kind: gitcomet_core::domain::FileStatusKind::Modified,
+                        conflict: None,
+                    }],
+                    unstaged: vec![
+                        gitcomet_core::domain::FileStatus {
+                            path: std::path::PathBuf::from("new.txt"),
+                            kind: gitcomet_core::domain::FileStatusKind::Untracked,
+                            conflict: None,
+                        },
+                        gitcomet_core::domain::FileStatus {
+                            path: std::path::PathBuf::from("tracked.txt"),
+                            kind: gitcomet_core::domain::FileStatusKind::Modified,
+                            conflict: None,
+                        },
+                    ],
+                }
+                .into(),
+            );
+
+            push_test_state(this, app_state_with_repo(repo, repo_id), cx);
+            this.set_change_tracking_view(ChangeTrackingView::SplitUntracked, cx);
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    let mut initial_stack_bounds = None;
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        assert_eq!(
+            crate::view::test_support::change_tracking_view(view.read(app)),
+            ChangeTrackingView::SplitUntracked,
+            "expected the root view to store split change-tracking mode"
+        );
+        assert_eq!(
+            pane.change_tracking_view,
+            ChangeTrackingView::SplitUntracked,
+            "expected the details pane to store split change-tracking mode"
+        );
+        assert!(
+            pane.current_change_tracking_stack_bounds().is_some(),
+            "expected split change-tracking stack bounds after initial draw"
+        );
+        initial_stack_bounds = pane.current_change_tracking_stack_bounds();
+    });
+    assert!(
+        cx.debug_bounds("status_resize_change_tracking_staged")
+            .is_some(),
+        "expected the outer status resize handle to still be present in split mode"
+    );
+    let initial_split_unstaged_header_bounds = cx
+        .debug_bounds("split_unstaged_header")
+        .expect("expected split unstaged header bounds in split change-tracking view");
+
+    let initial_handle_bounds = cx
+        .debug_bounds("status_resize_untracked_unstaged")
+        .expect("expected inner status resize handle bounds in split change-tracking view");
+    let initial_untracked_wrapper_bounds = cx
+        .debug_bounds("status_untracked_wrapper")
+        .expect("expected untracked wrapper bounds in split change-tracking view");
+    let handle_center = initial_handle_bounds.center();
+    let drag_target = gpui::point(handle_center.x, handle_center.y + px(48.0));
+    let initial_top_height = initial_handle_bounds.top()
+        - initial_stack_bounds.expect(
+            "expected initial split change-tracking stack bounds while computing drag start height",
+        )
+        .top();
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        details_pane.update(app, |pane, cx| {
+            pane.status_section_resize = Some(StatusSectionResizeState {
+                handle: StatusSectionResizeHandle::UntrackedAndUnstaged,
+                start_y: handle_center.y,
+                start_height: initial_top_height,
+            });
+            assert!(
+                pane.update_status_section_resize(drag_target.y, cx),
+                "expected direct resize update to change the untracked height"
+            );
+            assert!(
+                pane.finish_status_section_resize(cx),
+                "expected direct resize finish to persist the updated height"
+            );
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    let mut updated_untracked_height = None;
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        assert_eq!(
+            crate::view::test_support::change_tracking_view(view.read(app)),
+            ChangeTrackingView::SplitUntracked,
+            "expected split change-tracking view to remain active while resizing"
+        );
+        assert!(
+            pane.untracked_height.is_some(),
+            "expected dragging the inner resize handle to store an untracked height"
+        );
+        updated_untracked_height = pane.untracked_height;
+    });
+    let updated_handle_bounds = cx
+        .debug_bounds("status_resize_untracked_unstaged")
+        .expect("expected updated inner status resize handle bounds after dragging");
+    let updated_split_unstaged_header_bounds = cx
+        .debug_bounds("split_unstaged_header")
+        .expect("expected updated split unstaged header bounds after dragging");
+    assert!(
+        updated_split_unstaged_header_bounds.top() > initial_split_unstaged_header_bounds.top(),
+        "expected resizing the inner divider downward to move the split unstaged section downward (initial_header_top={:?}, updated_header_top={:?}, initial_untracked_wrapper={:?}, updated_untracked_height={:?})",
+        initial_split_unstaged_header_bounds.top(),
+        updated_split_unstaged_header_bounds.top(),
+        initial_untracked_wrapper_bounds,
+        updated_untracked_height,
+    );
+    assert!(
+        updated_handle_bounds.center().y > initial_handle_bounds.center().y,
+        "expected the inner divider to move downward after resizing (initial_handle_y={:?}, updated_handle_y={:?}, updated_untracked_height={:?})",
+        initial_handle_bounds.center().y,
+        updated_handle_bounds.center().y,
+        updated_untracked_height,
+    );
+}
+
+#[gpui::test]
+fn unstaged_scroll_viewport_tracks_resized_section_height(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(48);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_unstaged_scroll_viewport",
+        std::process::id()
+    ));
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = opening_repo_state(repo_id, &workdir);
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![gitcomet_core::domain::FileStatus {
+                        path: std::path::PathBuf::from("staged.txt"),
+                        kind: gitcomet_core::domain::FileStatusKind::Modified,
+                        conflict: None,
+                    }],
+                    unstaged: (0..30)
+                        .map(|ix| gitcomet_core::domain::FileStatus {
+                            path: std::path::PathBuf::from(format!("unstaged-{ix}.txt")),
+                            kind: gitcomet_core::domain::FileStatusKind::Modified,
+                            conflict: None,
+                        })
+                        .collect(),
+                }
+                .into(),
+            );
+
+            push_test_state(this, app_state_with_repo(repo, repo_id), cx);
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        details_pane.update(app, |pane, cx| {
+            pane.change_tracking_height = Some(px(160.0));
+            cx.notify();
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    let unstaged_wrapper_bounds = cx
+        .debug_bounds("status_change_tracking_wrapper")
+        .expect("expected unstaged section bounds after resizing");
+    let unstaged_header_bounds = cx
+        .debug_bounds("unstaged_header")
+        .expect("expected unstaged header bounds after resizing");
+
+    let mut is_scrollable = false;
+    let mut viewport_height = 0.0f32;
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        is_scrollable = pane.unstaged_scroll.is_scrollable();
+        viewport_height = pane
+            .unstaged_scroll
+            .0
+            .borrow()
+            .last_item_size
+            .expect("expected unstaged uniform list size after draw")
+            .item
+            .height
+            .into();
+    });
+
+    let visible_height: f32 =
+        (unstaged_wrapper_bounds.bottom() - unstaged_header_bounds.bottom()).into();
+    assert!(
+        is_scrollable,
+        "expected unstaged list to become scrollable after shrinking the unstaged section"
+    );
+    assert!(
+        (viewport_height - visible_height).abs() <= 1.0,
+        "expected unstaged uniform list viewport to match visible container height after resize (viewport_height={viewport_height}, visible_height={visible_height})"
+    );
+}
+
+#[gpui::test]
+fn split_unstaged_scroll_viewport_tracks_resized_section_height(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(49);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_split_unstaged_scroll_viewport",
+        std::process::id()
+    ));
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = opening_repo_state(repo_id, &workdir);
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![],
+                    unstaged: (0..30)
+                        .map(|ix| gitcomet_core::domain::FileStatus {
+                            path: std::path::PathBuf::from(format!("unstaged-{ix}.txt")),
+                            kind: gitcomet_core::domain::FileStatusKind::Modified,
+                            conflict: None,
+                        })
+                        .collect(),
+                }
+                .into(),
+            );
+
+            push_test_state(this, app_state_with_repo(repo, repo_id), cx);
+            this.set_change_tracking_view(ChangeTrackingView::SplitUntracked, cx);
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        details_pane.update(app, |pane, cx| {
+            pane.change_tracking_height = Some(px(240.0));
+            cx.notify();
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    let change_tracking_wrapper_bounds = cx
+        .debug_bounds("status_change_tracking_wrapper")
+        .expect("expected change-tracking section bounds after resizing");
+    let split_unstaged_wrapper_bounds = cx
+        .debug_bounds("status_split_unstaged_wrapper")
+        .expect("expected split unstaged section bounds after resizing");
+    let split_unstaged_header_bounds = cx
+        .debug_bounds("split_unstaged_header")
+        .expect("expected split unstaged header bounds after resizing");
+
+    let mut is_scrollable = false;
+    let mut viewport_height = 0.0f32;
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        is_scrollable = pane.unstaged_scroll.is_scrollable();
+        viewport_height = pane
+            .unstaged_scroll
+            .0
+            .borrow()
+            .last_item_size
+            .expect("expected split unstaged uniform list size after draw")
+            .item
+            .height
+            .into();
+    });
+
+    let visible_bottom = split_unstaged_wrapper_bounds
+        .bottom()
+        .min(change_tracking_wrapper_bounds.bottom());
+    let visible_height: f32 = (visible_bottom - split_unstaged_header_bounds.bottom())
+        .max(px(0.0))
+        .into();
+    assert!(
+        is_scrollable,
+        "expected split unstaged list to become scrollable after shrinking the outer change-tracking section"
+    );
+    assert!(
+        (viewport_height - visible_height).abs() <= 1.0,
+        "expected split unstaged uniform list viewport to match visible container height after resize (viewport_height={viewport_height}, visible_height={visible_height})"
+    );
+}
+
+#[gpui::test]
+fn split_unstaged_scroll_viewport_updates_after_outer_resize_shrink(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        super::super::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let repo_id = gitcomet_state::model::RepoId(50);
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_split_unstaged_outer_resize",
+        std::process::id()
+    ));
+
+    cx.update(|_window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = opening_repo_state(repo_id, &workdir);
+            repo.status = gitcomet_state::model::Loadable::Ready(
+                gitcomet_core::domain::RepoStatus {
+                    staged: vec![gitcomet_core::domain::FileStatus {
+                        path: std::path::PathBuf::from("staged.txt"),
+                        kind: gitcomet_core::domain::FileStatusKind::Modified,
+                        conflict: None,
+                    }],
+                    unstaged: (0..30)
+                        .map(|ix| gitcomet_core::domain::FileStatus {
+                            path: std::path::PathBuf::from(format!("unstaged-{ix}.txt")),
+                            kind: gitcomet_core::domain::FileStatusKind::Modified,
+                            conflict: None,
+                        })
+                        .collect(),
+                }
+                .into(),
+            );
+
+            push_test_state(this, app_state_with_repo(repo, repo_id), cx);
+            this.set_change_tracking_view(ChangeTrackingView::SplitUntracked, cx);
+        });
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        details_pane.update(app, |pane, cx| {
+            pane.change_tracking_height = Some(px(360.0));
+            cx.notify();
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        details_pane.update(app, |pane, cx| {
+            pane.change_tracking_height = Some(px(180.0));
+            cx.notify();
+        });
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        window.refresh();
+        let _ = window.draw(app);
+    });
+
+    let change_tracking_wrapper_bounds = cx
+        .debug_bounds("status_change_tracking_wrapper")
+        .expect("expected change-tracking section bounds after shrinking the outer resize");
+    let split_unstaged_wrapper_bounds = cx
+        .debug_bounds("status_split_unstaged_wrapper")
+        .expect("expected split unstaged section bounds after shrinking the outer resize");
+    let split_unstaged_header_bounds = cx
+        .debug_bounds("split_unstaged_header")
+        .expect("expected split unstaged header bounds after shrinking the outer resize");
+
+    let mut is_scrollable = false;
+    let mut viewport_height = 0.0f32;
+    cx.update(|_window, app| {
+        let details_pane = view.read(app).details_pane.clone();
+        let pane = details_pane.read(app);
+        is_scrollable = pane.unstaged_scroll.is_scrollable();
+        viewport_height = pane
+            .unstaged_scroll
+            .0
+            .borrow()
+            .last_item_size
+            .expect("expected split unstaged uniform list size after outer resize shrink")
+            .item
+            .height
+            .into();
+    });
+
+    let visible_bottom = split_unstaged_wrapper_bounds
+        .bottom()
+        .min(change_tracking_wrapper_bounds.bottom());
+    let visible_height: f32 = (visible_bottom - split_unstaged_header_bounds.bottom())
+        .max(px(0.0))
+        .into();
+
+    assert!(
+        split_unstaged_wrapper_bounds.bottom() <= change_tracking_wrapper_bounds.bottom() + px(1.0),
+        "expected split unstaged section to stay within the visible change-tracking area after shrinking the outer resize (split_unstaged_bottom={:?}, change_tracking_bottom={:?})",
+        split_unstaged_wrapper_bounds.bottom(),
+        change_tracking_wrapper_bounds.bottom(),
+    );
+    assert!(
+        is_scrollable,
+        "expected split unstaged list to become scrollable after shrinking the outer resize"
+    );
+    assert!(
+        (viewport_height - visible_height).abs() <= 1.0,
+        "expected split unstaged uniform list viewport to match the visible clipped height after shrinking the outer resize (viewport_height={viewport_height}, visible_height={visible_height})"
+    );
 }

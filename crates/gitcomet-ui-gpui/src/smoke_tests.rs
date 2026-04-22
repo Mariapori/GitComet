@@ -1,8 +1,10 @@
 use crate::test_support::{lock_clipboard_test, lock_visual_test};
 use crate::view::components;
-use crate::{theme::AppTheme, view};
+use crate::{theme::AppTheme, ui_scale, view};
+use gitcomet_core::domain::*;
 use gitcomet_core::error::{Error, ErrorKind};
-use gitcomet_core::services::{GitBackend, GitRepository, Result};
+use gitcomet_core::services::{GitBackend, GitRepository, PullMode, Result};
+use gitcomet_state::model::Loadable;
 use gitcomet_state::model::RepoId;
 use gitcomet_state::msg::Msg;
 use gitcomet_state::store::AppStore;
@@ -27,9 +29,26 @@ fn abs_scroll_y(raw: Pixels) -> Pixels {
     if raw < px(0.0) { -raw } else { raw }
 }
 
+fn open_text_input_context_menu(cx: &mut gpui::VisualTestContext, position: gpui::Point<Pixels>) {
+    cx.simulate_mouse_move(position, None, Modifiers::default());
+    cx.simulate_event(MouseDownEvent {
+        position,
+        modifiers: Modifiers::default(),
+        button: MouseButton::Right,
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.simulate_event(MouseUpEvent {
+        position,
+        modifiers: Modifiers::default(),
+        button: MouseButton::Right,
+        click_count: 1,
+    });
+}
+
 #[test]
 fn builds_pure_components_without_panics() {
-    for theme in [AppTheme::zed_ayu_dark(), AppTheme::zed_one_light()] {
+    for theme in [AppTheme::gitcomet_dark(), AppTheme::gitcomet_light()] {
         assert_no_panic("components::pill", || {
             let _ = components::pill(theme, "Label", theme.colors.accent);
         });
@@ -53,52 +72,60 @@ fn builds_pure_components_without_panics() {
         assert_no_panic("components::Button render variants", || {
             let _ = components::Button::new("z1", "Filled")
                 .style(components::ButtonStyle::Filled)
-                .render(theme);
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
             let _ = components::Button::new("z2", "Outlined")
                 .style(components::ButtonStyle::Outlined)
-                .render(theme);
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
             let _ = components::Button::new("z3", "Subtle")
                 .style(components::ButtonStyle::Subtle)
-                .render(theme);
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
             let _ = components::Button::new("z4", "Disabled")
                 .style(components::ButtonStyle::Outlined)
                 .disabled(true)
-                .render(theme);
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
             let _ = components::Button::new("z5", "Create")
                 .style(components::ButtonStyle::Filled)
                 .separated_end_slot(div().text_xs().child("Enter"))
-                .render(theme);
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
         });
 
         assert_no_panic("components::SplitButton", || {
             let left = components::Button::new("s1", "Left")
                 .style(components::ButtonStyle::Outlined)
-                .render(theme);
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
             let right = components::Button::new("s2", "Right")
                 .style(components::ButtonStyle::Outlined)
-                .render(theme);
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
             let _ = components::SplitButton::new(left, right)
                 .style(components::SplitButtonStyle::Outlined)
-                .render(theme);
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
         });
 
         assert_no_panic("components::Tab + TabBar", || {
             let tab = components::Tab::new(("t", 1u64))
                 .selected(true)
                 .child(div().child("Repo"))
-                .render(theme);
-            let _ = components::TabBar::new("tb").tab(tab).render(theme);
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
+            let _ = components::TabBar::new("tb")
+                .tab(tab)
+                .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
         });
 
         assert_no_panic("view::window_frame", || {
             let content = div().child("content").into_any_element();
-            let _ = view::window_frame(theme, Decorations::Server, content);
+            let _ = view::window_frame(
+                theme,
+                Decorations::Server,
+                content,
+                ui_scale::DEFAULT_UI_SCALE_PERCENT,
+            );
             let _ = view::window_frame(
                 theme,
                 Decorations::Client {
                     tiling: Tiling::default(),
                 },
                 div().child("content").into_any_element(),
+                ui_scale::DEFAULT_UI_SCALE_PERCENT,
             );
         });
 
@@ -134,7 +161,7 @@ impl SmokeView {
         });
 
         Self {
-            theme: AppTheme::zed_ayu_dark(),
+            theme: AppTheme::gitcomet_dark(),
             input,
         }
     }
@@ -152,15 +179,15 @@ impl gpui::Render for SmokeView {
                 components::Tab::new(("t", 0u64))
                     .selected(true)
                     .child(div().child("One"))
-                    .render(theme),
+                    .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT),
             )
             .tab(
                 components::Tab::new(("t", 1u64))
                     .selected(false)
                     .child(div().child("Two"))
-                    .render(theme),
+                    .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT),
             )
-            .render(theme);
+            .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT);
 
         let content = div()
             .flex()
@@ -186,17 +213,22 @@ impl gpui::Render for SmokeView {
                     .child(
                         components::Button::new("b1", "Primary")
                             .style(components::ButtonStyle::Filled)
-                            .render(theme),
+                            .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT),
                     )
                     .child(
                         components::Button::new("b2", "Secondary")
                             .style(components::ButtonStyle::Outlined)
-                            .render(theme),
+                            .render(theme, ui_scale::DEFAULT_UI_SCALE_PERCENT),
                     ),
             ))
             .into_any_element();
 
-        view::window_frame(theme, window.window_decorations(), content)
+        view::window_frame(
+            theme,
+            window.window_decorations(),
+            content,
+            ui_scale::DEFAULT_UI_SCALE_PERCENT,
+        )
     }
 }
 
@@ -234,7 +266,7 @@ impl TextInputCursorScrollView {
         });
 
         Self {
-            theme: AppTheme::zed_ayu_dark(),
+            theme: AppTheme::gitcomet_dark(),
             input,
             scroll_handle,
         }
@@ -268,7 +300,12 @@ impl gpui::Render for TextInputCursorScrollView {
             )
             .into_any_element();
 
-        view::window_frame(theme, window.window_decorations(), content)
+        view::window_frame(
+            theme,
+            window.window_decorations(),
+            content,
+            ui_scale::DEFAULT_UI_SCALE_PERCENT,
+        )
     }
 }
 
@@ -289,7 +326,7 @@ impl TextInputHostView {
         });
 
         Self {
-            theme: AppTheme::zed_ayu_dark(),
+            theme: AppTheme::gitcomet_dark(),
             input,
         }
     }
@@ -313,7 +350,12 @@ impl gpui::Render for TextInputHostView {
             )
             .into_any_element();
 
-        view::window_frame(self.theme, window.window_decorations(), content)
+        view::window_frame(
+            self.theme,
+            window.window_decorations(),
+            content,
+            ui_scale::DEFAULT_UI_SCALE_PERCENT,
+        )
     }
 }
 
@@ -350,6 +392,29 @@ fn text_input_constructs_without_panicking(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn text_input_focus_after_initial_draw_accepts_typed_input(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(TextInputHostView::new);
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
+        window.focus(&focus, app);
+        let _ = window.draw(app);
+    });
+
+    cx.simulate_input("x");
+
+    let text = cx.update(|window, app| {
+        let _ = window.draw(app);
+        view.read(app).input.read(app).text().to_string()
+    });
+    assert_eq!(text, "x");
+}
+
+#[gpui::test]
 fn text_input_supports_basic_clipboard_and_word_shortcuts(cx: &mut gpui::TestAppContext) {
     let _clipboard_guard = lock_clipboard_test();
     let (view, cx) = cx.add_window_view(SmokeView::new);
@@ -379,7 +444,7 @@ fn text_input_supports_basic_clipboard_and_word_shortcuts(cx: &mut gpui::TestApp
         ]);
 
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         view.update(app, |this, cx| {
             this.input
@@ -404,7 +469,7 @@ fn text_input_supports_basic_clipboard_and_word_shortcuts(cx: &mut gpui::TestApp
 
     cx.update(|window, app| {
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
         view.update(app, |this, cx| {
             this.input
                 .update(cx, |input, cx| input.set_text("hello world", cx));
@@ -418,7 +483,7 @@ fn text_input_supports_basic_clipboard_and_word_shortcuts(cx: &mut gpui::TestApp
 
     cx.update(|window, app| {
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
         view.update(app, |this, cx| {
             this.input
                 .update(cx, |input, cx| input.set_text("hello brave world", cx));
@@ -431,7 +496,7 @@ fn text_input_supports_basic_clipboard_and_word_shortcuts(cx: &mut gpui::TestApp
 
     cx.update(|window, app| {
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
         view.update(app, |this, cx| {
             this.input
                 .update(cx, |input, cx| input.set_text("hello brave world", cx));
@@ -441,6 +506,46 @@ fn text_input_supports_basic_clipboard_and_word_shortcuts(cx: &mut gpui::TestApp
     cx.simulate_keystrokes("ctrl-left ctrl-delete");
     let text = cx.update(|_window, app| view.read(app).input.read(app).text().to_string());
     assert_eq!(text, "hello brave ");
+}
+
+#[gpui::test]
+fn text_input_shift_backspace_deletes_like_backspace(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(SmokeView::new);
+
+    cx.update(|window, app| {
+        app.bind_keys([
+            KeyBinding::new("backspace", crate::kit::Backspace, Some("TextInput")),
+            KeyBinding::new("shift-backspace", crate::kit::Backspace, Some("TextInput")),
+        ]);
+
+        let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
+        window.focus(&focus, app);
+
+        view.update(app, |this, cx| {
+            this.input
+                .update(cx, |input, cx| input.set_text("hello", cx));
+        });
+    });
+
+    cx.simulate_keystrokes("backspace");
+    let plain_backspace =
+        cx.update(|_window, app| view.read(app).input.read(app).text().to_string());
+    assert_eq!(plain_backspace, "hell");
+
+    cx.update(|window, app| {
+        let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
+        window.focus(&focus, app);
+
+        view.update(app, |this, cx| {
+            this.input
+                .update(cx, |input, cx| input.set_text("hello", cx));
+        });
+    });
+
+    cx.simulate_keystrokes("shift-backspace");
+    let shift_backspace =
+        cx.update(|_window, app| view.read(app).input.read(app).text().to_string());
+    assert_eq!(shift_backspace, plain_backspace);
 }
 
 #[gpui::test]
@@ -455,7 +560,7 @@ fn multiline_text_input_cursor_navigation_keeps_scroll_in_view(cx: &mut gpui::Te
         ]);
 
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         view.update(app, |this, cx| {
             this.input
@@ -472,7 +577,7 @@ fn multiline_text_input_cursor_navigation_keeps_scroll_in_view(cx: &mut gpui::Te
         let v = view.read(app);
         (
             abs_scroll_y(v.scroll_handle.offset().y),
-            v.scroll_handle.max_offset().height,
+            v.scroll_handle.max_offset().y,
         )
     });
     assert!(
@@ -521,7 +626,7 @@ fn multiline_text_input_mousewheel_does_not_trigger_cursor_autoscroll(
         )]);
 
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         let long_text = (0..40)
             .map(|ix| format!("line {ix}"))
@@ -542,7 +647,7 @@ fn multiline_text_input_mousewheel_does_not_trigger_cursor_autoscroll(
             let v = view.read(app);
             (
                 v.scroll_handle.clone(),
-                v.scroll_handle.max_offset().height.max(px(0.0)),
+                v.scroll_handle.max_offset().y.max(px(0.0)),
             )
         };
         let baseline = (max_offset * 0.5).max(px(1.0));
@@ -598,7 +703,7 @@ fn text_input_right_click_context_menu_supports_copy(cx: &mut gpui::TestAppConte
 
     cx.update(|window, app| {
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         view.update(app, |this, cx| {
             this.input
@@ -741,6 +846,58 @@ fn text_input_context_menu_does_not_resize_input_container(cx: &mut gpui::TestAp
 }
 
 #[gpui::test]
+fn text_input_context_menu_grows_wider_with_ui_zoom(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(SmokeView::new);
+
+    cx.update(|window, app| {
+        let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
+        window.focus(&focus, app);
+
+        view.update(app, |this, cx| {
+            this.input
+                .update(cx, |input, cx| input.set_text("hello world", cx));
+        });
+
+        let _ = window.draw(app);
+    });
+
+    let bounds = cx
+        .debug_bounds("smoke_input")
+        .expect("expected smoke input bounds");
+    let click = bounds.center();
+
+    open_text_input_context_menu(cx, click);
+
+    let default_row_width: f32 = cx
+        .debug_bounds("text_input_context_select_all")
+        .expect("expected text-input context menu row before zooming")
+        .size
+        .width
+        .into();
+
+    cx.update(|window, app| {
+        view.update(app, |_this, cx| {
+            crate::ui_scale::set_current(cx, 200);
+        });
+        crate::ui_scale::apply_to_window(window, 200);
+        let _ = window.draw(app);
+    });
+    cx.run_until_parked();
+
+    let zoomed_row_width: f32 = cx
+        .debug_bounds("text_input_context_select_all")
+        .expect("expected text-input context menu row after zooming")
+        .size
+        .width
+        .into();
+
+    assert!(
+        zoomed_row_width > default_row_width * 1.6,
+        "expected the text-input context menu to grow substantially with zoom (default={default_row_width}, zoomed={zoomed_row_width})"
+    );
+}
+
+#[gpui::test]
 fn text_input_supports_ctrl_z_undo(cx: &mut gpui::TestAppContext) {
     let _clipboard_guard = lock_clipboard_test();
     let (view, cx) = cx.add_window_view(SmokeView::new);
@@ -752,7 +909,7 @@ fn text_input_supports_ctrl_z_undo(cx: &mut gpui::TestAppContext) {
         ]);
 
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         view.update(app, |this, cx| {
             this.input
@@ -778,7 +935,7 @@ fn text_input_double_click_selects_word(cx: &mut gpui::TestAppContext) {
 
     cx.update(|window, app| {
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         view.update(app, |this, cx| {
             this.input
@@ -836,7 +993,7 @@ fn text_input_supports_shift_home_end_row_selection(cx: &mut gpui::TestAppContex
         ]);
 
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         view.update(app, |this, cx| {
             this.input
@@ -879,7 +1036,7 @@ fn text_input_supports_shift_pageup_pagedown_selection(cx: &mut gpui::TestAppCon
         ]);
 
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         view.update(app, |this, cx| {
             this.input
@@ -920,7 +1077,7 @@ fn text_input_supports_up_down_with_sticky_column(cx: &mut gpui::TestAppContext)
         ]);
 
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         view.update(app, |this, cx| {
             this.input
@@ -961,7 +1118,7 @@ fn text_input_supports_shift_up_down_selection(cx: &mut gpui::TestAppContext) {
         ]);
 
         let focus = view.update(app, |this, cx| this.input.read(cx).focus_handle());
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         view.update(app, |this, cx| {
             this.input
@@ -994,12 +1151,298 @@ impl GitBackend for TestBackend {
     }
 }
 
+struct SlowSubmoduleBackend;
+
+impl GitBackend for SlowSubmoduleBackend {
+    fn open(&self, workdir: &Path) -> Result<Arc<dyn GitRepository>> {
+        Ok(Arc::new(SlowSubmoduleRepo {
+            spec: RepoSpec {
+                workdir: workdir.to_path_buf(),
+            },
+        }))
+    }
+}
+
+struct SlowSubmoduleRepo {
+    spec: RepoSpec,
+}
+
+impl SlowSubmoduleRepo {
+    fn unsupported<T>() -> Result<T> {
+        Err(Error::new(ErrorKind::Unsupported(
+            "Slow submodule test repo does not implement this operation",
+        )))
+    }
+}
+
+impl GitRepository for SlowSubmoduleRepo {
+    fn spec(&self) -> &RepoSpec {
+        &self.spec
+    }
+
+    fn log_head_page(&self, _limit: usize, _cursor: Option<&LogCursor>) -> Result<LogPage> {
+        Self::unsupported()
+    }
+
+    fn commit_details(&self, _id: &CommitId) -> Result<CommitDetails> {
+        Self::unsupported()
+    }
+
+    fn reflog_head(&self, _limit: usize) -> Result<Vec<ReflogEntry>> {
+        Self::unsupported()
+    }
+
+    fn current_branch(&self) -> Result<String> {
+        Self::unsupported()
+    }
+
+    fn list_branches(&self) -> Result<Vec<Branch>> {
+        Self::unsupported()
+    }
+
+    fn list_remotes(&self) -> Result<Vec<Remote>> {
+        Self::unsupported()
+    }
+
+    fn list_remote_branches(&self) -> Result<Vec<RemoteBranch>> {
+        Self::unsupported()
+    }
+
+    fn status(&self) -> Result<RepoStatus> {
+        Self::unsupported()
+    }
+
+    fn diff_unified(&self, _target: &DiffTarget) -> Result<String> {
+        Self::unsupported()
+    }
+
+    fn create_branch(&self, _name: &str, _target: &CommitId) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn delete_branch(&self, _name: &str) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn checkout_branch(&self, _name: &str) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn revert(&self, _id: &CommitId) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn list_submodules(&self) -> Result<Vec<Submodule>> {
+        std::thread::sleep(Duration::from_millis(250));
+        Ok(Vec::new())
+    }
+
+    fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn stash_list(&self) -> Result<Vec<StashEntry>> {
+        Self::unsupported()
+    }
+
+    fn stash_apply(&self, _index: usize) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn stash_drop(&self, _index: usize) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn stage(&self, _paths: &[&Path]) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn unstage(&self, _paths: &[&Path]) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn commit(&self, _message: &str) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn fetch_all(&self) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn pull(&self, _mode: PullMode) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn push(&self) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
+        Self::unsupported()
+    }
+}
+
+struct SlowStashBackend;
+
+impl GitBackend for SlowStashBackend {
+    fn open(&self, workdir: &Path) -> Result<Arc<dyn GitRepository>> {
+        Ok(Arc::new(SlowStashRepo {
+            spec: RepoSpec {
+                workdir: workdir.to_path_buf(),
+            },
+        }))
+    }
+}
+
+struct SlowStashRepo {
+    spec: RepoSpec,
+}
+
+impl SlowStashRepo {
+    fn unsupported<T>() -> Result<T> {
+        Err(Error::new(ErrorKind::Unsupported(
+            "Slow stash test repo does not implement this operation",
+        )))
+    }
+}
+
+impl GitRepository for SlowStashRepo {
+    fn spec(&self) -> &RepoSpec {
+        &self.spec
+    }
+
+    fn log_head_page(&self, _limit: usize, _cursor: Option<&LogCursor>) -> Result<LogPage> {
+        Self::unsupported()
+    }
+
+    fn commit_details(&self, _id: &CommitId) -> Result<CommitDetails> {
+        Self::unsupported()
+    }
+
+    fn reflog_head(&self, _limit: usize) -> Result<Vec<ReflogEntry>> {
+        Self::unsupported()
+    }
+
+    fn current_branch(&self) -> Result<String> {
+        Self::unsupported()
+    }
+
+    fn list_branches(&self) -> Result<Vec<Branch>> {
+        Self::unsupported()
+    }
+
+    fn list_remotes(&self) -> Result<Vec<Remote>> {
+        Self::unsupported()
+    }
+
+    fn list_remote_branches(&self) -> Result<Vec<RemoteBranch>> {
+        Self::unsupported()
+    }
+
+    fn status(&self) -> Result<RepoStatus> {
+        Self::unsupported()
+    }
+
+    fn diff_unified(&self, _target: &DiffTarget) -> Result<String> {
+        Self::unsupported()
+    }
+
+    fn create_branch(&self, _name: &str, _target: &CommitId) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn delete_branch(&self, _name: &str) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn checkout_branch(&self, _name: &str) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn checkout_commit(&self, _id: &CommitId) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn cherry_pick(&self, _id: &CommitId) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn revert(&self, _id: &CommitId) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn stash_create(&self, _message: &str, _include_untracked: bool) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn stash_list(&self) -> Result<Vec<StashEntry>> {
+        std::thread::sleep(Duration::from_millis(250));
+        Ok(Vec::new())
+    }
+
+    fn stash_apply(&self, _index: usize) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn stash_drop(&self, _index: usize) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn stage(&self, _paths: &[&Path]) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn unstage(&self, _paths: &[&Path]) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn commit(&self, _message: &str) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn fetch_all(&self) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn pull(&self, _mode: PullMode) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn push(&self) -> Result<()> {
+        Self::unsupported()
+    }
+
+    fn discard_worktree_changes(&self, _paths: &[&Path]) -> Result<()> {
+        Self::unsupported()
+    }
+}
+
 fn repo_tab_selector(repo_id: RepoId) -> &'static str {
     Box::leak(format!("repo_tab_{}", repo_id.0).into_boxed_str())
 }
 
 fn worktrees_spinner_selector(repo_id: RepoId) -> &'static str {
     Box::leak(format!("worktrees_spinner_{}", repo_id.0).into_boxed_str())
+}
+
+fn submodules_spinner_selector(repo_id: RepoId) -> &'static str {
+    Box::leak(format!("submodules_spinner_{}", repo_id.0).into_boxed_str())
+}
+
+fn stash_spinner_selector(repo_id: RepoId) -> &'static str {
+    Box::leak(format!("stash_spinner_{}", repo_id.0).into_boxed_str())
+}
+
+fn debug_selector(prefix: &str, ix: usize) -> &'static str {
+    Box::leak(format!("{prefix}_{ix}").into_boxed_str())
 }
 
 fn wait_for_repo_count(store: &AppStore, expected: usize) -> Arc<gitcomet_state::model::AppState> {
@@ -1034,9 +1477,150 @@ fn wait_for_repo_order(store: &AppStore, expected: &[RepoId]) {
     }
 }
 
+fn wait_for_repo_open(store: &AppStore, repo_id: RepoId) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let state = store.snapshot();
+        if state
+            .repos
+            .iter()
+            .find(|repo| repo.id == repo_id)
+            .is_some_and(|repo| matches!(repo.open, Loadable::Ready(())))
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for repo {repo_id:?} to open");
+        }
+        std::thread::yield_now();
+    }
+}
+
+fn wait_until(description: &str, ready: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if ready() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for {description}");
+        }
+        std::thread::yield_now();
+    }
+}
+
+fn seed_workspace_repo(
+    cx: &mut gpui::VisualTestContext,
+    store: &AppStore,
+    view: gpui::Entity<crate::view::GitCometView>,
+    path: PathBuf,
+) {
+    store.dispatch(Msg::OpenRepo(path));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        cx.update(|window, app| {
+            view.update(app, |this, cx| {
+                crate::view::test_support::sync_store_snapshot(this, cx)
+            });
+            let _ = window.draw(app);
+        });
+        cx.run_until_parked();
+
+        let ready = cx.update(|_window, app| !view.read(app).blocks_non_repository_actions());
+        if ready {
+            return;
+        }
+
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for the workspace view to leave the splash state");
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn sync_view_for_tests(
+    cx: &mut gpui::VisualTestContext,
+    view: &gpui::Entity<crate::view::GitCometView>,
+) {
+    cx.update(|window, app| {
+        view.update(app, |this, cx| {
+            crate::view::test_support::sync_store_snapshot(this, cx)
+        });
+        let _ = window.draw(app);
+    });
+}
+
+fn find_debug_index(
+    cx: &mut gpui::VisualTestContext,
+    prefix: &str,
+    max_ix: usize,
+) -> Option<usize> {
+    (0..max_ix).find(|ix| cx.debug_bounds(debug_selector(prefix, *ix)).is_some())
+}
+
+fn wait_for_debug_index(
+    cx: &mut gpui::VisualTestContext,
+    view: &gpui::Entity<crate::view::GitCometView>,
+    prefix: &str,
+    max_ix: usize,
+) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        sync_view_for_tests(cx, view);
+
+        if let Some(ix) = find_debug_index(cx, prefix, max_ix) {
+            return ix;
+        }
+
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for debug selector prefix {prefix}");
+        }
+
+        cx.run_until_parked();
+        std::thread::yield_now();
+    }
+}
+
+fn click_debug_selector(
+    cx: &mut gpui::VisualTestContext,
+    selector: &'static str,
+    click_count: usize,
+) {
+    click_debug_selector_with_button(cx, selector, MouseButton::Left, click_count);
+}
+
+fn click_debug_selector_with_button(
+    cx: &mut gpui::VisualTestContext,
+    selector: &'static str,
+    button: MouseButton,
+    click_count: usize,
+) {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("expected debug selector {selector}"));
+    let center = bounds.center();
+    cx.simulate_mouse_move(center, None, Modifiers::default());
+    cx.simulate_event(MouseDownEvent {
+        position: center,
+        modifiers: Modifiers::default(),
+        button,
+        click_count,
+        first_mouse: false,
+    });
+    cx.simulate_event(MouseUpEvent {
+        position: center,
+        modifiers: Modifiers::default(),
+        button,
+        click_count,
+    });
+}
+
 fn restore_session_and_draw(
     cx: &mut gpui::VisualTestContext,
     store: &AppStore,
+    view: gpui::Entity<crate::view::GitCometView>,
     repos: Vec<PathBuf>,
 ) -> Vec<RepoId> {
     store.dispatch(Msg::RestoreSession {
@@ -1054,9 +1638,7 @@ fn restore_session_and_draw(
 
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        cx.update(|window, app| {
-            let _ = window.draw(app);
-        });
+        sync_view_for_tests(cx, &view);
 
         if selectors
             .iter()
@@ -1106,6 +1688,7 @@ fn repo_tabs_can_drag_reorder_by_right_half(cx: &mut gpui::TestAppContext) {
     let repo_ids = restore_session_and_draw(
         cx,
         &store_for_test,
+        _view.clone(),
         vec![base.join("repo1"), base.join("repo2"), base.join("repo3")],
     );
 
@@ -1151,6 +1734,7 @@ fn repo_tabs_can_drag_reorder_by_left_half(cx: &mut gpui::TestAppContext) {
     let repo_ids = restore_session_and_draw(
         cx,
         &store_for_test,
+        _view.clone(),
         vec![base.join("repo1"), base.join("repo2"), base.join("repo3")],
     );
 
@@ -1196,6 +1780,7 @@ fn repo_tabs_drop_on_self_is_noop(cx: &mut gpui::TestAppContext) {
     let repo_ids = restore_session_and_draw(
         cx,
         &store_for_test,
+        _view.clone(),
         vec![base.join("repo1"), base.join("repo2"), base.join("repo3")],
     );
 
@@ -1223,6 +1808,78 @@ fn repo_tabs_drop_on_self_is_noop(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn repo_tabs_middle_click_closes_inactive_tab_without_reactivating(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let store_for_test = store.clone();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        crate::view::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_repo_tabs_middle_close_{}",
+        std::process::id()
+    ));
+    let repo_ids = restore_session_and_draw(
+        cx,
+        &store_for_test,
+        view.clone(),
+        vec![base.join("repo1"), base.join("repo2"), base.join("repo3")],
+    );
+
+    let active_repo = repo_ids[0];
+    let closed_repo = repo_ids[1];
+    click_debug_selector_with_button(cx, repo_tab_selector(closed_repo), MouseButton::Middle, 1);
+
+    let state = wait_for_repo_count(&store_for_test, 2);
+    assert_eq!(
+        state.repos.iter().map(|repo| repo.id).collect::<Vec<_>>(),
+        vec![repo_ids[0], repo_ids[2]]
+    );
+    assert_eq!(state.active_repo, Some(active_repo));
+
+    sync_view_for_tests(cx, &view);
+    assert!(
+        cx.debug_bounds(repo_tab_selector(closed_repo)).is_none(),
+        "expected middle-clicked repo tab to be removed from the UI"
+    );
+}
+
+#[gpui::test]
+fn repo_tabs_right_click_does_not_close(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let store_for_test = store.clone();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        crate::view::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_repo_tabs_right_click_{}",
+        std::process::id()
+    ));
+    let repo_ids = restore_session_and_draw(
+        cx,
+        &store_for_test,
+        view.clone(),
+        vec![base.join("repo1"), base.join("repo2"), base.join("repo3")],
+    );
+
+    click_debug_selector_with_button(cx, repo_tab_selector(repo_ids[1]), MouseButton::Right, 1);
+
+    let state = store_for_test.snapshot();
+    assert_eq!(
+        state.repos.iter().map(|repo| repo.id).collect::<Vec<_>>(),
+        repo_ids
+    );
+    assert_eq!(state.active_repo, Some(repo_ids[0]));
+
+    sync_view_for_tests(cx, &view);
+    assert!(
+        cx.debug_bounds(repo_tab_selector(repo_ids[1])).is_some(),
+        "expected right-clicked repo tab to remain visible"
+    );
+}
+
+#[gpui::test]
 fn worktrees_section_shows_spinner_while_removing_worktree(cx: &mut gpui::TestAppContext) {
     let (store, events) = AppStore::new(Arc::new(TestBackend));
     let store_for_test = store.clone();
@@ -1234,7 +1891,8 @@ fn worktrees_section_shows_spinner_while_removing_worktree(cx: &mut gpui::TestAp
         "gitcomet_ui_test_worktrees_spinner_{}",
         std::process::id()
     ));
-    let repo_ids = restore_session_and_draw(cx, &store_for_test, vec![base.join("repo1")]);
+    let repo_ids =
+        restore_session_and_draw(cx, &store_for_test, _view.clone(), vec![base.join("repo1")]);
     let repo_id = repo_ids[0];
 
     store_for_test.dispatch(Msg::RemoveWorktree {
@@ -1245,9 +1903,7 @@ fn worktrees_section_shows_spinner_while_removing_worktree(cx: &mut gpui::TestAp
     let selector = worktrees_spinner_selector(repo_id);
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        cx.update(|window, app| {
-            let _ = window.draw(app);
-        });
+        sync_view_for_tests(cx, &_view);
 
         if cx.debug_bounds(selector).is_some() {
             break;
@@ -1262,6 +1918,160 @@ fn worktrees_section_shows_spinner_while_removing_worktree(cx: &mut gpui::TestAp
     }
 }
 
+#[gpui::test]
+fn submodules_section_shows_spinner_while_loading(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(SlowSubmoduleBackend));
+    let store_for_test = store.clone();
+    let (_view, cx) = cx.add_window_view(|window, cx| {
+        crate::view::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_submodules_spinner_{}",
+        std::process::id()
+    ));
+    let repo_ids =
+        restore_session_and_draw(cx, &store_for_test, _view.clone(), vec![base.join("repo1")]);
+    let repo_id = repo_ids[0];
+    wait_for_repo_open(&store_for_test, repo_id);
+
+    let section_ix = wait_for_debug_index(cx, &_view, "submodules_section", 64);
+    let section_selector = debug_selector("submodules_section", section_ix);
+    click_debug_selector(cx, section_selector, 1);
+
+    let selector = submodules_spinner_selector(repo_id);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        sync_view_for_tests(cx, &_view);
+
+        let repo_requested = store_for_test
+            .snapshot()
+            .repos
+            .iter()
+            .find(|repo| repo.id == repo_id)
+            .is_some_and(|repo| {
+                repo.sidebar_data_request.submodules && matches!(repo.submodules, Loadable::Loading)
+            });
+
+        if repo_requested && cx.debug_bounds(selector).is_some() {
+            break;
+        }
+
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for submodules spinner to render");
+        }
+
+        cx.run_until_parked();
+        std::thread::yield_now();
+    }
+}
+
+#[gpui::test]
+fn stash_section_shows_spinner_while_loading(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(SlowStashBackend));
+    let store_for_test = store.clone();
+    let (_view, cx) = cx.add_window_view(|window, cx| {
+        crate::view::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_stash_spinner_{}",
+        std::process::id()
+    ));
+    let repo_ids =
+        restore_session_and_draw(cx, &store_for_test, _view.clone(), vec![base.join("repo1")]);
+    let repo_id = repo_ids[0];
+    wait_for_repo_open(&store_for_test, repo_id);
+
+    let section_ix = wait_for_debug_index(cx, &_view, "stash_section", 64);
+    let section_selector = debug_selector("stash_section", section_ix);
+    click_debug_selector(cx, section_selector, 1);
+
+    let selector = stash_spinner_selector(repo_id);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        sync_view_for_tests(cx, &_view);
+
+        let repo_requested = store_for_test
+            .snapshot()
+            .repos
+            .iter()
+            .find(|repo| repo.id == repo_id)
+            .is_some_and(|repo| {
+                repo.sidebar_data_request.stashes && matches!(repo.stashes, Loadable::Loading)
+            });
+
+        if repo_requested && cx.debug_bounds(selector).is_some() {
+            break;
+        }
+
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for stash spinner to render");
+        }
+
+        cx.run_until_parked();
+        std::thread::yield_now();
+    }
+}
+
+#[gpui::test]
+fn listed_workspace_badge_double_click_opens_closed_repo_tab(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(SlowSubmoduleBackend));
+    let store_for_test = store.clone();
+    let (_view, cx) = cx.add_window_view(|window, cx| {
+        crate::view::GitCometView::new(store, events, None, window, cx)
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_badge_open_{}",
+        std::process::id()
+    ));
+    let repo_ids =
+        restore_session_and_draw(cx, &store_for_test, _view.clone(), vec![base.join("repo1")]);
+    let repo_id = repo_ids[0];
+    wait_for_repo_open(&store_for_test, repo_id);
+
+    let linked_repo = base.join("repo-feature");
+    store_for_test.dispatch(Msg::Internal(
+        gitcomet_state::msg::InternalMsg::BranchesLoaded {
+            repo_id,
+            result: Ok(vec![Branch {
+                name: "feature/workspace".to_string(),
+                target: CommitId("deadbeef".into()),
+                upstream: None,
+                divergence: None,
+            }]),
+        },
+    ));
+    store_for_test.dispatch(Msg::Internal(
+        gitcomet_state::msg::InternalMsg::WorktreesLoaded {
+            repo_id,
+            result: Ok(vec![Worktree {
+                path: linked_repo.clone(),
+                head: None,
+                branch: Some("feature/workspace".to_string()),
+                detached: false,
+            }]),
+        },
+    ));
+
+    let badge_ix = wait_for_debug_index(cx, &_view, "branch_workspace_badge", 64);
+    let badge_selector = debug_selector("branch_workspace_badge", badge_ix);
+    click_debug_selector(cx, badge_selector, 2);
+
+    wait_until("linked repository tab to open from badge", || {
+        let snapshot = store_for_test.snapshot();
+        snapshot
+            .repos
+            .iter()
+            .any(|repo| repo.spec.workdir == linked_repo)
+            && snapshot
+                .active_repo
+                .and_then(|active_repo| snapshot.repos.iter().find(|repo| repo.id == active_repo))
+                .is_some_and(|repo| repo.spec.workdir == linked_repo)
+    });
+}
+
 struct PanelLayoutTestView {
     theme: AppTheme,
     handle: gpui::UniformListScrollHandle,
@@ -1270,7 +2080,7 @@ struct PanelLayoutTestView {
 impl PanelLayoutTestView {
     fn new() -> Self {
         Self {
-            theme: AppTheme::zed_ayu_dark(),
+            theme: AppTheme::gitcomet_dark(),
             handle: gpui::UniformListScrollHandle::default(),
         }
     }
@@ -1307,7 +2117,7 @@ impl gpui::Render for PanelLayoutTestView {
             ),
         )
         .h_full()
-        .track_scroll(self.handle.clone());
+        .track_scroll(&self.handle);
 
         let body = div()
             .id("diff_body")
@@ -1414,7 +2224,7 @@ impl PickerPromptScrollbarTestView {
         });
 
         Self {
-            theme: AppTheme::zed_ayu_dark(),
+            theme: AppTheme::gitcomet_dark(),
             input,
             scroll_handle: ScrollHandle::new(),
         }
@@ -1436,7 +2246,12 @@ impl gpui::Render for PickerPromptScrollbarTestView {
                 components::PickerPrompt::new(self.input.clone(), self.scroll_handle.clone())
                     .items(items)
                     .max_height(px(120.0))
-                    .render(self.theme, cx, |_this, _ix, _event, _window, _cx| {}),
+                    .render(
+                        self.theme,
+                        ui_scale::DEFAULT_UI_SCALE_PERCENT,
+                        cx,
+                        |_this, _ix, _event, _window, _cx| {},
+                    ),
             ),
         )
     }
@@ -1507,9 +2322,16 @@ fn picker_prompt_scrollbar_drag_scrolls_list(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn popover_is_clickable_above_content(cx: &mut gpui::TestAppContext) {
     let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let store_for_view = store.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        crate::view::GitCometView::new(store, events, None, window, cx)
+        crate::view::GitCometView::new(store_for_view, events, None, window, cx)
     });
+    seed_workspace_repo(
+        cx,
+        &store,
+        view.clone(),
+        PathBuf::from("/tmp/gitcomet-smoke-popover-click-test"),
+    );
 
     // Open the repo picker dropdown in the action bar, which should overlay the rest of the UI.
     let picker_bounds = cx
@@ -1552,7 +2374,7 @@ fn popover_is_clickable_above_content(cx: &mut gpui::TestAppContext) {
 
     cx.update(|_window, app| {
         assert!(
-            !view.read(app).is_popover_open(app),
+            !crate::view::test_support::popover_is_open(view.read(app), app),
             "expected popover to close on click"
         );
     });
@@ -1561,9 +2383,16 @@ fn popover_is_clickable_above_content(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn popover_closes_when_clicking_outside(cx: &mut gpui::TestAppContext) {
     let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let store_for_view = store.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        crate::view::GitCometView::new(store, events, None, window, cx)
+        crate::view::GitCometView::new(store_for_view, events, None, window, cx)
     });
+    seed_workspace_repo(
+        cx,
+        &store,
+        view.clone(),
+        PathBuf::from("/tmp/gitcomet-smoke-popover-outside-test"),
+    );
 
     let picker_bounds = cx
         .debug_bounds("repo_picker")
@@ -1583,7 +2412,7 @@ fn popover_closes_when_clicking_outside(cx: &mut gpui::TestAppContext) {
 
     cx.update(|_window, app| {
         assert!(
-            view.read(app).is_popover_open(app),
+            crate::view::test_support::popover_is_open(view.read(app), app),
             "expected popover to open"
         );
     });
@@ -1597,7 +2426,7 @@ fn popover_closes_when_clicking_outside(cx: &mut gpui::TestAppContext) {
 
     cx.update(|_window, app| {
         assert!(
-            !view.read(app).is_popover_open(app),
+            !crate::view::test_support::popover_is_open(view.read(app), app),
             "expected popover to close when clicking outside"
         );
     });
@@ -1611,9 +2440,16 @@ fn titlebar_hamburger_opens_app_menu_but_brand_pill_does_not(cx: &mut gpui::Test
 
     let _visual_guard = lock_visual_test();
     let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let store_for_view = store.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        crate::view::GitCometView::new(store, events, None, window, cx)
+        crate::view::GitCometView::new(store_for_view, events, None, window, cx)
     });
+    seed_workspace_repo(
+        cx,
+        &store,
+        view.clone(),
+        PathBuf::from("/tmp/gitcomet-smoke-titlebar-menu-test"),
+    );
 
     cx.update(|window, app| {
         let _ = window.draw(app);
@@ -1639,7 +2475,7 @@ fn titlebar_hamburger_opens_app_menu_but_brand_pill_does_not(cx: &mut gpui::Test
     });
     cx.update(|_window, app| {
         assert!(
-            !view.read(app).is_popover_open(app),
+            !crate::view::test_support::popover_is_open(view.read(app), app),
             "expected titlebar brand pill click to leave the app menu closed"
         );
     });
@@ -1664,10 +2500,100 @@ fn titlebar_hamburger_opens_app_menu_but_brand_pill_does_not(cx: &mut gpui::Test
     });
     cx.update(|_window, app| {
         assert!(
-            view.read(app).is_popover_open(app),
+            crate::view::test_support::popover_is_open(view.read(app), app),
             "expected hamburger click to open the app menu"
         );
     });
+}
+
+#[gpui::test]
+fn titlebar_free_badge_opens_editions_page_and_updates_tooltip_on_hover(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        crate::view::GitCometView::new(store, events, None, window, cx)
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    let badge_bounds = cx
+        .debug_bounds("titlebar_free_badge")
+        .expect("expected titlebar free badge bounds");
+    let badge_center = badge_bounds.center();
+
+    cx.simulate_mouse_move(badge_center, None, Modifiers::default());
+    cx.run_until_parked();
+    cx.update(|_window, app| {
+        assert_eq!(
+            crate::view::test_support::tooltip_text(view.read(app), app),
+            Some("See GitComet editions".into())
+        );
+    });
+
+    cx.simulate_mouse_down(badge_center, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(badge_center, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+
+    assert_eq!(cx.opened_url(), Some(crate::view::EDITIONS_URL.to_string()));
+    cx.update(|_window, app| {
+        assert!(
+            !crate::view::test_support::popover_is_open(view.read(app), app),
+            "expected titlebar free badge click to leave popovers closed"
+        );
+    });
+
+    cx.simulate_mouse_move(gpui::point(px(120.0), px(18.0)), None, Modifiers::default());
+    cx.run_until_parked();
+    cx.update(|_window, app| {
+        assert_eq!(
+            crate::view::test_support::tooltip_text(view.read(app), app),
+            None
+        );
+    });
+}
+
+#[gpui::test]
+fn titlebar_free_badge_keeps_the_same_size_across_ui_zoom(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        crate::view::GitCometView::new(store, events, None, window, cx)
+    });
+
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    let default_bounds = cx
+        .debug_bounds("titlebar_free_badge")
+        .expect("expected titlebar free badge bounds at the default zoom");
+    let default_width: f32 = default_bounds.size.width.into();
+    let default_height: f32 = default_bounds.size.height.into();
+
+    cx.update(|window, app| {
+        view.update(app, |this, cx| {
+            this.apply_ui_scale_percent(200, window, cx);
+        });
+        let _ = window.draw(app);
+    });
+    cx.run_until_parked();
+
+    let zoomed_bounds = cx
+        .debug_bounds("titlebar_free_badge")
+        .expect("expected titlebar free badge bounds after zooming");
+    let zoomed_width: f32 = zoomed_bounds.size.width.into();
+    let zoomed_height: f32 = zoomed_bounds.size.height.into();
+
+    assert!(
+        (zoomed_width - default_width).abs() <= 0.5,
+        "expected the FREE badge width to stay fixed across zoom (default={default_width}, zoomed={zoomed_width})"
+    );
+    assert!(
+        (zoomed_height - default_height).abs() <= 0.5,
+        "expected the FREE badge height to stay fixed across zoom (default={default_height}, zoomed={zoomed_height})"
+    );
 }
 
 #[gpui::test]
@@ -1693,7 +2619,7 @@ fn titlebar_window_controls_update_tooltip_on_hover(cx: &mut gpui::TestAppContex
     cx.run_until_parked();
     cx.update(|_window, app| {
         assert_eq!(
-            view.read(app).tooltip_text_for_test(app),
+            crate::view::test_support::tooltip_text(view.read(app), app),
             Some("Minimize window".into())
         );
     });
@@ -1712,7 +2638,7 @@ fn titlebar_window_controls_update_tooltip_on_hover(cx: &mut gpui::TestAppContex
     cx.run_until_parked();
     cx.update(|_window, app| {
         assert_eq!(
-            view.read(app).tooltip_text_for_test(app),
+            crate::view::test_support::tooltip_text(view.read(app), app),
             Some(expected_max)
         );
     });
@@ -1724,7 +2650,7 @@ fn titlebar_window_controls_update_tooltip_on_hover(cx: &mut gpui::TestAppContex
     cx.run_until_parked();
     cx.update(|_window, app| {
         assert_eq!(
-            view.read(app).tooltip_text_for_test(app),
+            crate::view::test_support::tooltip_text(view.read(app), app),
             Some("Close window".into())
         );
     });
@@ -1732,7 +2658,10 @@ fn titlebar_window_controls_update_tooltip_on_hover(cx: &mut gpui::TestAppContex
     cx.simulate_mouse_move(gpui::point(px(120.0), px(18.0)), None, Modifiers::default());
     cx.run_until_parked();
     cx.update(|_window, app| {
-        assert_eq!(view.read(app).tooltip_text_for_test(app), None);
+        assert_eq!(
+            crate::view::test_support::tooltip_text(view.read(app), app),
+            None
+        );
     });
 }
 
@@ -1745,7 +2674,7 @@ struct ScrollbarTestView {
 impl ScrollbarTestView {
     fn new(rows: usize) -> Self {
         Self {
-            theme: AppTheme::zed_ayu_dark(),
+            theme: AppTheme::gitcomet_dark(),
             handle: ScrollHandle::new(),
             rows,
         }
@@ -1945,7 +2874,7 @@ struct ScrollbarMismatchedBoundsView {
 impl ScrollbarMismatchedBoundsView {
     fn new(rows: usize) -> Self {
         Self {
-            theme: AppTheme::zed_ayu_dark(),
+            theme: AppTheme::gitcomet_dark(),
             handle: ScrollHandle::new(),
             rows,
         }

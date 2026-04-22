@@ -12,10 +12,7 @@ pub(super) fn model(
         let selection = pane
             .status_multi_selection
             .get(&repo_id)
-            .map(|sel| match area {
-                DiffArea::Unstaged => sel.unstaged.as_slice(),
-                DiffArea::Staged => sel.staged.as_slice(),
-            })
+            .map(|sel| sel.selected_paths_for_area(area))
             .unwrap_or(&[]);
 
         let use_selection = selection.len() > 1 && selection.iter().any(|p| p == path);
@@ -28,39 +25,32 @@ pub(super) fn model(
         .repos
         .iter()
         .find(|r| r.id == repo_id)
-        .and_then(|r| match &r.status {
-            Loadable::Ready(status) => {
-                let unstaged_kind = status
-                    .unstaged
-                    .iter()
-                    .find(|s| &s.path == path)
-                    .map(|s| s.kind);
-                let staged_kind = status
-                    .staged
-                    .iter()
-                    .find(|s| &s.path == path)
-                    .map(|s| s.kind);
+        .map(|repo| {
+            let unstaged_kind = repo
+                .status_entry_for_path(DiffArea::Unstaged, path.as_path())
+                .map(|status| status.kind);
+            let staged_kind = repo
+                .status_entry_for_path(DiffArea::Staged, path.as_path())
+                .map(|status| status.kind);
 
-                Some((
-                    matches!(
-                        unstaged_kind,
-                        Some(gitcomet_core::domain::FileStatusKind::Conflicted)
-                    ) || matches!(
-                        staged_kind,
-                        Some(gitcomet_core::domain::FileStatusKind::Conflicted)
-                    ),
-                    matches!(
-                        unstaged_kind,
-                        Some(gitcomet_core::domain::FileStatusKind::Conflicted)
-                    ),
-                    unstaged_kind.is_some(),
-                    matches!(
-                        staged_kind,
-                        Some(gitcomet_core::domain::FileStatusKind::Added)
-                    ),
-                ))
-            }
-            _ => None,
+            (
+                matches!(
+                    unstaged_kind,
+                    Some(gitcomet_core::domain::FileStatusKind::Conflicted)
+                ) || matches!(
+                    staged_kind,
+                    Some(gitcomet_core::domain::FileStatusKind::Conflicted)
+                ),
+                matches!(
+                    unstaged_kind,
+                    Some(gitcomet_core::domain::FileStatusKind::Conflicted)
+                ),
+                unstaged_kind.is_some(),
+                matches!(
+                    staged_kind,
+                    Some(gitcomet_core::domain::FileStatusKind::Added)
+                ),
+            )
         })
         .unwrap_or((false, false, false, false));
 
@@ -85,7 +75,7 @@ pub(super) fn model(
 
     items.push(ContextMenuItem::Entry {
         label: "Open diff".into(),
-        icon: Some("↗".into()),
+        icon: Some("icons/open_external.svg".into()),
         shortcut: None,
         disabled: false,
         action: if area == DiffArea::Unstaged && is_unstaged_conflicted {
@@ -105,7 +95,7 @@ pub(super) fn model(
     });
     items.push(ContextMenuItem::Entry {
         label: "Open file".into(),
-        icon: Some("🗎".into()),
+        icon: Some("icons/file.svg".into()),
         shortcut: None,
         disabled: false,
         action: Box::new(ContextMenuAction::OpenFile {
@@ -115,7 +105,7 @@ pub(super) fn model(
     });
     items.push(ContextMenuItem::Entry {
         label: "Open file location".into(),
-        icon: Some("📂".into()),
+        icon: Some("icons/folder.svg".into()),
         shortcut: None,
         disabled: false,
         action: Box::new(ContextMenuAction::OpenFileLocation {
@@ -125,7 +115,7 @@ pub(super) fn model(
     });
     items.push(ContextMenuItem::Entry {
         label: "File history".into(),
-        icon: Some("⟲".into()),
+        icon: Some("icons/refresh.svg".into()),
         shortcut: Some("H".into()),
         disabled: false,
         action: Box::new(ContextMenuAction::OpenPopover {
@@ -144,7 +134,7 @@ pub(super) fn model(
             } else {
                 "Resolve using ours".into()
             },
-            icon: Some("⇤".into()),
+            icon: Some("icons/arrow_left.svg".into()),
             shortcut: Some("O".into()),
             disabled: false,
             action: Box::new(ContextMenuAction::CheckoutConflictSideSelectionOrPath {
@@ -160,7 +150,7 @@ pub(super) fn model(
             } else {
                 "Resolve using theirs".into()
             },
-            icon: Some("⇥".into()),
+            icon: Some("icons/arrow_right.svg".into()),
             shortcut: Some("T".into()),
             disabled: false,
             action: Box::new(ContextMenuAction::CheckoutConflictSideSelectionOrPath {
@@ -178,7 +168,7 @@ pub(super) fn model(
             } else {
                 "Resolve manually… (select 1 file)".into()
             },
-            icon: Some("✎".into()),
+            icon: Some("icons/pencil.svg".into()),
             shortcut: Some("M".into()),
             disabled: !can_manual,
             action: Box::new(ContextMenuAction::SelectConflictDiff {
@@ -194,7 +184,7 @@ pub(super) fn model(
                 } else {
                     "Open external mergetool (select 1 file)".into()
                 },
-                icon: Some("↗".into()),
+                icon: Some("icons/open_external.svg".into()),
                 shortcut: None,
                 disabled: !can_launch_external_mergetool,
                 action: Box::new(ContextMenuAction::LaunchMergetool {
@@ -211,7 +201,7 @@ pub(super) fn model(
                 } else {
                     "Stage".into()
                 },
-                icon: Some("+".into()),
+                icon: Some("icons/plus.svg".into()),
                 shortcut: Some("S".into()),
                 disabled: false,
                 action: Box::new(ContextMenuAction::StageSelectionOrPath {
@@ -226,7 +216,7 @@ pub(super) fn model(
                 } else {
                     "Unstage".into()
                 },
-                icon: Some("−".into()),
+                icon: Some("icons/minus.svg".into()),
                 shortcut: Some("U".into()),
                 disabled: false,
                 action: Box::new(ContextMenuAction::UnstageSelectionOrPath {
@@ -246,7 +236,7 @@ pub(super) fn model(
             } else {
                 "Discard changes".into()
             },
-            icon: Some("↺".into()),
+            icon: Some("icons/refresh.svg".into()),
             shortcut: Some("D".into()),
             disabled: !can_discard_worktree_changes,
             action: Box::new(ContextMenuAction::DiscardWorktreeChangesSelectionOrPath {
@@ -264,7 +254,7 @@ pub(super) fn model(
         .unwrap_or_else(|_| path_text_for_copy(path));
     items.push(ContextMenuItem::Entry {
         label: "Copy path".into(),
-        icon: Some("⧉".into()),
+        icon: Some("icons/copy.svg".into()),
         shortcut: Some("C".into()),
         disabled: false,
         action: Box::new(ContextMenuAction::CopyText {

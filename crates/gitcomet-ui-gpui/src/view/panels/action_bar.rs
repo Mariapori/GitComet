@@ -4,6 +4,15 @@ use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+const ACTION_BAR_HEIGHT_PX: f32 = components::CONTROL_HEIGHT_PX + 8.0;
+
+pub(in super::super) fn action_bar_height<C>(cx: &mut C) -> Pixels
+where
+    C: gpui::BorrowAppContext,
+{
+    crate::ui_scale::design_px(ACTION_BAR_HEIGHT_PX, cx)
+}
+
 fn head_branch_has_tracking_upstream(
     head_branch: &Loadable<String>,
     branches: &Loadable<Arc<Vec<Branch>>>,
@@ -67,7 +76,7 @@ impl ActionBarView {
             repo.upstream_divergence_rev.hash(&mut hasher);
             repo.merge_message_rev.hash(&mut hasher);
             repo.ops_rev.hash(&mut hasher);
-            repo.status_rev.hash(&mut hasher);
+            repo.status_cache_rev().hash(&mut hasher);
             repo.loads_in_flight.any_in_flight().hash(&mut hasher);
         }
 
@@ -205,12 +214,17 @@ impl ActionBarView {
 impl Render for ActionBarView {
     fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let action_bar_height = action_bar_height(cx);
+        let ui_scale_percent = crate::ui_scale::current(cx).percent;
+        let scaled_px =
+            |value: f32| crate::ui_scale::design_px_from_percent(value, ui_scale_percent);
         let hover_bg = with_alpha(theme.colors.text, if theme.is_dark { 0.06 } else { 0.04 });
         let active_bg = with_alpha(theme.colors.text, if theme.is_dark { 0.10 } else { 0.07 });
         let icon_primary = theme.colors.accent;
         let icon_muted = with_alpha(theme.colors.accent, if theme.is_dark { 0.72 } else { 0.82 });
-        let icon = |path: &'static str, color: gpui::Rgba| svg_icon(path, color, px(14.0));
-        let spinner = |id: (&'static str, u64), color: gpui::Rgba| svg_spinner(id, color, px(14.0));
+        let icon = |path: &'static str, color: gpui::Rgba| svg_icon(path, color, scaled_px(14.0));
+        let spinner =
+            |id: (&'static str, u64), color: gpui::Rgba| svg_spinner(id, color, scaled_px(14.0));
         let count_badge = |count: usize, color: gpui::Rgba| {
             div()
                 .text_xs()
@@ -263,9 +277,12 @@ impl Render for ActionBarView {
 
         let can_stash = self
             .active_repo()
-            .and_then(|r| match &r.status {
-                Loadable::Ready(s) => Some(!s.staged.is_empty() || !s.unstaged.is_empty()),
-                _ => None,
+            .map(|repo| {
+                repo.worktree_status_entries()
+                    .is_some_and(|entries| !entries.is_empty())
+                    || repo
+                        .staged_status_entries()
+                        .is_some_and(|entries| !entries.is_empty())
             })
             .unwrap_or(false);
 
@@ -442,7 +459,7 @@ impl Render for ActionBarView {
                     ),
                 )
                 .style(components::SplitButtonStyle::Outlined)
-                .render(theme),
+                .render(theme, ui_scale_percent),
             )
             .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
                 let text = pull_tooltip_text(pull_count, pull_tracking_branch_name.as_deref());
@@ -563,7 +580,7 @@ impl Render for ActionBarView {
                     ),
                 )
                 .style(components::SplitButtonStyle::Outlined)
-                .render(theme),
+                .render(theme, ui_scale_percent),
             )
             .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
                 let text = push_tooltip_text(push_count, push_tracking_branch_name.as_deref());
@@ -626,6 +643,9 @@ impl Render for ActionBarView {
             }));
 
         div()
+            .w_full()
+            .h(action_bar_height)
+            .flex_none()
             .flex()
             .items_center()
             .justify_between()
@@ -801,8 +821,10 @@ mod tests {
     #[test]
     fn notify_fingerprint_changes_when_branches_rev_changes() {
         let repo_id = RepoId(1);
-        let mut state = AppState::default();
-        state.active_repo = Some(repo_id);
+        let mut state = AppState {
+            active_repo: Some(repo_id),
+            ..AppState::default()
+        };
         state.repos.push(RepoState::new_opening(
             repo_id,
             RepoSpec {

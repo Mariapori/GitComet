@@ -6,12 +6,25 @@ pub(super) fn model(this: &PopoverHost, repo_id: RepoId, commit_id: &CommitId) -
     let short: SharedString = sha.get(0..8).unwrap_or(&sha).to_string().into();
 
     let repo = this.state.repos.iter().find(|r| r.id == repo_id);
-    let tags = repo
-        .and_then(|r| match &r.tags {
-            Loadable::Ready(tags) => Some(tags.as_slice()),
-            _ => None,
-        })
-        .unwrap_or(&[]);
+    let tags = match repo.map(|r| &r.tags) {
+        Some(Loadable::Ready(tags)) => Some(tags.as_slice()),
+        Some(Loadable::Error(err)) => {
+            return ContextMenuModel::new(vec![
+                ContextMenuItem::Header(format!("Tags on {short}").into()),
+                ContextMenuItem::Separator,
+                ContextMenuItem::Label(err.clone().into()),
+            ]);
+        }
+        Some(Loadable::Loading) | Some(Loadable::NotLoaded) => {
+            return ContextMenuModel::new(vec![
+                ContextMenuItem::Header(format!("Tags on {short}").into()),
+                ContextMenuItem::Separator,
+                ContextMenuItem::Label("Loading tags…".into()),
+            ]);
+        }
+        None => None,
+    }
+    .unwrap_or(&[]);
     let mut remote_names = repo
         .and_then(|r| match &r.remotes {
             Loadable::Ready(remotes) => Some(
@@ -56,7 +69,7 @@ pub(super) fn model(this: &PopoverHost, repo_id: RepoId, commit_id: &CommitId) -
         }
         items.push(ContextMenuItem::Entry {
             label: format!("Delete tag {name}").into(),
-            icon: Some("🗑".into()),
+            icon: Some("icons/trash.svg".into()),
             shortcut: None,
             disabled: false,
             action: Box::new(ContextMenuAction::DeleteTag {
@@ -68,7 +81,7 @@ pub(super) fn model(this: &PopoverHost, repo_id: RepoId, commit_id: &CommitId) -
         for remote in &remote_names {
             items.push(ContextMenuItem::Entry {
                 label: format!("Push tag {name} to {remote}").into(),
-                icon: Some("↑".into()),
+                icon: Some("icons/arrow_up.svg".into()),
                 shortcut: None,
                 disabled: false,
                 action: Box::new(ContextMenuAction::PushTag {
@@ -80,7 +93,7 @@ pub(super) fn model(this: &PopoverHost, repo_id: RepoId, commit_id: &CommitId) -
             if remote_tags.contains(&(remote.as_str(), name.as_str())) {
                 items.push(ContextMenuItem::Entry {
                     label: format!("Delete tag {name} from {remote}").into(),
-                    icon: Some("🗑".into()),
+                    icon: Some("icons/trash.svg".into()),
                     shortcut: None,
                     disabled: false,
                     action: Box::new(ContextMenuAction::DeleteRemoteTag {

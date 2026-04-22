@@ -12,10 +12,18 @@ mod cli;
 mod crashlog;
 mod difftool_mode;
 mod extract_fixtures_mode;
+#[cfg(any(
+    all(target_os = "linux", feature = "ui-gpui-runtime"),
+    all(test, feature = "ui-gpui-runtime")
+))]
+mod linux_wayland_fallback;
 mod mergetool_mode;
 mod setup_mode;
 
 use cli::{AppMode, exit_code};
+use gitcomet_core::process::install_git_executable_path;
+#[cfg(all(target_os = "linux", feature = "ui-gpui-runtime"))]
+use linux_wayland_fallback::maybe_relaunch_with_linux_x11_fallback;
 use mimalloc::MiMalloc;
 
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
@@ -148,6 +156,13 @@ fn main() {
             std::process::exit(exit_code::ERROR);
         }
     };
+
+    install_configured_git_executable_preference(&mode);
+
+    #[cfg(all(target_os = "linux", feature = "ui-gpui-runtime"))]
+    if let Some(code) = maybe_relaunch_with_linux_x11_fallback(&mode) {
+        std::process::exit(code);
+    }
 
     #[cfg(feature = "ui")]
     crashlog::install();
@@ -288,6 +303,22 @@ fn main() {
     }
 }
 
+fn mode_uses_configured_git_executable_preference(mode: &AppMode) -> bool {
+    // The persisted custom Git executable is a browser-window preference.
+    // Git-invoked command modes intentionally keep using `git` from PATH so
+    // they track the invoking Git installation rather than browser settings.
+    matches!(mode, AppMode::Browser { .. })
+}
+
+fn install_configured_git_executable_preference(mode: &AppMode) {
+    if !mode_uses_configured_git_executable_preference(mode) {
+        return;
+    }
+
+    let session = gitcomet_state::session::load();
+    let _ = install_git_executable_path(session.git_executable_path);
+}
+
 #[cfg(all(target_os = "macos", feature = "ui-gpui-runtime"))]
 const MACOS_BUNDLE_RELAUNCH_ENV: &str = "GITCOMET_SKIP_APP_BUNDLE_RELAUNCH";
 #[cfg(all(target_os = "macos", feature = "ui-gpui-runtime"))]
@@ -383,6 +414,33 @@ fn maybe_relaunch_browser_from_macos_app_bundle() -> bool {
 }
 
 #[cfg(all(target_os = "macos", feature = "ui-gpui-runtime"))]
+fn ad_hoc_codesign(path: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new("codesign")
+        .arg("--force")
+        .arg("--sign")
+        .arg("-")
+        .arg(path)
+        .output()
+        .map_err(|e| format!("failed to run codesign for {}: {e}", path.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(": {stdout}"),
+            (true, false) => format!(": {stderr}"),
+            (false, false) => format!(": stdout={stdout}; stderr={stderr}"),
+        };
+        return Err(format!(
+            "codesign returned non-zero exit status while signing {}{}",
+            path.display(),
+            details
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "ui-gpui-runtime"))]
 fn ensure_macos_dev_app_bundle(
     current_exe: &std::path::Path,
     app_bundle: &std::path::Path,
@@ -403,19 +461,32 @@ fn ensure_macos_dev_app_bundle(
     std::fs::write(&icon_png, MACOS_APP_ICON_PNG)
         .map_err(|e| format!("failed to write icon PNG: {e}"))?;
 
-    let icon_status = std::process::Command::new("sips")
+    let icon_output = std::process::Command::new("sips")
         .arg("-s")
         .arg("format")
         .arg("icns")
         .arg(&icon_png)
         .arg("--out")
         .arg(&icon_icns)
-        .status()
+        .output()
         .map_err(|e| format!("failed to run sips: {e}"))?;
-    if !icon_status.success() {
+    if !icon_output.status.success() {
+        let stderr = String::from_utf8_lossy(&icon_output.stderr)
+            .trim()
+            .to_string();
+        let stdout = String::from_utf8_lossy(&icon_output.stdout)
+            .trim()
+            .to_string();
+        let details = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(": {stdout}"),
+            (true, false) => format!(": {stderr}"),
+            (false, false) => format!(": stdout={stdout}; stderr={stderr}"),
+        };
         return Err(format!(
-            "sips returned non-zero exit status while generating {}",
-            icon_icns.display()
+            "sips returned non-zero exit status while generating {}{}",
+            icon_icns.display(),
+            details
         ));
     }
     let _ = std::fs::remove_file(icon_png);
@@ -456,6 +527,8 @@ fn ensure_macos_dev_app_bundle(
     );
     std::fs::write(contents.join("Info.plist"), plist)
         .map_err(|e| format!("failed to write Info.plist: {e}"))?;
+
+    ad_hoc_codesign(app_bundle)?;
 
     Ok(app_exe)
 }
@@ -686,6 +759,59 @@ mod tests {
     }
 
     #[test]
+    fn configured_git_preference_is_intentionally_browser_only() {
+        assert!(mode_uses_configured_git_executable_preference(
+            &AppMode::Browser { path: None }
+        ));
+        assert!(!mode_uses_configured_git_executable_preference(
+            &AppMode::Difftool(cli::DifftoolConfig {
+                local: std::path::PathBuf::from("left.txt"),
+                remote: std::path::PathBuf::from("right.txt"),
+                display_path: None,
+                label_left: None,
+                label_right: None,
+                gui: false,
+            })
+        ));
+        assert!(!mode_uses_configured_git_executable_preference(
+            &AppMode::Mergetool(cli::MergetoolConfig {
+                merged: std::path::PathBuf::from("merged.txt"),
+                local: std::path::PathBuf::from("local.txt"),
+                remote: std::path::PathBuf::from("remote.txt"),
+                base: Some(std::path::PathBuf::from("base.txt")),
+                label_base: None,
+                label_local: None,
+                label_remote: None,
+                conflict_style: ConflictStyle::Merge,
+                diff_algorithm: DiffAlgorithm::Myers,
+                marker_size: DEFAULT_MARKER_SIZE,
+                auto: false,
+                gui: false,
+            })
+        ));
+        assert!(!mode_uses_configured_git_executable_preference(
+            &AppMode::Setup {
+                dry_run: false,
+                local: false,
+            }
+        ));
+        assert!(!mode_uses_configured_git_executable_preference(
+            &AppMode::Uninstall {
+                dry_run: false,
+                local: false,
+            }
+        ));
+        assert!(!mode_uses_configured_git_executable_preference(
+            &AppMode::ExtractMergeFixtures(cli::ExtractMergeFixturesConfig {
+                repo: std::path::PathBuf::from("/tmp/repo"),
+                output_dir: std::path::PathBuf::from("/tmp/out"),
+                max_merges: 10,
+                max_files_per_merge: 5,
+            })
+        ));
+    }
+
+    #[test]
     #[cfg(feature = "ui-gpui-runtime")]
     fn build_focused_mergetool_gui_config_uses_default_labels() {
         let tmp = tempfile::tempdir().unwrap();
@@ -725,7 +851,10 @@ mod tests {
     #[test]
     #[cfg(feature = "ui-gpui-runtime")]
     fn build_focused_mergetool_gui_config_errors_without_repo_root() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("gitcomet-mergetool-no-repo-")
+            .tempdir()
+            .expect("create temp dir outside repo");
         let merged = tmp.path().join("outside-repo/merged.txt");
 
         fs::create_dir_all(merged.parent().unwrap()).unwrap();
@@ -796,6 +925,38 @@ mod tests {
             Some(&std::path::PathBuf::from("/opt/homebrew/bin/GitComet.app"))
         );
         assert_eq!(candidates.last(), Some(&macos_user_app_bundle_path()));
+    }
+
+    #[test]
+    #[cfg(all(feature = "ui-gpui-runtime", target_os = "macos"))]
+    fn ensure_macos_dev_app_bundle_replaces_stale_signature_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_bundle = temp.path().join("GitComet.app");
+        let stale_signature = app_bundle.join("Contents/_CodeSignature/CodeResources");
+
+        fs::create_dir_all(stale_signature.parent().unwrap()).unwrap();
+        fs::write(&stale_signature, b"stale-signature").unwrap();
+
+        let current_exe = std::env::current_exe().expect("current test executable path");
+        let app_exe =
+            ensure_macos_dev_app_bundle(&current_exe, &app_bundle).expect("prepare app bundle");
+
+        assert_eq!(
+            app_exe,
+            app_bundle.join(std::path::Path::new("Contents/MacOS/gitcomet"))
+        );
+
+        let status = std::process::Command::new("codesign")
+            .arg("--verify")
+            .arg("--strict")
+            .arg("--verbose=2")
+            .arg(&app_bundle)
+            .status()
+            .expect("run codesign verification");
+        assert!(
+            status.success(),
+            "expected rebuilt app bundle to pass codesign verification"
+        );
     }
 
     #[test]

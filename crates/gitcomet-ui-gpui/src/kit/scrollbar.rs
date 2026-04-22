@@ -7,6 +7,8 @@ use gpui::{
 };
 use std::time::Duration;
 
+pub const SCROLLBAR_GUTTER_PX: f32 = 16.0;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScrollbarMarkerKind {
     Add,
@@ -64,6 +66,7 @@ struct ScrollbarInteractionState {
     showing: bool,
     hide_task: Option<gpui::Task<()>>,
     last_scroll: Pixels,
+    thumb_visible: bool,
     /// Some GPUI scroll surfaces report positive offsets while others report negative offsets.
     /// Track the observed sign so the thumb moves/drag-scrolls in the correct direction.
     offset_sign: i8,
@@ -76,6 +79,7 @@ impl Default for ScrollbarInteractionState {
             showing: false,
             hide_task: None,
             last_scroll: px(0.0),
+            thumb_visible: false,
             offset_sign: -1,
         }
     }
@@ -96,15 +100,15 @@ impl ScrollbarHandle {
                 .borrow()
                 .last_item_size
                 .map(|size| (size.contents.height - size.item.height).max(px(0.0)))
-                .unwrap_or_else(|| handle.0.borrow().base_handle.max_offset().height),
+                .unwrap_or_else(|| handle.0.borrow().base_handle.max_offset().y),
             (ScrollbarAxis::Horizontal, Self::UniformList(handle)) => handle
                 .0
                 .borrow()
                 .last_item_size
                 .map(|size| (size.contents.width - size.item.width).max(px(0.0)))
-                .unwrap_or_else(|| handle.0.borrow().base_handle.max_offset().width),
-            (ScrollbarAxis::Vertical, _) => self.base_handle().max_offset().height.max(px(0.0)),
-            (ScrollbarAxis::Horizontal, _) => self.base_handle().max_offset().width.max(px(0.0)),
+                .unwrap_or_else(|| handle.0.borrow().base_handle.max_offset().x),
+            (ScrollbarAxis::Vertical, _) => self.base_handle().max_offset().y.max(px(0.0)),
+            (ScrollbarAxis::Horizontal, _) => self.base_handle().max_offset().x.max(px(0.0)),
         }
     }
 
@@ -265,15 +269,23 @@ impl Scrollbar {
                 })
             },
             move |bounds, prepaint, window, cx| {
-                let Some(prepaint) = prepaint else {
-                    return;
-                };
-
                 let interaction = window.use_keyed_state(
                     (id.clone(), "scrollbar_interaction"),
                     cx,
                     |_window, _cx| ScrollbarInteractionState::default(),
                 );
+                let thumb_visible = prepaint.is_some();
+                let visibility_changed = interaction.read(cx).thumb_visible != thumb_visible;
+                if visibility_changed {
+                    interaction.update(cx, |interaction, cx| {
+                        interaction.thumb_visible = thumb_visible;
+                        cx.notify();
+                    });
+                }
+
+                let Some(prepaint) = prepaint else {
+                    return;
+                };
                 let capture_phase = if interaction.read(cx).drag_offset.is_some() {
                     DispatchPhase::Capture
                 } else {
@@ -351,7 +363,7 @@ impl Scrollbar {
                         });
                     }
 
-                    // Zed-style autohide: show on hover/drag, then hide after a delay.
+                    // Auto-hide: show on hover/drag, then hide after a delay.
                     let state = interaction.read(cx);
                     let show = hovered || is_dragging || state.showing;
                     let should_schedule_hide =
@@ -369,7 +381,7 @@ impl Scrollbar {
                             let task = cx.spawn(
                                 async move |state: gpui::WeakEntity<ScrollbarInteractionState>,
                                             cx: &mut gpui::AsyncApp| {
-                                    gpui::Timer::after(Duration::from_millis(1000)).await;
+                                    smol::Timer::after(Duration::from_millis(1000)).await;
                                     let _ = state.update(cx, |s, cx| {
                                         if s.drag_offset.is_none() {
                                             s.showing = false;
@@ -552,7 +564,7 @@ impl Scrollbar {
                 .top_0()
                 .right_0()
                 .bottom_0()
-                .w(px(16.0))
+                .w(px(SCROLLBAR_GUTTER_PX))
                 .child(paint),
             ScrollbarAxis::Horizontal => div()
                 .id(self.id)
@@ -560,7 +572,7 @@ impl Scrollbar {
                 .left_0()
                 .right_0()
                 .bottom_0()
-                .h(px(16.0))
+                .h(px(SCROLLBAR_GUTTER_PX))
                 .child(paint),
         };
 
@@ -572,13 +584,26 @@ impl Scrollbar {
 
         base
     }
+
+    pub fn gutter(_axis: ScrollbarAxis) -> Pixels {
+        px(SCROLLBAR_GUTTER_PX)
+    }
+
+    pub fn visible_gutter(handle: impl Into<ScrollbarHandle>, axis: ScrollbarAxis) -> Pixels {
+        let handle: ScrollbarHandle = handle.into();
+        if handle.max_offset(axis) > px(0.0) {
+            Self::gutter(axis)
+        } else {
+            px(0.0)
+        }
+    }
 }
 
 #[cfg(test)]
 impl Scrollbar {
     pub fn thumb_visible_for_test(handle: &ScrollHandle, viewport_h_fallback: Pixels) -> bool {
         let viewport_h = viewport_h_fallback;
-        let max_offset = handle.max_offset().height.max(px(0.0));
+        let max_offset = handle.max_offset().y.max(px(0.0));
         let raw_offset_y = handle.offset().y;
         let scroll_y = if raw_offset_y < px(0.0) {
             (-raw_offset_y).max(px(0.0)).min(max_offset)
@@ -590,18 +615,18 @@ impl Scrollbar {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ThumbMetrics {
-    offset: Pixels,
-    length: Pixels,
-    thickness: Pixels,
+pub(crate) struct ThumbMetrics {
+    pub(crate) offset: Pixels,
+    pub(crate) length: Pixels,
+    pub(crate) thickness: Pixels,
 }
 
 fn marker_colors(
     theme: AppTheme,
     kind: ScrollbarMarkerKind,
 ) -> (Option<gpui::Rgba>, Option<gpui::Rgba>) {
-    let mut add = theme.colors.success;
-    let mut rem = theme.colors.danger;
+    let mut add = theme.colors.diff_add_text;
+    let mut rem = theme.colors.diff_remove_text;
     let alpha = if theme.is_dark { 0.70 } else { 0.55 };
     add.a = alpha;
     rem.a = alpha;
@@ -647,7 +672,7 @@ fn clamped_track_axis_position(
     }
 }
 
-fn compute_vertical_click_offset(
+pub(crate) fn compute_vertical_click_offset(
     event_y: Pixels,
     track_bounds: Bounds<Pixels>,
     thumb_size: Pixels,
@@ -705,7 +730,7 @@ fn compute_horizontal_click_offset(
     scroll_x * sign
 }
 
-fn vertical_thumb_metrics(
+pub(crate) fn vertical_thumb_metrics(
     viewport_h: Pixels,
     max_offset: Pixels,
     scroll_y: Pixels,
@@ -776,7 +801,7 @@ mod tests {
 
     #[test]
     fn scrollbar_thumb_alpha_in_range() {
-        for theme in [AppTheme::zed_ayu_dark(), AppTheme::zed_one_light()] {
+        for theme in [AppTheme::gitcomet_dark(), AppTheme::gitcomet_light()] {
             for c in [
                 theme.colors.scrollbar_thumb,
                 theme.colors.scrollbar_thumb_hover,

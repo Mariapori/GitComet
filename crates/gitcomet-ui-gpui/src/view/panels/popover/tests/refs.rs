@@ -36,7 +36,7 @@ fn tag_menu_lists_delete_entries_for_commit_tags(cx: &mut gpui::TestAppContext) 
                 gitcomet_core::domain::LogPage {
                     commits: vec![gitcomet_core::domain::Commit {
                         id: commit_id.clone(),
-                        parent_ids: vec![],
+                        parent_ids: gitcomet_core::domain::CommitParentIds::new(),
                         summary: "Hello".into(),
                         author: "Alice".into(),
                         time: SystemTime::UNIX_EPOCH,
@@ -259,7 +259,6 @@ fn create_tag_prompt_escape_cancels(cx: &mut gpui::TestAppContext) {
             crate::kit::Enter,
             Some("TextInput"),
         )]);
-        view.update(app, |this, _cx| this.disable_poller_for_tests());
         let _ = window.draw(app);
     });
 
@@ -305,7 +304,6 @@ fn create_tag_prompt_renders_shortcut_hints_and_separators(cx: &mut gpui::TestAp
         .add_window_view(|window, cx| GitCometView::new(store_for_view, events, None, window, cx));
 
     cx.update(|window, app| {
-        view.update(app, |this, _cx| this.disable_poller_for_tests());
         let _ = window.draw(app);
     });
 
@@ -347,7 +345,6 @@ fn create_tag_prompt_cancel_button_closes(cx: &mut gpui::TestAppContext) {
         .add_window_view(|window, cx| GitCometView::new(store_for_view, events, None, window, cx));
 
     cx.update(|window, app| {
-        view.update(app, |this, _cx| this.disable_poller_for_tests());
         let _ = window.draw(app);
     });
 
@@ -395,7 +392,6 @@ fn create_tag_prompt_create_button_click_creates_and_closes(cx: &mut gpui::TestA
         .add_window_view(|window, cx| GitCometView::new(store_for_view, events, None, window, cx));
 
     cx.update(|window, app| {
-        view.update(app, |this, _cx| this.disable_poller_for_tests());
         let _ = window.draw(app);
     });
 
@@ -457,7 +453,6 @@ fn create_tag_prompt_create_button_click_with_empty_input_does_not_close_or_crea
         .add_window_view(|window, cx| GitCometView::new(store_for_view, events, None, window, cx));
 
     cx.update(|window, app| {
-        view.update(app, |this, _cx| this.disable_poller_for_tests());
         let _ = window.draw(app);
     });
 
@@ -512,7 +507,6 @@ fn create_tag_prompt_enter_creates_and_closes(cx: &mut gpui::TestAppContext) {
             crate::kit::Enter,
             Some("TextInput"),
         )]);
-        view.update(app, |this, _cx| this.disable_poller_for_tests());
         let _ = window.draw(app);
     });
 
@@ -585,7 +579,6 @@ fn create_tag_prompt_enter_with_empty_input_does_not_close_or_create(
             crate::kit::Enter,
             Some("TextInput"),
         )]);
-        view.update(app, |this, _cx| this.disable_poller_for_tests());
         let _ = window.draw(app);
     });
 
@@ -1028,6 +1021,67 @@ fn remote_branch_menu_has_pull_merge_and_squash_actions(cx: &mut gpui::TestAppCo
             }) if rid == repo_id && target == branch_name
         ));
     });
+}
+
+#[gpui::test]
+fn remote_branch_menu_renders_squash_entry_without_panic(cx: &mut gpui::TestAppContext) {
+    let (store, events) = AppStore::new(Arc::new(TestBackend));
+    let (view, cx) =
+        cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
+
+    let repo_id = RepoId(232);
+    let branch_name = "origin/feature/awesome".to_string();
+    let workdir = std::env::temp_dir().join(format!(
+        "gitcomet_ui_test_{}_remote_branch_menu_render",
+        std::process::id()
+    ));
+
+    cx.update(|window, app| {
+        view.update(app, |this, cx| {
+            let mut repo = RepoState::new_opening(
+                repo_id,
+                gitcomet_core::domain::RepoSpec {
+                    workdir: workdir.clone(),
+                },
+            );
+            repo.head_branch = Loadable::Ready("main".to_string());
+
+            let state = Arc::new(AppState {
+                repos: vec![repo],
+                active_repo: Some(repo_id),
+                ..Default::default()
+            });
+            this.state = Arc::clone(&state);
+            this._ui_model
+                .update(cx, |model, cx| model.set_state(state, cx));
+            cx.notify();
+        });
+        let _ = window.draw(app);
+    });
+
+    cx.update(|window, app| {
+        view.update(app, |this, cx| {
+            this.popover_host.update(cx, |host, cx| {
+                host.open_popover_at(
+                    PopoverKind::BranchMenu {
+                        repo_id,
+                        section: BranchSection::Remote,
+                        name: branch_name.clone(),
+                    },
+                    gpui::point(gpui::px(120.0), gpui::px(72.0)),
+                    window,
+                    cx,
+                );
+            });
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    cx.debug_bounds("context_menu_squash_into_current")
+        .expect("expected remote branch squash entry to render");
 }
 
 #[gpui::test]

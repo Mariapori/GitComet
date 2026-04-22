@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(super) struct CachedDiffTextSegment {
     pub(super) text: SharedString,
@@ -11,7 +12,7 @@ pub(super) struct CachedDiffTextSegment {
 #[derive(Clone, Debug)]
 pub(super) struct CachedDiffStyledText {
     pub(super) text: SharedString,
-    pub(super) highlights: Arc<Vec<(Range<usize>, gpui::HighlightStyle)>>,
+    pub(super) highlights: Arc<[(Range<usize>, gpui::HighlightStyle)]>,
     pub(super) highlights_hash: u64,
     pub(super) text_hash: u64,
 }
@@ -23,26 +24,42 @@ pub(super) enum SyntaxTokenKind {
     CommentDoc,
     String,
     StringEscape,
+    StringRegex,
+    StringSpecial,
     Keyword,
     KeywordControl,
+    Preproc,
     Number,
     Boolean,
     Function,
     FunctionMethod,
     FunctionSpecial,
+    Constructor,
     Type,
     TypeBuiltin,
     TypeInterface,
+    Namespace,
     Variable,
     VariableParameter,
     VariableSpecial,
+    VariableBuiltin,
     Property,
+    Label,
     Constant,
+    ConstantBuiltin,
     Operator,
     Punctuation,
     PunctuationBracket,
     PunctuationDelimiter,
+    PunctuationSpecial,
+    PunctuationListMarker,
     Tag,
     Attribute,
+    MarkupHeading,
+    MarkupLink,
+    TextLiteral,
+    DiffPlus,
+    DiffMinus,
+    DiffDelta,
     Lifetime,
 }

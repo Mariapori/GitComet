@@ -1,8 +1,9 @@
 use crate::theme::AppTheme;
+use crate::ui_scale::UiScale;
 use gpui::prelude::*;
-use gpui::{CursorStyle, Div, ElementId, FontWeight, SharedString, Stateful, div, px};
+use gpui::{CursorStyle, Div, ElementId, SharedString, Stateful, div, px};
 
-use super::CONTROL_HEIGHT_MD_PX;
+use super::control_height_md;
 
 pub fn context_menu(theme: AppTheme, content: impl IntoElement) -> Div {
     div()
@@ -10,16 +11,25 @@ pub fn context_menu(theme: AppTheme, content: impl IntoElement) -> Div {
         .min_w_full()
         .flex()
         .flex_col()
+        .items_stretch()
         .text_color(theme.colors.text)
         .child(content)
 }
 
-pub fn context_menu_header(theme: AppTheme, title: impl Into<SharedString>) -> Div {
+pub fn context_menu_header(
+    theme: AppTheme,
+    ui_scale: impl Into<UiScale>,
+    title: impl Into<SharedString>,
+) -> Div {
+    let ui_scale = ui_scale.into();
+    let scaled_px = |value| ui_scale.px(value);
     div()
         .w_full()
-        .px_2()
-        .py_1()
+        .self_stretch()
+        .px(scaled_px(8.0))
+        .py(scaled_px(4.0))
         .text_xs()
+        .line_height(scaled_px(14.0))
         .line_clamp(1)
         .whitespace_nowrap()
         .overflow_hidden()
@@ -27,20 +37,32 @@ pub fn context_menu_header(theme: AppTheme, title: impl Into<SharedString>) -> D
         .child(title.into())
 }
 
-pub fn context_menu_label(theme: AppTheme, text: impl Into<SharedString>) -> Div {
+pub fn context_menu_label(
+    theme: AppTheme,
+    ui_scale: impl Into<UiScale>,
+    text: impl Into<SharedString>,
+) -> Div {
+    let ui_scale = ui_scale.into();
+    let scaled_px = |value| ui_scale.px(value);
     div()
         .w_full()
-        .px_2()
-        .pb_1()
+        .self_stretch()
+        .px(scaled_px(8.0))
+        .pb(scaled_px(4.0))
         .text_sm()
+        .line_height(scaled_px(18.0))
         .text_color(theme.colors.text)
         .line_clamp(2)
         .child(text.into())
 }
 
-pub fn context_menu_separator(theme: AppTheme) -> Div {
+pub fn context_menu_separator(theme: AppTheme, ui_scale: impl Into<UiScale>) -> Div {
+    let ui_scale = ui_scale.into();
+    let scaled_px = |value| ui_scale.px(value);
     div()
         .w_full()
+        .self_stretch()
+        .my(scaled_px(2.0))
         .border_t_1()
         .border_color(theme.colors.border)
 }
@@ -48,33 +70,32 @@ pub fn context_menu_separator(theme: AppTheme) -> Div {
 pub fn context_menu_entry(
     id: impl Into<ElementId>,
     theme: AppTheme,
+    ui_scale: impl Into<UiScale>,
     selected: bool,
     disabled: bool,
     icon: Option<SharedString>,
     label: impl Into<SharedString>,
     shortcut: Option<SharedString>,
 ) -> Stateful<Div> {
+    let ui_scale = ui_scale.into();
+    let scaled_px = |value| ui_scale.px(value);
     let label: SharedString = label.into();
     let icon_path = icon
         .as_ref()
         .and_then(|icon| context_menu_icon_path(icon.as_ref(), label.as_ref()));
-    let icon_fallback = if icon_path.is_none() {
-        icon.clone()
-    } else {
-        None
-    };
     let icon_color = context_menu_icon_color(theme, disabled, label.as_ref(), icon_path);
 
     let mut row = div()
         .id(id)
-        .h(px(CONTROL_HEIGHT_MD_PX))
+        .h(control_height_md(ui_scale))
         .w_full()
         .min_w_full()
-        .px_2()
+        .self_stretch()
+        .px(scaled_px(8.0))
         .flex()
         .items_center()
         .justify_between()
-        .gap_2()
+        .gap(scaled_px(8.0))
         .rounded(px(theme.radii.row))
         .text_color(theme.colors.text)
         .when(selected, |s| s.bg(theme.colors.hover))
@@ -87,26 +108,21 @@ pub fn context_menu_entry(
             div()
                 .flex()
                 .items_center()
-                .gap_2()
+                .gap(scaled_px(8.0))
                 .flex_1()
                 .min_w(px(0.0))
                 .child(
                     div()
-                        .w(px(16.0))
+                        .w(scaled_px(16.0))
                         .flex()
                         .items_center()
                         .justify_center()
                         .when_some(icon_path, |this, path| {
-                            this.child(crate::view::icons::svg_icon(path, icon_color, px(13.0)))
-                        })
-                        .when_some(icon_fallback, |this, icon| {
-                            this.child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(icon_color)
-                                    .child(icon),
-                            )
+                            this.child(crate::view::icons::svg_icon(
+                                path,
+                                icon_color,
+                                scaled_px(13.0),
+                            ))
                         }),
                 )
                 .child(
@@ -114,6 +130,7 @@ pub fn context_menu_entry(
                         .flex_1()
                         .min_w(px(0.0))
                         .text_sm()
+                        .line_height(scaled_px(18.0))
                         .line_clamp(1)
                         .child(label),
                 ),
@@ -122,9 +139,10 @@ pub fn context_menu_entry(
     let mut end = div()
         .flex()
         .items_center()
-        .gap_2()
-        .font_family("monospace")
+        .gap(scaled_px(8.0))
+        .font_family(crate::font_preferences::EDITOR_MONOSPACE_FONT_FAMILY)
         .text_xs()
+        .line_height(scaled_px(14.0))
         .text_color(theme.colors.text_muted);
 
     if let Some(shortcut) = shortcut {
@@ -184,41 +202,35 @@ fn context_menu_icon_color(
 fn context_menu_icon_path(icon: &str, label: &str) -> Option<&'static str> {
     let trimmed = icon.trim();
     let by_icon = match trimmed {
-        "link" => Some("icons/link.svg"),
-        "unlink" => Some("icons/unlink.svg"),
-        "+" => Some("icons/plus.svg"),
-        "-" => Some("icons/minus.svg"),
-        "?" => Some("icons/question.svg"),
-        "!" => Some("icons/warning.svg"),
+        "icons/link.svg" | "link" => Some("icons/link.svg"),
+        "icons/unlink.svg" | "unlink" => Some("icons/unlink.svg"),
+        "icons/plus.svg" => Some("icons/plus.svg"),
+        "icons/minus.svg" => Some("icons/minus.svg"),
+        "icons/question.svg" => Some("icons/question.svg"),
+        "icons/warning.svg" => Some("icons/warning.svg"),
         "A" | "B" | "C" => None,
-        "✓" => Some("icons/check.svg"),
-        "âœ“" => Some("icons/check.svg"),
-        "⎇" => Some("icons/git_branch.svg"),
-        "↓" | "⬇" => Some("icons/arrow_down.svg"),
-        "↑" | "⇡" => Some("icons/arrow_up.svg"),
-        "🧹" => Some("icons/broom.svg"),
-        "🏷" => Some("icons/tag.svg"),
-        "🗑" => Some("icons/trash.svg"),
-        "↺" | "↻" | "⟲" => Some("icons/refresh.svg"),
-        "↗" => Some("icons/open_external.svg"),
-        "🗎" => Some("icons/file.svg"),
-        "📂" => Some("icons/folder.svg"),
-        "⧉" => Some("icons/copy.svg"),
-        "▣" => Some("icons/box.svg"),
-        "≡" => Some("icons/menu.svg"),
-        "â‰¡" => Some("icons/menu.svg"),
-        "⇄" => Some("icons/swap.svg"),
-        "⚠" => Some("icons/warning.svg"),
-        "∞" => Some("icons/infinity.svg"),
-        "⇤" => Some("icons/arrow_left.svg"),
-        "⇥" => Some("icons/arrow_right.svg"),
-        "↶" => Some("icons/undo.svg"),
-        "✎" => Some("icons/pencil.svg"),
-        "âœŽ" => Some("icons/pencil.svg"),
-        "−" => Some("icons/minus.svg"),
-        "âˆ’" => Some("icons/minus.svg"),
-        "→" => Some("icons/swap.svg"),
-        "â†’" => Some("icons/swap.svg"),
+        "icons/check.svg" => Some("icons/check.svg"),
+        "icons/git_branch.svg" => Some("icons/git_branch.svg"),
+        "icons/arrow_down.svg" => Some("icons/arrow_down.svg"),
+        "icons/arrow_up.svg" => Some("icons/arrow_up.svg"),
+        "icons/broom.svg" => Some("icons/broom.svg"),
+        "icons/tag.svg" => Some("icons/tag.svg"),
+        "icons/trash.svg" => Some("icons/trash.svg"),
+        "icons/refresh.svg" => Some("icons/refresh.svg"),
+        "icons/open_external.svg" => Some("icons/open_external.svg"),
+        "icons/file.svg" => Some("icons/file.svg"),
+        "icons/folder.svg" => Some("icons/folder.svg"),
+        "icons/copy.svg" => Some("icons/copy.svg"),
+        "icons/box.svg" => Some("icons/box.svg"),
+        "icons/menu.svg" => Some("icons/menu.svg"),
+        "icons/swap.svg" => Some("icons/swap.svg"),
+        "icons/arrow_right.svg" => Some("icons/arrow_right.svg"),
+        "icons/infinity.svg" => Some("icons/infinity.svg"),
+        "icons/arrow_left.svg" => Some("icons/arrow_left.svg"),
+        "icons/undo.svg" => Some("icons/undo.svg"),
+        "icons/pencil.svg" => Some("icons/pencil.svg"),
+        "icons/cloud.svg" => Some("icons/cloud.svg"),
+        "icons/computer.svg" => Some("icons/computer.svg"),
         _ => None,
     };
     if by_icon.is_some() {
@@ -249,6 +261,9 @@ fn context_menu_icon_path(icon: &str, label: &str) -> Option<&'static str> {
     if label.starts_with("Unstage") {
         return Some("icons/minus.svg");
     }
+    if label.contains("Squash") {
+        return Some("icons/arrow_right.svg");
+    }
     if label.contains("Edit") {
         return Some("icons/pencil.svg");
     }
@@ -272,15 +287,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn context_menu_icon_path_maps_pencil_and_trash_icons() {
-        assert_eq!(
-            context_menu_icon_path("✎", "Edit fetch URL"),
-            Some("icons/pencil.svg")
-        );
-        assert_eq!(
-            context_menu_icon_path("🗑", "Delete branch"),
-            Some("icons/trash.svg")
-        );
+    fn context_menu_icon_path_accepts_direct_svg_paths() {
+        let paths = [
+            "icons/link.svg",
+            "icons/unlink.svg",
+            "icons/plus.svg",
+            "icons/minus.svg",
+            "icons/question.svg",
+            "icons/warning.svg",
+            "icons/check.svg",
+            "icons/git_branch.svg",
+            "icons/arrow_down.svg",
+            "icons/arrow_up.svg",
+            "icons/broom.svg",
+            "icons/tag.svg",
+            "icons/trash.svg",
+            "icons/refresh.svg",
+            "icons/open_external.svg",
+            "icons/file.svg",
+            "icons/folder.svg",
+            "icons/copy.svg",
+            "icons/box.svg",
+            "icons/menu.svg",
+            "icons/swap.svg",
+            "icons/arrow_right.svg",
+            "icons/infinity.svg",
+            "icons/arrow_left.svg",
+            "icons/undo.svg",
+            "icons/pencil.svg",
+            "icons/cloud.svg",
+            "icons/computer.svg",
+        ];
+
+        for path in paths {
+            assert_eq!(context_menu_icon_path(path, "test"), Some(path));
+        }
     }
 
     #[test]
@@ -305,11 +346,15 @@ mod tests {
             context_menu_icon_path("", "Remove remote"),
             Some("icons/trash.svg")
         );
+        assert_eq!(
+            context_menu_icon_path("", "Squash into current"),
+            Some("icons/arrow_right.svg")
+        );
     }
 
     #[test]
     fn context_menu_icon_color_preserves_destructive_and_warning_semantics() {
-        let theme = AppTheme::zed_ayu_dark();
+        let theme = AppTheme::gitcomet_dark();
         assert_eq!(
             context_menu_icon_color(theme, false, "Delete branch", Some("icons/trash.svg")),
             theme.colors.danger
@@ -321,16 +366,39 @@ mod tests {
     }
 
     #[test]
-    fn context_menu_icon_path_covers_all_context_menu_glyph_icons() {
-        // Keep this list in sync with `ContextMenuItem::Entry { icon: Some(...) }` glyphs.
-        let glyphs = [
-            "+", "?", "!", "✓", "⎇", "↓", "⬇", "↑", "⇡", "🧹", "🏷", "🗑", "↺", "↻", "⟲", "↗", "🗎",
-            "📂", "⧉", "▣", "≡", "⇄", "⚠", "∞", "⇤", "⇥", "↶", "✎", "−", "→",
+    fn context_menu_icon_path_covers_all_context_menu_svg_icons() {
+        let paths = [
+            "icons/plus.svg",
+            "icons/check.svg",
+            "icons/git_branch.svg",
+            "icons/arrow_down.svg",
+            "icons/arrow_up.svg",
+            "icons/broom.svg",
+            "icons/tag.svg",
+            "icons/trash.svg",
+            "icons/refresh.svg",
+            "icons/open_external.svg",
+            "icons/file.svg",
+            "icons/folder.svg",
+            "icons/copy.svg",
+            "icons/box.svg",
+            "icons/infinity.svg",
+            "icons/swap.svg",
+            "icons/arrow_right.svg",
+            "icons/arrow_left.svg",
+            "icons/pencil.svg",
+            "icons/link.svg",
+            "icons/unlink.svg",
+            "icons/warning.svg",
+            "icons/minus.svg",
+            "icons/cloud.svg",
+            "icons/computer.svg",
         ];
-        for glyph in glyphs {
-            assert!(
-                context_menu_icon_path(glyph, "test").is_some(),
-                "missing SVG mapping for context-menu glyph icon: {glyph}"
+        for path in paths {
+            assert_eq!(
+                context_menu_icon_path(path, "test"),
+                Some(path),
+                "missing direct SVG support for context-menu icon path: {path}"
             );
         }
     }

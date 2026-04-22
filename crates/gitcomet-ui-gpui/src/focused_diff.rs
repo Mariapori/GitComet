@@ -5,12 +5,13 @@
 
 use crate::assets::GitCometAssets;
 use crate::launch_guard::run_with_panic_guard;
-use crate::theme::{AppTheme, with_alpha};
+use crate::theme::AppTheme;
+use gitcomet_state::session;
 use gpui::prelude::*;
 use gpui::{
-    App, Application, Bounds, FocusHandle, Focusable, FontWeight, KeyBinding, Render, ScrollHandle,
+    App, Bounds, FocusHandle, Focusable, FontWeight, KeyBinding, Pixels, Render, ScrollHandle,
     SharedString, TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, actions,
-    div, point, px, size,
+    div, point,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -19,6 +20,31 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 actions!(focused_diff, [Close]);
 const FOCUSED_DIFF_EXIT_ERROR: i32 = 2;
+const FOCUSED_DIFF_MIN_WIDTH_PX: f32 = 500.0;
+const FOCUSED_DIFF_MIN_HEIGHT_PX: f32 = 300.0;
+const FOCUSED_DIFF_DEFAULT_WIDTH_PX: f32 = 900.0;
+const FOCUSED_DIFF_DEFAULT_HEIGHT_PX: f32 = 650.0;
+
+actions!(
+    focused_diff_scale,
+    [IncreaseUiScale, DecreaseUiScale, ResetUiScale]
+);
+
+fn focused_diff_min_size_for_percent(percent: u32) -> gpui::Size<Pixels> {
+    crate::ui_scale::design_size_from_percent(
+        FOCUSED_DIFF_MIN_WIDTH_PX,
+        FOCUSED_DIFF_MIN_HEIGHT_PX,
+        percent,
+    )
+}
+
+fn focused_diff_default_size_for_percent(percent: u32) -> gpui::Size<Pixels> {
+    crate::ui_scale::design_size_from_percent(
+        FOCUSED_DIFF_DEFAULT_WIDTH_PX,
+        FOCUSED_DIFF_DEFAULT_HEIGHT_PX,
+        percent,
+    )
+}
 
 // ── Public config ────────────────────────────────────────────────────
 
@@ -41,6 +67,10 @@ struct FocusedDiffView {
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
     theme: AppTheme,
+    ui_font_family: String,
+    editor_font_family: String,
+    use_font_ligatures: bool,
+    ui_scale_percent: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +101,10 @@ impl FocusedDiffView {
             .unwrap_or_else(|| format!("{} vs {}", config.label_left, config.label_right));
 
         let theme = AppTheme::default_for_window_appearance(window.appearance());
+        let ui_session = session::load();
+        let ui_scale = crate::ui_scale::current_or_initialize_from_session(&ui_session, cx);
+        let font_preferences =
+            crate::font_preferences::current_or_initialize_from_session(window, &ui_session, cx);
 
         Self {
             lines,
@@ -79,12 +113,39 @@ impl FocusedDiffView {
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
             theme,
+            ui_font_family: crate::font_preferences::applied_ui_font_family(
+                &font_preferences.ui_font_family,
+            ),
+            editor_font_family: crate::font_preferences::applied_editor_font_family(
+                &font_preferences.editor_font_family,
+            ),
+            use_font_ligatures: font_preferences.use_font_ligatures,
+            ui_scale_percent: ui_scale.percent,
         }
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
         self.exit_code.store(0, Ordering::SeqCst);
         cx.quit();
+    }
+
+    fn set_ui_scale_percent(&mut self, percent: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let percent = crate::ui_scale::set_current(cx, percent).percent;
+        if self.ui_scale_percent == percent {
+            return;
+        }
+
+        self.ui_scale_percent = percent;
+        crate::ui_scale::apply_to_window(window, percent);
+        crate::app::ensure_window_respects_min_size(
+            window,
+            focused_diff_min_size_for_percent(percent),
+        );
+        let _ = session::persist_ui_settings(session::UiSettings {
+            ui_scale_percent: Some(percent),
+            ..session::UiSettings::default()
+        });
+        cx.notify();
     }
 }
 
@@ -121,56 +182,80 @@ fn parse_diff_lines(text: &str) -> Vec<DiffLine> {
 }
 
 impl Render for FocusedDiffView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let line_count = self.lines.len();
+        let scaled_px = |value| crate::ui_scale::design_px_from_window(value, window);
 
         div()
             .id("focused-diff-root")
             .key_context("FocusedDiff")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &Close, _window, cx| this.close(cx)))
+            .on_action(cx.listener(|this, _: &IncreaseUiScale, window, cx| {
+                this.set_ui_scale_percent(
+                    crate::ui_scale::step_up(this.ui_scale_percent),
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &DecreaseUiScale, window, cx| {
+                this.set_ui_scale_percent(
+                    crate::ui_scale::step_down(this.ui_scale_percent),
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &ResetUiScale, window, cx| {
+                this.set_ui_scale_percent(crate::ui_scale::DEFAULT_UI_SCALE_PERCENT, window, cx);
+            }))
             .size_full()
             .bg(theme.colors.window_bg)
             .text_color(theme.colors.text)
-            .font_family("monospace")
-            .text_size(px(13.0))
+            .font(gpui::Font {
+                family: self.ui_font_family.clone().into(),
+                features: crate::font_preferences::applied_font_features(self.use_font_ligatures),
+                fallbacks: None,
+                weight: FontWeight::default(),
+                style: gpui::FontStyle::default(),
+            })
+            .text_size(scaled_px(13.0))
             .flex()
             .flex_col()
             // Toolbar
             .child(
                 div()
                     .w_full()
-                    .px(px(12.0))
-                    .py(px(8.0))
+                    .px(scaled_px(12.0))
+                    .py(scaled_px(8.0))
                     .bg(theme.colors.surface_bg)
                     .border_b_1()
                     .border_color(theme.colors.border)
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(scaled_px(8.0))
                     .child(
                         div()
                             .font_weight(FontWeight::BOLD)
-                            .text_size(px(14.0))
+                            .text_size(scaled_px(14.0))
                             .child(SharedString::from(self.title.clone())),
                     )
                     .child(div().flex_grow())
                     .child(
                         div()
                             .text_color(theme.colors.text_muted)
-                            .text_size(px(12.0))
+                            .text_size(scaled_px(12.0))
                             .child(SharedString::from(format!("{line_count} lines"))),
                     )
                     .child(
                         div()
                             .id("btn-close")
-                            .px(px(10.0))
-                            .py(px(4.0))
+                            .px(scaled_px(10.0))
+                            .py(scaled_px(4.0))
                             .bg(theme.colors.accent)
-                            .text_color(gpui::rgba(0xffffffff))
-                            .rounded(px(2.0))
+                            .text_color(theme.colors.accent_text)
+                            .rounded(scaled_px(2.0))
                             .cursor_pointer()
                             .font_weight(FontWeight::BOLD)
                             .on_click(|_: &gpui::ClickEvent, _window, cx| {
@@ -186,34 +271,38 @@ impl Render for FocusedDiffView {
                     .flex_grow()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .px(px(16.0))
-                    .py(px(4.0))
+                    .font_family(self.editor_font_family.clone())
+                    .px(scaled_px(16.0))
+                    .py(scaled_px(4.0))
                     .children(
                         self.lines
                             .iter()
                             .enumerate()
-                            .map(|(i, line)| render_diff_line(i, line, &theme)),
+                            .map(|(i, line)| render_diff_line(i, line, &theme, window)),
                     ),
             )
     }
 }
 
-fn render_diff_line(index: usize, line: &DiffLine, theme: &AppTheme) -> impl IntoElement {
+fn render_diff_line(
+    index: usize,
+    line: &DiffLine,
+    theme: &AppTheme,
+    window: &Window,
+) -> impl IntoElement {
     let (text_color, bg) = match line.kind {
         DiffLineKind::Header => (theme.colors.text_muted, None),
         DiffLineKind::HunkHeader => (theme.colors.accent, None),
-        DiffLineKind::Add => (
-            theme.colors.success,
-            Some(with_alpha(theme.colors.success, 0.08)),
-        ),
+        DiffLineKind::Add => (theme.colors.diff_add_text, Some(theme.colors.diff_add_bg)),
         DiffLineKind::Remove => (
-            theme.colors.danger,
-            Some(with_alpha(theme.colors.danger, 0.08)),
+            theme.colors.diff_remove_text,
+            Some(theme.colors.diff_remove_bg),
         ),
         DiffLineKind::Context => (theme.colors.text, None),
     };
 
     let line_num = format!("{:>4} ", index + 1);
+    let scaled_px = |value| crate::ui_scale::design_px_from_window(value, window);
 
     let mut el = div()
         .w_full()
@@ -222,8 +311,8 @@ fn render_diff_line(index: usize, line: &DiffLine, theme: &AppTheme) -> impl Int
         .child(
             div()
                 .text_color(theme.colors.text_muted)
-                .text_size(px(11.0))
-                .min_w(px(40.0))
+                .text_size(scaled_px(11.0))
+                .min_w(scaled_px(40.0))
                 .child(SharedString::from(line_num)),
         )
         .child(
@@ -247,6 +336,10 @@ fn bind_focused_diff_keys(cx: &mut App) {
         KeyBinding::new("q", Close, Some("FocusedDiff")),
         KeyBinding::new("ctrl-w", Close, Some("FocusedDiff")),
         KeyBinding::new("cmd-w", Close, Some("FocusedDiff")),
+        KeyBinding::new("secondary-+", IncreaseUiScale, Some("FocusedDiff")),
+        KeyBinding::new("secondary-=", IncreaseUiScale, Some("FocusedDiff")),
+        KeyBinding::new("secondary--", DecreaseUiScale, Some("FocusedDiff")),
+        KeyBinding::new("secondary-0", ResetUiScale, Some("FocusedDiff")),
     ]);
 }
 
@@ -256,24 +349,23 @@ fn bind_focused_diff_keys(cx: &mut App) {
 ///
 /// Returns process exit code (0 on success, 2 when the window fails to launch).
 pub fn run_focused_diff(config: FocusedDiffConfig) -> i32 {
-    #[cfg(target_os = "macos")]
-    {
-        let count = metal::Device::all().len();
-        if count == 0 {
-            eprintln!(
-                "Failed to launch focused diff window: no compatible Metal graphics device is available in this macOS session."
-            );
-            return FOCUSED_DIFF_EXIT_ERROR;
-        }
+    if let Err(err) = crate::app::ensure_graphics_device_available("focused diff GPUI launch") {
+        eprintln!("Failed to launch focused diff window: {err}");
+        return FOCUSED_DIFF_EXIT_ERROR;
     }
 
     let exit_code = Arc::new(AtomicI32::new(0));
     let exit_code_for_app = exit_code.clone();
 
     if let Err(err) = run_with_panic_guard("focused diff GPUI launch", move || {
-        Application::new()
+        crate::app::application()
             .with_assets(GitCometAssets)
             .run(move |cx: &mut App| {
+                if let Err(err) = crate::bundled_fonts::register(cx) {
+                    eprintln!("Failed to register bundled fonts: {err:#}");
+                }
+                let ui_session = session::load();
+                let ui_scale = crate::ui_scale::current_or_initialize_from_session(&ui_session, cx);
                 cx.on_window_closed(|cx| {
                     if cx.windows().is_empty() {
                         cx.quit();
@@ -284,16 +376,24 @@ pub fn run_focused_diff(config: FocusedDiffConfig) -> i32 {
                 bind_focused_diff_keys(cx);
 
                 let exit_code_clone = exit_code_for_app.clone();
-                let bounds = Bounds::centered(None, size(px(900.0), px(650.0)), cx);
+                let bounds = Bounds::centered(
+                    None,
+                    focused_diff_default_size_for_percent(ui_scale.percent),
+                    cx,
+                );
+                let ui_scale_percent = ui_scale.percent;
 
                 cx.open_window(
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        window_min_size: Some(size(px(500.0), px(300.0))),
+                        window_min_size: Some(focused_diff_min_size_for_percent(ui_scale_percent)),
                         titlebar: Some(TitlebarOptions {
                             title: Some("GitComet — Diff".into()),
                             appears_transparent: false,
-                            traffic_light_position: Some(point(px(9.0), px(9.0))),
+                            traffic_light_position: Some(point(
+                                crate::ui_scale::design_px_from_percent(9.0, ui_scale_percent),
+                                crate::ui_scale::design_px_from_percent(9.0, ui_scale_percent),
+                            )),
                         }),
                         app_id: Some("gitcomet-diff".to_string()),
                         window_decorations: Some(WindowDecorations::Server),
@@ -302,6 +402,7 @@ pub fn run_focused_diff(config: FocusedDiffConfig) -> i32 {
                         ..Default::default()
                     },
                     move |window, cx| {
+                        crate::ui_scale::apply_to_window(window, ui_scale_percent);
                         cx.new(|cx| {
                             let view = FocusedDiffView::new(config, exit_code_clone, window, cx);
                             cx.focus_self(window);
@@ -415,7 +516,7 @@ index 1234567..abcdef0 100644
             app.clear_key_bindings();
             bind_focused_diff_keys(app);
             let focus = view.update(app, |view, _cx| view.focus_handle());
-            window.focus(&focus);
+            window.focus(&focus, app);
             let _ = window.draw(app);
         });
 

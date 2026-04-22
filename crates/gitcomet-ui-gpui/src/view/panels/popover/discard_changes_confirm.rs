@@ -12,10 +12,7 @@ pub(super) fn panel(
         let pane = this.details_pane.read(cx);
         pane.status_multi_selection
             .get(&repo_id)
-            .map(|sel| match area {
-                DiffArea::Unstaged => sel.unstaged.len(),
-                DiffArea::Staged => sel.staged.len(),
-            })
+            .map(|sel| sel.selected_count_for_area(area))
             .unwrap_or(0)
     };
 
@@ -26,10 +23,7 @@ pub(super) fn panel(
                 let selection = pane
                     .status_multi_selection
                     .get(&repo_id)
-                    .map(|sel| match area {
-                        DiffArea::Unstaged => sel.unstaged.as_slice(),
-                        DiffArea::Staged => sel.staged.as_slice(),
-                    })
+                    .map(|sel| sel.selected_paths_for_area(area))
                     .unwrap_or(&[]);
 
                 let use_selection =
@@ -54,10 +48,7 @@ pub(super) fn panel(
                     .read(cx)
                     .status_multi_selection
                     .get(&repo_id)
-                    .and_then(|sel| match area {
-                        DiffArea::Unstaged => sel.unstaged.first(),
-                        DiffArea::Staged => sel.staged.first(),
-                    })
+                    .and_then(|sel| sel.first_selected_for_area(area))
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "file".to_string());
                 (1, selected_path, true)
@@ -70,11 +61,13 @@ pub(super) fn panel(
             }
         }
     };
+    let ui_scale_percent = super::popover_ui_scale_percent(cx);
+    let scaled_px = |value: f32| super::popover_scaled_px_from_percent(value, ui_scale_percent);
 
     div()
         .flex()
         .flex_col()
-        .min_w(px(420.0))
+        .min_w(scaled_px(420.0))
         .child(
             div()
                 .px_2()

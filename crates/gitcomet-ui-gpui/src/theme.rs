@@ -1,20 +1,50 @@
 use gpui::Rgba;
 use gpui::WindowAppearance;
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::error::Error;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-#[derive(Clone, Copy)]
+pub(crate) const DEFAULT_DARK_THEME_KEY: &str = "gitcomet_dark";
+pub(crate) const DEFAULT_LIGHT_THEME_KEY: &str = "gitcomet_light";
+pub(crate) const GRAPH_LANE_PALETTE_SIZE: usize = 64;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ThemeOption {
+    pub key: String,
+    pub label: String,
+}
+
+struct EmbeddedThemeFile {
+    stem: &'static str,
+    json: &'static str,
+}
+
+include!(concat!(env!("OUT_DIR"), "/embedded_themes.rs"));
+
+static EMBEDDED_THEME_CACHE: OnceLock<HashMap<String, RuntimeThemeSpec>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AppTheme {
     pub is_dark: bool,
     pub colors: Colors,
+    pub syntax: SyntaxColors,
+    pub graph_lane_palette: GraphLanePalette,
     pub radii: Radii,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Colors {
     pub window_bg: Rgba,
     pub surface_bg: Rgba,
     pub surface_bg_elevated: Rgba,
     pub active_section: Rgba,
     pub border: Rgba,
+    pub tooltip_bg: Rgba,
+    pub tooltip_text: Rgba,
     pub text: Rgba,
     pub text_muted: Rgba,
     pub accent: Rgba,
@@ -28,9 +58,140 @@ pub struct Colors {
     pub danger: Rgba,
     pub warning: Rgba,
     pub success: Rgba,
+    pub diff_add_bg: Rgba,
+    pub diff_add_text: Rgba,
+    pub diff_remove_bg: Rgba,
+    pub diff_remove_text: Rgba,
+    pub input_placeholder: Rgba,
+    pub accent_text: Rgba,
+    pub emphasis_text: Rgba,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SyntaxColors {
+    pub comment: Rgba,
+    pub comment_doc: Rgba,
+    pub string: Rgba,
+    pub string_escape: Rgba,
+    pub string_regex: Rgba,
+    pub string_special: Rgba,
+    pub keyword: Rgba,
+    pub keyword_control: Rgba,
+    pub preproc: Rgba,
+    pub number: Rgba,
+    pub boolean: Rgba,
+    pub function: Rgba,
+    pub function_method: Rgba,
+    pub function_special: Rgba,
+    pub constructor: Rgba,
+    pub type_name: Rgba,
+    pub type_builtin: Rgba,
+    pub type_interface: Rgba,
+    pub namespace: Rgba,
+    pub variable: Option<Rgba>,
+    pub variable_parameter: Rgba,
+    pub variable_special: Rgba,
+    pub variable_builtin: Rgba,
+    pub property: Rgba,
+    pub label: Option<Rgba>,
+    pub constant: Rgba,
+    pub constant_builtin: Rgba,
+    pub operator: Rgba,
+    pub punctuation: Rgba,
+    pub punctuation_bracket: Rgba,
+    pub punctuation_delimiter: Rgba,
+    pub punctuation_special: Rgba,
+    pub punctuation_list_marker: Rgba,
+    pub tag: Rgba,
+    pub attribute: Rgba,
+    pub markup_heading: Rgba,
+    pub markup_link: Rgba,
+    pub text_literal: Rgba,
+    pub diff_plus: Rgba,
+    pub diff_minus: Rgba,
+    pub diff_delta: Rgba,
+    pub lifetime: Rgba,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphLanePalette {
+    colors: [Rgba; GRAPH_LANE_PALETTE_SIZE],
+    len: u8,
+}
+
+impl GraphLanePalette {
+    fn generated(is_dark: bool) -> Self {
+        let mut colors = [Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }; GRAPH_LANE_PALETTE_SIZE];
+        for (i, color) in colors.iter_mut().enumerate() {
+            let hue = (i as f32 * 0.13) % 1.0;
+            let sat = 0.75;
+            let light = if is_dark { 0.62 } else { 0.45 };
+            *color = gpui::hsla(hue, sat, light, 1.0).into();
+        }
+        Self {
+            colors,
+            len: GRAPH_LANE_PALETTE_SIZE as u8,
+        }
+    }
+
+    fn from_theme_colors(
+        is_dark: bool,
+        palette: Option<Vec<ThemeColor>>,
+        hues: Option<Vec<f32>>,
+    ) -> Self {
+        if let Some(palette) = palette.filter(|palette| !palette.is_empty()) {
+            return Self::from_rgba_slice(
+                &palette
+                    .into_iter()
+                    .map(ThemeColor::into_rgba)
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        if let Some(hues) = hues.filter(|hues| !hues.is_empty()) {
+            let sat = 0.75;
+            let light = if is_dark { 0.62 } else { 0.45 };
+            let colors = hues
+                .into_iter()
+                .map(|hue| gpui::hsla(hue.rem_euclid(1.0), sat, light, 1.0).into())
+                .collect::<Vec<_>>();
+            return Self::from_rgba_slice(&colors);
+        }
+
+        Self::generated(is_dark)
+    }
+
+    fn from_rgba_slice(colors: &[Rgba]) -> Self {
+        let mut out = [Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }; GRAPH_LANE_PALETTE_SIZE];
+        let len = colors.len().min(GRAPH_LANE_PALETTE_SIZE);
+        for (slot, color) in out.iter_mut().zip(colors.iter().take(len)) {
+            *slot = *color;
+        }
+        Self {
+            colors: out,
+            len: len as u8,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn as_slice(&self) -> &[Rgba] {
+        let len = usize::from(self.len).max(1);
+        &self.colors[..len]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Radii {
     pub panel: f32,
     pub pill: f32,
@@ -38,104 +199,826 @@ pub struct Radii {
 }
 
 impl AppTheme {
+    #[cfg(test)]
+    pub(crate) fn from_json_str(json: &str) -> Result<Self, ThemeParseError> {
+        let mut bundle = parse_theme_bundle(json)?;
+        if bundle.themes.len() != 1 {
+            return Err(ThemeParseError::Invalid(format!(
+                "theme bundle must contain exactly one theme, found {}",
+                bundle.themes.len()
+            )));
+        }
+
+        let theme = bundle
+            .themes
+            .pop()
+            .expect("bundle length checked before popping");
+        Ok(theme.into_app_theme())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_json_path(path: impl AsRef<Path>) -> Result<Self, ThemeLoadError> {
+        let path = path.as_ref();
+        let json = fs::read_to_string(path).map_err(|source| ThemeLoadError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+        Self::from_json_str(&json).map_err(|source| ThemeLoadError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
     pub fn default_for_window_appearance(appearance: WindowAppearance) -> Self {
         match appearance {
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::zed_one_light(),
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::zed_ayu_dark(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight => {
+                Self::from_key(DEFAULT_LIGHT_THEME_KEY).unwrap_or_else(|| {
+                    panic!("missing default light theme `{DEFAULT_LIGHT_THEME_KEY}`")
+                })
+            }
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => {
+                Self::from_key(DEFAULT_DARK_THEME_KEY).unwrap_or_else(|| {
+                    panic!("missing default dark theme `{DEFAULT_DARK_THEME_KEY}`")
+                })
+            }
         }
     }
 
-    /// Zed's "Ayu Dark" theme (ported from `zed/assets/themes/ayu/ayu.json`).
-    pub fn zed_ayu_dark() -> Self {
-        let accent = gpui::rgba(0x5ac1feff);
-        let hover = gpui::rgba(0x2d2f34ff);
-        let text_muted = gpui::rgba(0x8a8986ff);
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        embedded_theme_cache()
+            .get(key)
+            .map(|spec| spec.theme)
+            .or_else(|| runtime_themes().get(key).map(|spec| spec.theme))
+    }
+
+    /// GitComet's default dark theme loaded from an embedded JSON definition.
+    pub fn gitcomet_dark() -> Self {
+        Self::from_key(DEFAULT_DARK_THEME_KEY)
+            .unwrap_or_else(|| panic!("missing default dark theme `{DEFAULT_DARK_THEME_KEY}`"))
+    }
+
+    /// GitComet's default light theme loaded from an embedded JSON definition.
+    #[cfg(test)]
+    pub fn gitcomet_light() -> Self {
+        Self::from_key(DEFAULT_LIGHT_THEME_KEY)
+            .unwrap_or_else(|| panic!("missing default light theme `{DEFAULT_LIGHT_THEME_KEY}`"))
+    }
+}
+
+pub(crate) fn available_themes() -> Vec<ThemeOption> {
+    merged_theme_options(None)
+}
+
+pub(crate) fn has_theme_key(key: &str) -> bool {
+    merged_theme_options(None)
+        .iter()
+        .any(|option| option.key == key)
+}
+
+pub(crate) fn theme_label(key: &str) -> Option<String> {
+    merged_theme_options(None)
+        .into_iter()
+        .find(|option| option.key == key)
+        .map(|option| option.label)
+}
+
+pub(crate) fn ensure_user_themes_dir_exists() -> Option<PathBuf> {
+    resolved_runtime_themes_dir(None)
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) enum ThemeLoadError {
+    Read {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    Parse {
+        path: std::path::PathBuf,
+        source: ThemeParseError,
+    },
+}
+
+#[cfg(test)]
+impl fmt::Display for ThemeLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read { path, source } => {
+                write!(
+                    f,
+                    "failed to read theme JSON from {}: {source}",
+                    path.display()
+                )
+            }
+            Self::Parse { path, source } => {
+                write!(
+                    f,
+                    "failed to parse theme JSON from {}: {source}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl Error for ThemeLoadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ThemeParseError {
+    Parse(serde_json::Error),
+    Invalid(String),
+}
+
+impl fmt::Display for ThemeParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(source) => source.fmt(f),
+            Self::Invalid(message) => f.write_str(message),
+        }
+    }
+}
+
+impl Error for ThemeParseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Parse(source) => Some(source),
+            Self::Invalid(_) => None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeBundleFile {
+    #[serde(rename = "name")]
+    _name: String,
+    #[serde(rename = "author", default)]
+    _author: Option<String>,
+    themes: Vec<ThemeBundleEntry>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ThemeAppearance {
+    Light,
+    Dark,
+}
+
+impl ThemeAppearance {
+    const fn is_dark(self) -> bool {
+        matches!(self, Self::Dark)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeBundleEntry {
+    key: String,
+    name: String,
+    appearance: ThemeAppearance,
+    colors: ThemeFileColors,
+    #[serde(default)]
+    syntax: Option<ThemeFileSyntaxColors>,
+    radii: Radii,
+}
+
+impl ThemeBundleEntry {
+    fn into_app_theme(self) -> AppTheme {
+        ThemeFile {
+            appearance: self.appearance,
+            colors: self.colors,
+            syntax: self.syntax,
+            radii: self.radii,
+        }
+        .into()
+    }
+}
+
+struct ThemeFile {
+    appearance: ThemeAppearance,
+    colors: ThemeFileColors,
+    syntax: Option<ThemeFileSyntaxColors>,
+    radii: Radii,
+}
+
+impl ThemeFile {
+    fn is_dark(&self) -> bool {
+        self.appearance.is_dark()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeFileColors {
+    window_bg: ThemeColor,
+    surface_bg: ThemeColor,
+    surface_bg_elevated: ThemeColor,
+    active_section: ThemeColor,
+    border: ThemeColor,
+    #[serde(default = "default_tooltip_bg_theme_color")]
+    tooltip_bg: ThemeColor,
+    #[serde(default = "default_tooltip_text_theme_color")]
+    tooltip_text: ThemeColor,
+    text: ThemeColor,
+    text_muted: ThemeColor,
+    accent: ThemeColor,
+    hover: ThemeColor,
+    active: ThemeColor,
+    focus_ring: ThemeColor,
+    focus_ring_bg: ThemeColor,
+    scrollbar_thumb: ThemeColor,
+    scrollbar_thumb_hover: ThemeColor,
+    scrollbar_thumb_active: ThemeColor,
+    danger: ThemeColor,
+    warning: ThemeColor,
+    success: ThemeColor,
+    #[serde(default)]
+    diff_add_bg: Option<ThemeColor>,
+    #[serde(default)]
+    diff_add_text: Option<ThemeColor>,
+    #[serde(default)]
+    diff_remove_bg: Option<ThemeColor>,
+    #[serde(default)]
+    diff_remove_text: Option<ThemeColor>,
+    #[serde(default)]
+    input_placeholder: Option<ThemeColor>,
+    #[serde(default)]
+    accent_text: Option<ThemeColor>,
+    #[serde(default)]
+    emphasis_text: Option<ThemeColor>,
+    #[serde(default)]
+    graph_lane_palette: Option<Vec<ThemeColor>>,
+    #[serde(default)]
+    graph_lane_hues: Option<Vec<f32>>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeFileSyntaxColors {
+    #[serde(default)]
+    comment: Option<ThemeColor>,
+    #[serde(default)]
+    comment_doc: Option<ThemeColor>,
+    #[serde(default)]
+    string: Option<ThemeColor>,
+    #[serde(default)]
+    string_escape: Option<ThemeColor>,
+    #[serde(default)]
+    string_regex: Option<ThemeColor>,
+    #[serde(default)]
+    string_special: Option<ThemeColor>,
+    #[serde(default)]
+    keyword: Option<ThemeColor>,
+    #[serde(default)]
+    keyword_control: Option<ThemeColor>,
+    #[serde(default)]
+    preproc: Option<ThemeColor>,
+    #[serde(default)]
+    number: Option<ThemeColor>,
+    #[serde(default)]
+    boolean: Option<ThemeColor>,
+    #[serde(default)]
+    function: Option<ThemeColor>,
+    #[serde(default)]
+    function_method: Option<ThemeColor>,
+    #[serde(default)]
+    function_special: Option<ThemeColor>,
+    #[serde(default)]
+    constructor: Option<ThemeColor>,
+    #[serde(rename = "type", default)]
+    type_name: Option<ThemeColor>,
+    #[serde(default)]
+    type_builtin: Option<ThemeColor>,
+    #[serde(default)]
+    type_interface: Option<ThemeColor>,
+    #[serde(default)]
+    namespace: Option<ThemeColor>,
+    #[serde(default)]
+    variable: Option<ThemeColor>,
+    #[serde(default)]
+    variable_parameter: Option<ThemeColor>,
+    #[serde(default)]
+    variable_special: Option<ThemeColor>,
+    #[serde(default)]
+    variable_builtin: Option<ThemeColor>,
+    #[serde(default)]
+    property: Option<ThemeColor>,
+    #[serde(default)]
+    label: Option<ThemeColor>,
+    #[serde(default)]
+    constant: Option<ThemeColor>,
+    #[serde(default)]
+    constant_builtin: Option<ThemeColor>,
+    #[serde(default)]
+    operator: Option<ThemeColor>,
+    #[serde(default)]
+    punctuation: Option<ThemeColor>,
+    #[serde(default)]
+    punctuation_bracket: Option<ThemeColor>,
+    #[serde(default)]
+    punctuation_delimiter: Option<ThemeColor>,
+    #[serde(default)]
+    punctuation_special: Option<ThemeColor>,
+    #[serde(default)]
+    punctuation_list_marker: Option<ThemeColor>,
+    #[serde(default)]
+    tag: Option<ThemeColor>,
+    #[serde(default)]
+    attribute: Option<ThemeColor>,
+    #[serde(default)]
+    markup_heading: Option<ThemeColor>,
+    #[serde(default)]
+    markup_link: Option<ThemeColor>,
+    #[serde(default)]
+    text_literal: Option<ThemeColor>,
+    #[serde(default)]
+    diff_plus: Option<ThemeColor>,
+    #[serde(default)]
+    diff_minus: Option<ThemeColor>,
+    #[serde(default)]
+    diff_delta: Option<ThemeColor>,
+    #[serde(default)]
+    lifetime: Option<ThemeColor>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(untagged)]
+enum ThemeColor {
+    Hex(Rgba),
+    HexWithAlpha { hex: Rgba, alpha: f32 },
+}
+
+impl ThemeColor {
+    fn into_rgba(self) -> Rgba {
+        match self {
+            Self::Hex(color) => color,
+            Self::HexWithAlpha { hex, alpha } => with_alpha(hex, alpha),
+        }
+    }
+}
+
+impl From<ThemeFile> for AppTheme {
+    fn from(theme: ThemeFile) -> Self {
+        let is_dark = theme.is_dark();
+        let ThemeFile {
+            appearance: _,
+            colors,
+            syntax,
+            radii,
+            ..
+        } = theme;
+        let ThemeFileColors {
+            window_bg,
+            surface_bg,
+            surface_bg_elevated,
+            active_section,
+            border,
+            tooltip_bg,
+            tooltip_text,
+            text,
+            text_muted,
+            accent,
+            hover,
+            active,
+            focus_ring,
+            focus_ring_bg,
+            scrollbar_thumb,
+            scrollbar_thumb_hover,
+            scrollbar_thumb_active,
+            danger,
+            warning,
+            success,
+            diff_add_bg,
+            diff_add_text,
+            diff_remove_bg,
+            diff_remove_text,
+            input_placeholder,
+            accent_text,
+            emphasis_text,
+            graph_lane_palette,
+            graph_lane_hues,
+        } = colors;
+        let graph_lane_palette =
+            GraphLanePalette::from_theme_colors(is_dark, graph_lane_palette, graph_lane_hues);
+
+        let colors = Colors {
+            window_bg: window_bg.into_rgba(),
+            surface_bg: surface_bg.into_rgba(),
+            surface_bg_elevated: surface_bg_elevated.into_rgba(),
+            active_section: active_section.into_rgba(),
+            border: border.into_rgba(),
+            tooltip_bg: tooltip_bg.into_rgba(),
+            tooltip_text: tooltip_text.into_rgba(),
+            text: text.into_rgba(),
+            text_muted: text_muted.into_rgba(),
+            accent: accent.into_rgba(),
+            hover: hover.into_rgba(),
+            active: active.into_rgba(),
+            focus_ring: focus_ring.into_rgba(),
+            focus_ring_bg: focus_ring_bg.into_rgba(),
+            scrollbar_thumb: scrollbar_thumb.into_rgba(),
+            scrollbar_thumb_hover: scrollbar_thumb_hover.into_rgba(),
+            scrollbar_thumb_active: scrollbar_thumb_active.into_rgba(),
+            danger: danger.into_rgba(),
+            warning: warning.into_rgba(),
+            success: success.into_rgba(),
+            diff_add_bg: diff_add_bg
+                .map(ThemeColor::into_rgba)
+                .unwrap_or_else(|| default_diff_add_bg(is_dark)),
+            diff_add_text: diff_add_text
+                .map(ThemeColor::into_rgba)
+                .unwrap_or_else(|| default_diff_add_text(is_dark)),
+            diff_remove_bg: diff_remove_bg
+                .map(ThemeColor::into_rgba)
+                .unwrap_or_else(|| default_diff_remove_bg(is_dark)),
+            diff_remove_text: diff_remove_text
+                .map(ThemeColor::into_rgba)
+                .unwrap_or_else(|| default_diff_remove_text(is_dark)),
+            input_placeholder: input_placeholder
+                .map(ThemeColor::into_rgba)
+                .unwrap_or_else(|| default_input_placeholder(is_dark)),
+            accent_text: accent_text
+                .map(ThemeColor::into_rgba)
+                .unwrap_or_else(default_accent_text),
+            emphasis_text: emphasis_text
+                .map(ThemeColor::into_rgba)
+                .unwrap_or_else(|| default_emphasis_text(is_dark)),
+        };
+        let syntax = resolve_syntax_colors(is_dark, &colors, syntax.as_ref());
+
         Self {
-            is_dark: true,
-            colors: Colors {
-                // editor.background
-                window_bg: gpui::rgba(0x0d1016ff),
-                // surface.background
-                surface_bg: gpui::rgba(0x1f2127ff),
-                // elevated_surface.background
-                surface_bg_elevated: gpui::rgba(0x1f2127ff),
-                active_section: hover,
-                // border.variant
-                border: gpui::rgba(0x2d2f34ff),
-                // text
-                text: gpui::rgba(0xbfbdb6ff),
-                // text.muted
-                text_muted,
-                // text.accent
-                accent,
-                // element.hover
-                hover,
-                active: with_alpha(hover, 0.78),
-                focus_ring: with_alpha(accent, 0.60),
-                focus_ring_bg: with_alpha(accent, 0.16),
-                scrollbar_thumb: with_alpha(text_muted, 0.30),
-                scrollbar_thumb_hover: with_alpha(text_muted, 0.42),
-                scrollbar_thumb_active: with_alpha(text_muted, 0.52),
-                // terminal.ansi.red
-                danger: gpui::rgba(0xef7177ff),
-                // terminal.ansi.yellow
-                warning: gpui::rgba(0xfeb454ff),
-                // terminal.ansi.green
-                success: gpui::rgba(0xaad84cff),
-            },
-            radii: Radii {
-                panel: 2.0,
-                pill: 2.0,
-                row: 2.0,
-            },
+            is_dark,
+            colors,
+            syntax,
+            graph_lane_palette,
+            radii,
+        }
+    }
+}
+
+fn mix_colors(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    let t = t.clamp(0.0, 1.0);
+    Rgba {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: 1.0,
+    }
+}
+
+fn derived_syntax_color(is_dark: bool, colors: &Colors, token: Rgba) -> Rgba {
+    let blend_to_text = if is_dark { 0.42 } else { 0.58 };
+    mix_colors(token, colors.text, blend_to_text)
+}
+
+fn resolve_syntax_color(override_color: Option<ThemeColor>, fallback: Rgba) -> Rgba {
+    override_color
+        .map(ThemeColor::into_rgba)
+        .unwrap_or(fallback)
+}
+
+fn resolve_optional_syntax_color(override_color: Option<ThemeColor>) -> Option<Rgba> {
+    override_color.map(ThemeColor::into_rgba)
+}
+
+fn resolve_syntax_colors(
+    is_dark: bool,
+    colors: &Colors,
+    syntax: Option<&ThemeFileSyntaxColors>,
+) -> SyntaxColors {
+    let overrides = syntax.cloned().unwrap_or_default();
+    let accent = derived_syntax_color(is_dark, colors, colors.accent);
+    let warning = derived_syntax_color(is_dark, colors, colors.warning);
+    let success = derived_syntax_color(is_dark, colors, colors.success);
+
+    SyntaxColors {
+        comment: resolve_syntax_color(overrides.comment, colors.text_muted),
+        comment_doc: resolve_syntax_color(overrides.comment_doc, colors.text_muted),
+        string: resolve_syntax_color(overrides.string, warning),
+        string_escape: resolve_syntax_color(overrides.string_escape, success),
+        string_regex: resolve_syntax_color(
+            overrides.string_regex,
+            resolve_syntax_color(overrides.string, warning),
+        ),
+        string_special: resolve_syntax_color(
+            overrides.string_special,
+            resolve_syntax_color(overrides.string, warning),
+        ),
+        keyword: resolve_syntax_color(overrides.keyword, accent),
+        keyword_control: resolve_syntax_color(overrides.keyword_control, accent),
+        preproc: resolve_syntax_color(
+            overrides.preproc,
+            resolve_syntax_color(overrides.keyword, accent),
+        ),
+        number: resolve_syntax_color(overrides.number, success),
+        boolean: resolve_syntax_color(overrides.boolean, success),
+        function: resolve_syntax_color(overrides.function, accent),
+        function_method: resolve_syntax_color(overrides.function_method, accent),
+        function_special: resolve_syntax_color(overrides.function_special, accent),
+        constructor: resolve_syntax_color(
+            overrides.constructor,
+            resolve_syntax_color(overrides.function, accent),
+        ),
+        type_name: resolve_syntax_color(overrides.type_name, warning),
+        type_builtin: resolve_syntax_color(overrides.type_builtin, warning),
+        type_interface: resolve_syntax_color(overrides.type_interface, warning),
+        namespace: resolve_syntax_color(
+            overrides.namespace,
+            resolve_syntax_color(overrides.type_name, warning),
+        ),
+        variable: resolve_optional_syntax_color(overrides.variable),
+        variable_parameter: resolve_syntax_color(overrides.variable_parameter, colors.text_muted),
+        variable_special: resolve_syntax_color(overrides.variable_special, accent),
+        variable_builtin: resolve_syntax_color(
+            overrides.variable_builtin,
+            resolve_syntax_color(overrides.variable_special, accent),
+        ),
+        property: resolve_syntax_color(overrides.property, accent),
+        label: resolve_optional_syntax_color(overrides.label)
+            .or(resolve_optional_syntax_color(overrides.variable)),
+        constant: resolve_syntax_color(overrides.constant, success),
+        constant_builtin: resolve_syntax_color(
+            overrides.constant_builtin,
+            resolve_syntax_color(overrides.constant, success),
+        ),
+        operator: resolve_syntax_color(overrides.operator, colors.text_muted),
+        punctuation: resolve_syntax_color(overrides.punctuation, colors.text_muted),
+        punctuation_bracket: resolve_syntax_color(overrides.punctuation_bracket, colors.text_muted),
+        punctuation_delimiter: resolve_syntax_color(
+            overrides.punctuation_delimiter,
+            colors.text_muted,
+        ),
+        punctuation_special: resolve_syntax_color(
+            overrides.punctuation_special,
+            resolve_syntax_color(overrides.punctuation, colors.text_muted),
+        ),
+        punctuation_list_marker: resolve_syntax_color(
+            overrides.punctuation_list_marker,
+            resolve_syntax_color(overrides.punctuation, colors.text_muted),
+        ),
+        tag: resolve_syntax_color(overrides.tag, warning),
+        attribute: resolve_syntax_color(overrides.attribute, accent),
+        markup_heading: resolve_syntax_color(
+            overrides.markup_heading,
+            resolve_syntax_color(overrides.keyword, accent),
+        ),
+        markup_link: resolve_syntax_color(
+            overrides.markup_link,
+            resolve_syntax_color(overrides.string, warning),
+        ),
+        text_literal: resolve_syntax_color(
+            overrides.text_literal,
+            resolve_syntax_color(overrides.string, warning),
+        ),
+        diff_plus: resolve_syntax_color(
+            overrides.diff_plus,
+            resolve_syntax_color(overrides.string, warning),
+        ),
+        diff_minus: resolve_syntax_color(
+            overrides.diff_minus,
+            resolve_syntax_color(overrides.keyword, accent),
+        ),
+        diff_delta: resolve_syntax_color(
+            overrides.diff_delta,
+            resolve_syntax_color(overrides.type_name, warning),
+        ),
+        lifetime: resolve_syntax_color(overrides.lifetime, accent),
+    }
+}
+
+fn default_tooltip_bg_theme_color() -> ThemeColor {
+    ThemeColor::Hex(gpui::rgba(0x000000ff))
+}
+
+fn default_tooltip_text_theme_color() -> ThemeColor {
+    ThemeColor::Hex(gpui::rgba(0xffffffff))
+}
+
+fn default_diff_add_bg(is_dark: bool) -> Rgba {
+    if is_dark {
+        gpui::rgb(0x0B2E1C)
+    } else {
+        gpui::rgba(0xe6ffedff)
+    }
+}
+
+fn default_diff_add_text(is_dark: bool) -> Rgba {
+    if is_dark {
+        gpui::rgb(0xBBF7D0)
+    } else {
+        gpui::rgba(0x22863aff)
+    }
+}
+
+fn default_diff_remove_bg(is_dark: bool) -> Rgba {
+    if is_dark {
+        gpui::rgb(0x3A0D13)
+    } else {
+        gpui::rgba(0xffeef0ff)
+    }
+}
+
+fn default_diff_remove_text(is_dark: bool) -> Rgba {
+    if is_dark {
+        gpui::rgb(0xFECACA)
+    } else {
+        gpui::rgba(0xcb2431ff)
+    }
+}
+
+fn default_input_placeholder(is_dark: bool) -> Rgba {
+    if is_dark {
+        gpui::hsla(0.0, 0.0, 1.0, 0.35).into()
+    } else {
+        gpui::hsla(0.0, 0.0, 0.0, 0.2).into()
+    }
+}
+
+fn default_accent_text() -> Rgba {
+    gpui::rgba(0xffffffff)
+}
+
+fn default_emphasis_text(is_dark: bool) -> Rgba {
+    if is_dark {
+        gpui::rgba(0xffffffff)
+    } else {
+        gpui::rgba(0x000000ff)
+    }
+}
+
+fn embedded_theme_cache() -> &'static HashMap<String, RuntimeThemeSpec> {
+    EMBEDDED_THEME_CACHE.get_or_init(|| {
+        let mut themes = HashMap::default();
+        for file in EMBEDDED_THEME_FILES {
+            let specs = load_theme_specs_from_json(file.json).unwrap_or_else(|err| {
+                panic!("failed to load built-in theme file {}: {err}", file.stem)
+            });
+            for spec in specs {
+                themes.insert(spec.option.key.clone(), spec);
+            }
+        }
+        themes
+    })
+}
+
+#[derive(Clone)]
+struct RuntimeThemeSpec {
+    option: ThemeOption,
+    theme: AppTheme,
+}
+
+fn is_embedded_theme_key(key: &str) -> bool {
+    embedded_theme_cache().contains_key(key)
+}
+
+fn is_embedded_theme_stem(stem: &str) -> bool {
+    EMBEDDED_THEME_FILES.iter().any(|file| file.stem == stem)
+}
+
+fn is_reserved_runtime_theme_path(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(is_embedded_theme_stem)
+}
+
+fn merged_theme_options(runtime_dir: Option<&Path>) -> Vec<ThemeOption> {
+    let mut options = BTreeMap::<String, ThemeOption>::new();
+    for spec in runtime_themes_with_dir(runtime_dir).into_values() {
+        options.insert(spec.option.key.clone(), spec.option);
+    }
+    for spec in embedded_theme_cache().values() {
+        options.insert(spec.option.key.clone(), spec.option.clone());
+    }
+
+    options.into_values().collect()
+}
+
+fn runtime_themes() -> HashMap<String, RuntimeThemeSpec> {
+    runtime_themes_with_dir(None)
+}
+
+fn runtime_themes_with_dir(runtime_dir: Option<&Path>) -> HashMap<String, RuntimeThemeSpec> {
+    let Some(dir) = resolved_runtime_themes_dir(runtime_dir) else {
+        return HashMap::default();
+    };
+
+    load_runtime_themes_from_dir(&dir)
+}
+
+fn resolved_runtime_themes_dir(runtime_dir: Option<&Path>) -> Option<PathBuf> {
+    let dir = match runtime_dir {
+        Some(path) => path.to_path_buf(),
+        None => gitcomet_state::session::user_themes_dir()?,
+    };
+
+    if fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+
+    Some(dir)
+}
+
+fn load_runtime_themes_from_dir(dir: &Path) -> HashMap<String, RuntimeThemeSpec> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return HashMap::default();
+    };
+
+    let mut files = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .filter(|path| !is_reserved_runtime_theme_path(path))
+        .collect::<Vec<_>>();
+    files.sort();
+
+    let mut themes = HashMap::default();
+    for path in files {
+        let Ok(json) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(specs) = load_runtime_theme_specs_from_json(&json) else {
+            continue;
+        };
+
+        for spec in specs {
+            themes.insert(spec.option.key.clone(), spec);
         }
     }
 
-    /// Zed's "One Light" theme (ported from `zed/assets/themes/one/one.json`).
-    pub fn zed_one_light() -> Self {
-        let accent = gpui::rgba(0x5c78e2ff);
-        let hover = gpui::rgba(0xdfdfe0ff);
-        let text_muted = gpui::rgba(0x58585aff);
-        Self {
-            is_dark: false,
-            colors: Colors {
-                // editor.background
-                window_bg: gpui::rgba(0xfafafaff),
-                // surface.background
-                surface_bg: gpui::rgba(0xebebecff),
-                // elevated_surface.background
-                surface_bg_elevated: gpui::rgba(0xebebecff),
-                active_section: gpui::rgba(0xfafafaff),
-                // border.variant
-                border: gpui::rgba(0xdfdfe0ff),
-                // text
-                text: gpui::rgba(0x242529ff),
-                // text.muted
-                text_muted,
-                // text.accent
-                accent,
-                // element.hover
-                hover,
-                active: with_alpha(hover, 0.88),
-                focus_ring: with_alpha(accent, 0.52),
-                focus_ring_bg: with_alpha(accent, 0.12),
-                scrollbar_thumb: with_alpha(text_muted, 0.26),
-                scrollbar_thumb_hover: with_alpha(text_muted, 0.36),
-                scrollbar_thumb_active: with_alpha(text_muted, 0.46),
-                // terminal.ansi.red
-                danger: gpui::rgba(0xde3e35ff),
-                // terminal.ansi.yellow
-                warning: gpui::rgba(0xd2b67cff),
-                // terminal.ansi.green
-                success: gpui::rgba(0x3f953aff),
-            },
-            radii: Radii {
-                panel: 2.0,
-                pill: 2.0,
-                row: 2.0,
-            },
-        }
+    themes
+}
+
+fn load_theme_specs_from_json(json: &str) -> Result<Vec<RuntimeThemeSpec>, ThemeParseError> {
+    let bundle = parse_theme_bundle(json)?;
+    load_theme_specs_from_bundle(bundle)
+}
+
+fn load_runtime_theme_specs_from_json(
+    json: &str,
+) -> Result<Vec<RuntimeThemeSpec>, ThemeParseError> {
+    let bundle = parse_theme_bundle(json)?;
+    load_runtime_theme_specs_from_bundle(bundle)
+}
+
+fn load_theme_specs_from_bundle(
+    bundle: ThemeBundleFile,
+) -> Result<Vec<RuntimeThemeSpec>, ThemeParseError> {
+    collect_theme_specs(bundle, false)
+}
+
+fn load_runtime_theme_specs_from_bundle(
+    bundle: ThemeBundleFile,
+) -> Result<Vec<RuntimeThemeSpec>, ThemeParseError> {
+    collect_theme_specs(bundle, true)
+}
+
+fn collect_theme_specs(
+    bundle: ThemeBundleFile,
+    skip_embedded_keys: bool,
+) -> Result<Vec<RuntimeThemeSpec>, ThemeParseError> {
+    if bundle.themes.is_empty() {
+        return Err(ThemeParseError::Invalid(
+            "theme bundle must define at least one theme".to_string(),
+        ));
     }
+
+    let mut seen_keys = HashSet::<String>::default();
+    let mut themes = Vec::with_capacity(bundle.themes.len());
+
+    for entry in bundle.themes {
+        let key = entry.key.clone();
+        if skip_embedded_keys && is_embedded_theme_key(&key) {
+            continue;
+        }
+
+        if !seen_keys.insert(key.clone()) {
+            return Err(ThemeParseError::Invalid(format!(
+                "theme bundle defines duplicate key `{key}`"
+            )));
+        }
+
+        themes.push(RuntimeThemeSpec {
+            option: ThemeOption {
+                key,
+                label: entry.name.clone(),
+            },
+            theme: entry.into_app_theme(),
+        });
+    }
+
+    Ok(themes)
+}
+
+fn parse_theme_bundle(json: &str) -> Result<ThemeBundleFile, ThemeParseError> {
+    serde_json::from_str(json).map_err(ThemeParseError::Parse)
 }
 
 pub(crate) fn with_alpha(mut color: Rgba, alpha: f32) -> Rgba {
@@ -145,7 +1028,77 @@ pub(crate) fn with_alpha(mut color: Rgba, alpha: f32) -> Rgba {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rgba, with_alpha};
+    use super::{
+        AppTheme, DEFAULT_DARK_THEME_KEY, DEFAULT_LIGHT_THEME_KEY, EMBEDDED_THEME_FILES,
+        GRAPH_LANE_PALETTE_SIZE, Rgba, available_themes, derived_syntax_color, has_theme_key,
+        load_theme_specs_from_json, merged_theme_options, resolved_runtime_themes_dir,
+        runtime_themes_with_dir, theme_label, with_alpha,
+    };
+    use std::{fs, path::PathBuf};
+    use tempfile::tempdir;
+
+    fn themes_markdown_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/themes.md")
+    }
+
+    fn readme_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md")
+    }
+
+    fn themes_markdown_example() -> String {
+        let markdown = fs::read_to_string(themes_markdown_path())
+            .expect("THEMES.md should be readable for theme docs tests");
+        let start = markdown
+            .find("```javascript")
+            .expect("THEMES.md should include a javascript example block");
+        let example = &markdown[start + "```javascript".len()..];
+        let end = example
+            .find("```")
+            .expect("THEMES.md example block should be closed");
+        example[..end].trim().to_string()
+    }
+
+    fn strip_json_line_comments(json_with_comments: &str) -> String {
+        let mut out = String::with_capacity(json_with_comments.len());
+        let mut chars = json_with_comments.chars().peekable();
+        let mut in_string = false;
+        let mut escaped = false;
+
+        while let Some(ch) = chars.next() {
+            if in_string {
+                out.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            if ch == '"' {
+                in_string = true;
+                out.push(ch);
+                continue;
+            }
+
+            if ch == '/' && chars.peek() == Some(&'/') {
+                let _ = chars.next();
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            out.push(ch);
+        }
+
+        out
+    }
 
     #[test]
     fn with_alpha_preserves_rgb_and_overwrites_alpha() {
@@ -162,5 +1115,1082 @@ mod tests {
         assert_eq!(adjusted.g, color.g);
         assert_eq!(adjusted.b, color.b);
         assert_eq!(adjusted.a, 0.75);
+    }
+
+    #[test]
+    fn parses_theme_json_with_alpha_overrides() {
+        let json = r##"{
+            "name": "Fixture",
+            "themes": [
+                {
+                    "key": "fixture",
+                    "name": "Fixture",
+                    "appearance": "dark",
+                    "colors": {
+                        "window_bg": "#0d1016ff",
+                        "surface_bg": "#1f2127ff",
+                        "surface_bg_elevated": "#1f2127ff",
+                        "active_section": "#2d2f34ff",
+                        "border": "#2d2f34ff",
+                        "tooltip_bg": "#000000ff",
+                        "tooltip_text": "#ffffffff",
+                        "text": "#bfbdb6ff",
+                        "text_muted": "#8a8986ff",
+                        "accent": "#5ac1feff",
+                        "hover": "#2d2f34ff",
+                        "active": { "hex": "#2d2f34ff", "alpha": 0.78 },
+                        "focus_ring": { "hex": "#5ac1feff", "alpha": 0.60 },
+                        "focus_ring_bg": { "hex": "#5ac1feff", "alpha": 0.16 },
+                        "scrollbar_thumb": { "hex": "#8a8986ff", "alpha": 0.30 },
+                        "scrollbar_thumb_hover": { "hex": "#8a8986ff", "alpha": 0.42 },
+                        "scrollbar_thumb_active": { "hex": "#8a8986ff", "alpha": 0.52 },
+                        "danger": "#ef7177ff",
+                        "warning": "#feb454ff",
+                        "success": "#aad84cff",
+                        "diff_add_bg": "#102030ff",
+                        "diff_add_text": "#405060ff",
+                        "diff_remove_bg": "#203040ff",
+                        "diff_remove_text": "#506070ff",
+                        "input_placeholder": "#708090ff",
+                        "accent_text": "#112233ff",
+                        "emphasis_text": "#a1b2c3ff",
+                        "graph_lane_hues": [0.25, 0.75]
+                    },
+                    "radii": {
+                        "panel": 2.0,
+                        "pill": 2.0,
+                        "row": 2.0
+                    }
+                }
+            ]
+        }"##;
+
+        let theme = AppTheme::from_json_str(json).expect("theme JSON should parse");
+
+        assert!(theme.is_dark);
+        assert_eq!(theme.colors.window_bg, gpui::rgba(0x0d1016ff));
+        assert_eq!(theme.colors.border, gpui::rgba(0x2d2f34ff));
+        assert_eq!(theme.colors.tooltip_bg, gpui::rgba(0x000000ff));
+        assert_eq!(theme.colors.tooltip_text, gpui::rgba(0xffffffff));
+        assert_eq!(
+            theme.colors.active,
+            with_alpha(gpui::rgba(0x2d2f34ff), 0.78)
+        );
+        assert_eq!(
+            theme.colors.scrollbar_thumb_active,
+            with_alpha(gpui::rgba(0x8a8986ff), 0.52)
+        );
+        assert_eq!(theme.colors.diff_add_bg, gpui::rgba(0x102030ff));
+        assert_eq!(theme.colors.diff_add_text, gpui::rgba(0x405060ff));
+        assert_eq!(theme.colors.diff_remove_bg, gpui::rgba(0x203040ff));
+        assert_eq!(theme.colors.diff_remove_text, gpui::rgba(0x506070ff));
+        assert_eq!(theme.colors.input_placeholder, gpui::rgba(0x708090ff));
+        assert_eq!(theme.colors.accent_text, gpui::rgba(0x112233ff));
+        assert_eq!(theme.colors.emphasis_text, gpui::rgba(0xa1b2c3ff));
+        assert_eq!(theme.graph_lane_palette.as_slice().len(), 2);
+        assert_eq!(
+            theme.graph_lane_palette.as_slice()[0],
+            gpui::hsla(0.25, 0.75, 0.62, 1.0).into()
+        );
+        assert_eq!(theme.syntax.comment, theme.colors.text_muted);
+        assert_eq!(
+            theme.syntax.keyword,
+            derived_syntax_color(theme.is_dark, &theme.colors, theme.colors.accent)
+        );
+        assert_eq!(theme.syntax.variable, None);
+        assert_eq!(theme.radii.panel, 2.0);
+    }
+
+    #[test]
+    fn parses_theme_json_with_optional_syntax_overrides() {
+        let json = r##"{
+            "name": "Fixture",
+            "themes": [
+                {
+                    "key": "fixture",
+                    "name": "Fixture",
+                    "appearance": "light",
+                    "colors": {
+                        "window_bg": "#fafafaff",
+                        "surface_bg": "#ebebecff",
+                        "surface_bg_elevated": "#ebebecff",
+                        "active_section": "#fafafaff",
+                        "border": "#dfdfe0ff",
+                        "text": "#242529ff",
+                        "text_muted": "#58585aff",
+                        "accent": "#5c78e2ff",
+                        "hover": "#dfdfe0ff",
+                        "active": { "hex": "#dfdfe0ff", "alpha": 0.88 },
+                        "focus_ring": { "hex": "#5c78e2ff", "alpha": 0.52 },
+                        "focus_ring_bg": { "hex": "#5c78e2ff", "alpha": 0.12 },
+                        "scrollbar_thumb": { "hex": "#58585aff", "alpha": 0.26 },
+                        "scrollbar_thumb_hover": { "hex": "#58585aff", "alpha": 0.36 },
+                        "scrollbar_thumb_active": { "hex": "#58585aff", "alpha": 0.46 },
+                        "danger": "#de3e35ff",
+                        "warning": "#d2b67cff",
+                        "success": "#3f953aff"
+                    },
+                    "syntax": {
+                        "keyword": "#112233ff",
+                        "variable": "#445566ff",
+                        "comment_doc": "#778899ff",
+                        "diff_plus": "#aabbccff",
+                        "label": "#998877ff"
+                    },
+                    "radii": {
+                        "panel": 2.0,
+                        "pill": 2.0,
+                        "row": 2.0
+                    }
+                }
+            ]
+        }"##;
+
+        let theme = AppTheme::from_json_str(json).expect("theme JSON should parse");
+
+        assert_eq!(theme.syntax.keyword, gpui::rgba(0x112233ff));
+        assert_eq!(theme.syntax.variable, Some(gpui::rgba(0x445566ff)));
+        assert_eq!(theme.syntax.comment_doc, gpui::rgba(0x778899ff));
+        assert_eq!(theme.syntax.diff_plus, gpui::rgba(0xaabbccff));
+        assert_eq!(theme.syntax.label, Some(gpui::rgba(0x998877ff)));
+        assert_eq!(theme.syntax.comment, theme.colors.text_muted);
+        assert_eq!(
+            theme.syntax.string,
+            derived_syntax_color(theme.is_dark, &theme.colors, theme.colors.warning)
+        );
+    }
+
+    #[test]
+    fn new_syntax_categories_fallback_to_legacy_buckets() {
+        let json = r##"{
+            "name": "Fixture",
+            "themes": [
+                {
+                    "key": "fixture",
+                    "name": "Fixture",
+                    "appearance": "light",
+                    "colors": {
+                        "window_bg": "#fafafaff",
+                        "surface_bg": "#ebebecff",
+                        "surface_bg_elevated": "#ebebecff",
+                        "active_section": "#fafafaff",
+                        "border": "#dfdfe0ff",
+                        "text": "#242529ff",
+                        "text_muted": "#58585aff",
+                        "accent": "#5c78e2ff",
+                        "hover": "#dfdfe0ff",
+                        "active": { "hex": "#dfdfe0ff", "alpha": 0.88 },
+                        "focus_ring": { "hex": "#5c78e2ff", "alpha": 0.52 },
+                        "focus_ring_bg": { "hex": "#5c78e2ff", "alpha": 0.12 },
+                        "scrollbar_thumb": { "hex": "#58585aff", "alpha": 0.26 },
+                        "scrollbar_thumb_hover": { "hex": "#58585aff", "alpha": 0.36 },
+                        "scrollbar_thumb_active": { "hex": "#58585aff", "alpha": 0.46 },
+                        "danger": "#de3e35ff",
+                        "warning": "#d2b67cff",
+                        "success": "#3f953aff"
+                    },
+                    "syntax": {
+                        "string": "#112233ff",
+                        "keyword": "#223344ff",
+                        "type": "#334455ff",
+                        "variable": "#445566ff",
+                        "variable_special": "#556677ff",
+                        "constant": "#667788ff",
+                        "punctuation": "#778899ff"
+                    },
+                    "radii": {
+                        "panel": 2.0,
+                        "pill": 2.0,
+                        "row": 2.0
+                    }
+                }
+            ]
+        }"##;
+
+        let theme = AppTheme::from_json_str(json).expect("theme JSON should parse");
+
+        assert_eq!(theme.syntax.string_regex, gpui::rgba(0x112233ff));
+        assert_eq!(theme.syntax.string_special, gpui::rgba(0x112233ff));
+        assert_eq!(theme.syntax.preproc, gpui::rgba(0x223344ff));
+        assert_eq!(theme.syntax.namespace, gpui::rgba(0x334455ff));
+        assert_eq!(theme.syntax.label, Some(gpui::rgba(0x445566ff)));
+        assert_eq!(theme.syntax.variable_builtin, gpui::rgba(0x556677ff));
+        assert_eq!(theme.syntax.constant_builtin, gpui::rgba(0x667788ff));
+        assert_eq!(theme.syntax.punctuation_special, gpui::rgba(0x778899ff));
+        assert_eq!(theme.syntax.punctuation_list_marker, gpui::rgba(0x778899ff));
+        assert_eq!(theme.syntax.markup_heading, gpui::rgba(0x223344ff));
+        assert_eq!(theme.syntax.markup_link, gpui::rgba(0x112233ff));
+        assert_eq!(theme.syntax.text_literal, gpui::rgba(0x112233ff));
+        assert_eq!(theme.syntax.diff_plus, gpui::rgba(0x112233ff));
+        assert_eq!(theme.syntax.diff_minus, gpui::rgba(0x223344ff));
+        assert_eq!(theme.syntax.diff_delta, gpui::rgba(0x334455ff));
+    }
+
+    #[test]
+    fn explicit_new_syntax_overrides_beat_legacy_fallbacks() {
+        let json = r##"{
+            "name": "Fixture",
+            "themes": [
+                {
+                    "key": "fixture",
+                    "name": "Fixture",
+                    "appearance": "dark",
+                    "colors": {
+                        "window_bg": "#0d1016ff",
+                        "surface_bg": "#1f2127ff",
+                        "surface_bg_elevated": "#1f2127ff",
+                        "active_section": "#2d2f34ff",
+                        "border": "#2d2f34ff",
+                        "text": "#bfbdb6ff",
+                        "text_muted": "#8a8986ff",
+                        "accent": "#5ac1feff",
+                        "hover": "#2d2f34ff",
+                        "active": { "hex": "#2d2f34ff", "alpha": 0.78 },
+                        "focus_ring": { "hex": "#5ac1feff", "alpha": 0.60 },
+                        "focus_ring_bg": { "hex": "#5ac1feff", "alpha": 0.16 },
+                        "scrollbar_thumb": { "hex": "#8a8986ff", "alpha": 0.30 },
+                        "scrollbar_thumb_hover": { "hex": "#8a8986ff", "alpha": 0.42 },
+                        "scrollbar_thumb_active": { "hex": "#8a8986ff", "alpha": 0.52 },
+                        "danger": "#ef7177ff",
+                        "warning": "#feb454ff",
+                        "success": "#aad84cff"
+                    },
+                    "syntax": {
+                        "string": "#111111ff",
+                        "keyword": "#222222ff",
+                        "type": "#333333ff",
+                        "variable": "#444444ff",
+                        "variable_special": "#555555ff",
+                        "constant": "#666666ff",
+                        "punctuation": "#777777ff",
+                        "function": "#888888ff",
+                        "string_regex": "#010101ff",
+                        "string_special": "#020202ff",
+                        "preproc": "#030303ff",
+                        "constructor": "#040404ff",
+                        "namespace": "#050505ff",
+                        "variable_builtin": "#060606ff",
+                        "label": "#070707ff",
+                        "constant_builtin": "#080808ff",
+                        "punctuation_special": "#090909ff",
+                        "punctuation_list_marker": "#0a0a0aff",
+                        "markup_heading": "#0b0b0bff",
+                        "markup_link": "#0c0c0cff",
+                        "text_literal": "#0d0d0dff",
+                        "diff_plus": "#0e0e0eff",
+                        "diff_minus": "#0f0f0fff",
+                        "diff_delta": "#101010ff"
+                    },
+                    "radii": {
+                        "panel": 2.0,
+                        "pill": 2.0,
+                        "row": 2.0
+                    }
+                }
+            ]
+        }"##;
+
+        let theme = AppTheme::from_json_str(json).expect("theme JSON should parse");
+
+        assert_eq!(theme.syntax.string_regex, gpui::rgba(0x010101ff));
+        assert_eq!(theme.syntax.string_special, gpui::rgba(0x020202ff));
+        assert_eq!(theme.syntax.preproc, gpui::rgba(0x030303ff));
+        assert_eq!(theme.syntax.constructor, gpui::rgba(0x040404ff));
+        assert_eq!(theme.syntax.namespace, gpui::rgba(0x050505ff));
+        assert_eq!(theme.syntax.variable_builtin, gpui::rgba(0x060606ff));
+        assert_eq!(theme.syntax.label, Some(gpui::rgba(0x070707ff)));
+        assert_eq!(theme.syntax.constant_builtin, gpui::rgba(0x080808ff));
+        assert_eq!(theme.syntax.punctuation_special, gpui::rgba(0x090909ff));
+        assert_eq!(theme.syntax.punctuation_list_marker, gpui::rgba(0x0a0a0aff));
+        assert_eq!(theme.syntax.markup_heading, gpui::rgba(0x0b0b0bff));
+        assert_eq!(theme.syntax.markup_link, gpui::rgba(0x0c0c0cff));
+        assert_eq!(theme.syntax.text_literal, gpui::rgba(0x0d0d0dff));
+        assert_eq!(theme.syntax.diff_plus, gpui::rgba(0x0e0e0eff));
+        assert_eq!(theme.syntax.diff_minus, gpui::rgba(0x0f0f0fff));
+        assert_eq!(theme.syntax.diff_delta, gpui::rgba(0x101010ff));
+    }
+
+    #[test]
+    fn loads_theme_json_from_file() {
+        let dir = tempdir().expect("temp dir should exist");
+        let path = dir.path().join("theme.json");
+        fs::write(
+            &path,
+            r##"{
+                "name": "Fixture",
+                "themes": [
+                    {
+                        "key": "fixture",
+                        "name": "Fixture",
+                        "appearance": "light",
+                        "colors": {
+                            "window_bg": "#fafafaff",
+                            "surface_bg": "#ebebecff",
+                            "surface_bg_elevated": "#ebebecff",
+                            "active_section": "#fafafaff",
+                            "border": "#dfdfe0ff",
+                            "text": "#242529ff",
+                            "text_muted": "#58585aff",
+                            "accent": "#5c78e2ff",
+                            "hover": "#dfdfe0ff",
+                            "active": { "hex": "#dfdfe0ff", "alpha": 0.88 },
+                            "focus_ring": { "hex": "#5c78e2ff", "alpha": 0.52 },
+                            "focus_ring_bg": { "hex": "#5c78e2ff", "alpha": 0.12 },
+                            "scrollbar_thumb": { "hex": "#58585aff", "alpha": 0.26 },
+                            "scrollbar_thumb_hover": { "hex": "#58585aff", "alpha": 0.36 },
+                            "scrollbar_thumb_active": { "hex": "#58585aff", "alpha": 0.46 },
+                            "danger": "#de3e35ff",
+                            "warning": "#d2b67cff",
+                            "success": "#3f953aff"
+                        },
+                        "radii": {
+                            "panel": 2.0,
+                            "pill": 2.0,
+                            "row": 2.0
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .expect("theme file should be written");
+
+        let theme = AppTheme::from_json_path(&path).expect("theme file should load");
+
+        assert!(!theme.is_dark);
+        assert_eq!(theme.colors.text, gpui::rgba(0x242529ff));
+        assert_eq!(theme.colors.tooltip_bg, gpui::rgba(0x000000ff));
+        assert_eq!(theme.colors.tooltip_text, gpui::rgba(0xffffffff));
+        assert_eq!(
+            theme.colors.active,
+            with_alpha(gpui::rgba(0xdfdfe0ff), 0.88)
+        );
+        assert_eq!(theme.colors.diff_add_bg, gpui::rgba(0xe6ffedff));
+        assert_eq!(theme.colors.diff_add_text, gpui::rgba(0x22863aff));
+        assert_eq!(theme.colors.diff_remove_bg, gpui::rgba(0xffeef0ff));
+        assert_eq!(theme.colors.diff_remove_text, gpui::rgba(0xcb2431ff));
+        assert_eq!(theme.colors.input_placeholder, gpui::rgba(0x00000033));
+        assert_eq!(theme.colors.accent_text, gpui::rgba(0xffffffff));
+        assert_eq!(theme.colors.emphasis_text, gpui::rgba(0x000000ff));
+        assert_eq!(
+            theme.graph_lane_palette.as_slice().len(),
+            GRAPH_LANE_PALETTE_SIZE
+        );
+    }
+
+    #[test]
+    fn omitted_emphasis_text_uses_light_and_dark_defaults() {
+        let json = r##"{
+            "name": "Fixture",
+            "themes": [
+                {
+                    "key": "fixture_light",
+                    "name": "Fixture Light",
+                    "appearance": "light",
+                    "colors": {
+                        "window_bg": "#fafafaff",
+                        "surface_bg": "#ebebecff",
+                        "surface_bg_elevated": "#ebebecff",
+                        "active_section": "#fafafaff",
+                        "border": "#dfdfe0ff",
+                        "text": "#242529ff",
+                        "text_muted": "#58585aff",
+                        "accent": "#5c78e2ff",
+                        "hover": "#dfdfe0ff",
+                        "active": { "hex": "#dfdfe0ff", "alpha": 0.88 },
+                        "focus_ring": { "hex": "#5c78e2ff", "alpha": 0.52 },
+                        "focus_ring_bg": { "hex": "#5c78e2ff", "alpha": 0.12 },
+                        "scrollbar_thumb": { "hex": "#58585aff", "alpha": 0.26 },
+                        "scrollbar_thumb_hover": { "hex": "#58585aff", "alpha": 0.36 },
+                        "scrollbar_thumb_active": { "hex": "#58585aff", "alpha": 0.46 },
+                        "danger": "#de3e35ff",
+                        "warning": "#d2b67cff",
+                        "success": "#3f953aff"
+                    },
+                    "radii": {
+                        "panel": 2.0,
+                        "pill": 2.0,
+                        "row": 2.0
+                    }
+                },
+                {
+                    "key": "fixture_dark",
+                    "name": "Fixture Dark",
+                    "appearance": "dark",
+                    "colors": {
+                        "window_bg": "#0d1016ff",
+                        "surface_bg": "#1f2127ff",
+                        "surface_bg_elevated": "#1f2127ff",
+                        "active_section": "#2d2f34ff",
+                        "border": "#2d2f34ff",
+                        "text": "#bfbdb6ff",
+                        "text_muted": "#8a8986ff",
+                        "accent": "#5ac1feff",
+                        "hover": "#2d2f34ff",
+                        "active": { "hex": "#2d2f34ff", "alpha": 0.78 },
+                        "focus_ring": { "hex": "#5ac1feff", "alpha": 0.60 },
+                        "focus_ring_bg": { "hex": "#5ac1feff", "alpha": 0.16 },
+                        "scrollbar_thumb": { "hex": "#8a8986ff", "alpha": 0.30 },
+                        "scrollbar_thumb_hover": { "hex": "#8a8986ff", "alpha": 0.42 },
+                        "scrollbar_thumb_active": { "hex": "#8a8986ff", "alpha": 0.52 },
+                        "danger": "#ef7177ff",
+                        "warning": "#feb454ff",
+                        "success": "#aad84cff"
+                    },
+                    "radii": {
+                        "panel": 2.0,
+                        "pill": 2.0,
+                        "row": 2.0
+                    }
+                }
+            ]
+        }"##;
+
+        let themes = load_theme_specs_from_json(json).expect("theme JSON should parse");
+        let light = themes
+            .iter()
+            .find(|theme| theme.option.key == "fixture_light")
+            .expect("expected light theme");
+        let dark = themes
+            .iter()
+            .find(|theme| theme.option.key == "fixture_dark")
+            .expect("expected dark theme");
+
+        assert_eq!(light.theme.colors.emphasis_text, gpui::rgba(0x000000ff));
+        assert_eq!(dark.theme.colors.emphasis_text, gpui::rgba(0xffffffff));
+    }
+
+    #[test]
+    fn built_in_themes_load_from_embedded_json() {
+        let dark = AppTheme::gitcomet_dark();
+        let light = AppTheme::gitcomet_light();
+
+        assert!(dark.is_dark);
+        assert!(!light.is_dark);
+        assert_eq!(
+            dark.colors.focus_ring,
+            with_alpha(gpui::rgba(0x5ac1feff), 0.60)
+        );
+        assert_eq!(light.colors.window_bg, gpui::rgba(0xffffffff));
+        assert_eq!(light.colors.surface_bg, gpui::rgba(0xe7ebf1ff));
+        assert_eq!(light.colors.surface_bg_elevated, gpui::rgba(0xf0f3f8ff));
+        assert_eq!(light.colors.border, gpui::rgba(0xc7ced8ff));
+        assert_eq!(light.colors.text, gpui::rgba(0x1d2330ff));
+        assert_eq!(light.colors.text_muted, gpui::rgba(0x4c5567ff));
+        assert_eq!(light.colors.accent, gpui::rgba(0x4f72ddff));
+        assert_eq!(
+            light.colors.scrollbar_thumb_hover,
+            with_alpha(gpui::rgba(0x4c5567ff), 0.42)
+        );
+        assert_eq!(dark.colors.diff_add_bg, gpui::rgba(0x0b2e1cff));
+        assert_eq!(light.colors.diff_remove_text, gpui::rgba(0xb92533ff));
+        assert_eq!(dark.colors.input_placeholder, gpui::rgba(0xffffff59));
+        assert_eq!(light.colors.accent_text, gpui::rgba(0xffffffff));
+        assert_eq!(dark.colors.emphasis_text, gpui::rgba(0xffffffff));
+        assert_eq!(light.colors.emphasis_text, gpui::rgba(0x000000ff));
+        assert_eq!(dark.syntax.comment, gpui::rgba(0x6f7b94ff));
+        assert_eq!(dark.syntax.keyword, gpui::rgba(0xedb981ff));
+        assert_eq!(dark.syntax.keyword_control, dark.syntax.keyword);
+        assert_eq!(dark.syntax.preproc, gpui::rgba(0xa79aebff));
+        assert_eq!(dark.syntax.string, gpui::rgba(0xbbd57fff));
+        assert_eq!(dark.syntax.string_regex, dark.syntax.string);
+        assert_eq!(dark.syntax.function_method, gpui::rgba(0x5ac1feff));
+        assert_eq!(dark.syntax.function_special, dark.syntax.function_method);
+        assert_eq!(dark.syntax.property, dark.syntax.function_method);
+        assert_eq!(dark.syntax.namespace, dark.syntax.function_method);
+        assert_eq!(dark.syntax.markup_link, dark.syntax.function_method);
+        assert_eq!(dark.syntax.type_name, gpui::rgba(0xbbd57fff));
+        assert_eq!(dark.syntax.type_builtin, dark.syntax.type_name);
+        assert_eq!(dark.syntax.number, gpui::rgba(0xe4a688ff));
+        assert_eq!(dark.syntax.constant, gpui::rgba(0xde9fc1ff));
+        assert_eq!(dark.syntax.constant_builtin, dark.syntax.constant);
+        assert_eq!(dark.syntax.variable, Some(dark.colors.text));
+        assert_eq!(dark.syntax.variable_parameter, dark.colors.text);
+        assert_eq!(dark.syntax.variable_special, dark.colors.text);
+        assert_eq!(dark.syntax.operator, gpui::rgba(0x8d96aaff));
+        assert_eq!(dark.syntax.punctuation, dark.syntax.operator);
+        assert_eq!(dark.syntax.diff_delta, dark.syntax.function_method);
+        assert_eq!(dark.syntax.diff_plus, gpui::rgba(0xbbf7d0ff));
+        assert_eq!(dark.syntax.diff_minus, gpui::rgba(0xfecacaff));
+        assert_eq!(light.syntax.comment, gpui::rgba(0x5c6982ff));
+        assert_eq!(light.syntax.keyword, gpui::rgba(0x8a4d0dff));
+        assert_eq!(light.syntax.keyword_control, light.syntax.keyword);
+        assert_eq!(light.syntax.preproc, gpui::rgba(0x5946aaff));
+        assert_eq!(light.syntax.string, gpui::rgba(0x4d6710ff));
+        assert_eq!(light.syntax.string_special, light.syntax.string);
+        assert_eq!(light.syntax.function, gpui::rgba(0x006c98ff));
+        assert_eq!(light.syntax.function_method, light.syntax.function);
+        assert_eq!(light.syntax.function_special, light.syntax.function);
+        assert_eq!(light.syntax.property, light.syntax.function);
+        assert_eq!(light.syntax.namespace, light.syntax.function);
+        assert_eq!(light.syntax.markup_link, light.syntax.function);
+        assert_eq!(light.syntax.type_name, gpui::rgba(0x4d6710ff));
+        assert_eq!(light.syntax.type_builtin, light.syntax.type_name);
+        assert_eq!(light.syntax.constructor, light.syntax.function);
+        assert_eq!(light.syntax.constant, gpui::rgba(0x8e4c6fff));
+        assert_eq!(light.syntax.constant_builtin, light.syntax.constant);
+        assert_eq!(light.syntax.number, gpui::rgba(0x97503aff));
+        assert_eq!(light.syntax.variable, Some(light.colors.text));
+        assert_eq!(light.syntax.variable_parameter, light.colors.text);
+        assert_eq!(light.syntax.variable_special, light.colors.text);
+        assert_eq!(light.syntax.operator, gpui::rgba(0x4a566cff));
+        assert_eq!(light.syntax.punctuation, light.syntax.operator);
+        assert_eq!(light.syntax.diff_delta, light.syntax.function);
+        assert_eq!(
+            dark.graph_lane_palette.as_slice().len(),
+            GRAPH_LANE_PALETTE_SIZE
+        );
+    }
+
+    #[test]
+    fn built_in_tokyo_night_theme_loads_from_embedded_json() {
+        let theme = AppTheme::from_key("tokyo_night").expect("Tokyo Night theme should load");
+
+        assert!(theme.is_dark);
+        assert_eq!(theme.colors.window_bg, gpui::rgba(0x1a1b26ff));
+        assert_eq!(theme.colors.emphasis_text, gpui::rgba(0xffffffff));
+        assert_eq!(theme.syntax.keyword, gpui::rgba(0xbb9af7ff));
+        assert_eq!(theme.syntax.string, gpui::rgba(0x9ece6aff));
+        assert_eq!(theme.syntax.string_regex, gpui::rgba(0xff9e64ff));
+        assert_eq!(theme.syntax.diff_minus, gpui::rgba(0xf7768eff));
+        assert_eq!(theme.syntax.variable, Some(gpui::rgba(0xc0caf5ff)));
+    }
+
+    #[test]
+    fn built_in_sunset_veil_theme_loads_from_embedded_json() {
+        let theme = AppTheme::from_key("sunset_veil").expect("Sunset Veil theme should load");
+
+        assert!(!theme.is_dark);
+        assert_eq!(theme.colors.window_bg, gpui::rgba(0xfcf6f0ff));
+        assert_eq!(theme.colors.accent, gpui::rgba(0xa6632cff));
+        assert_eq!(theme.colors.diff_add_text, gpui::rgba(0x2e7638ff));
+        assert_eq!(theme.syntax.keyword, gpui::rgba(0x2f7b93ff));
+        assert_eq!(theme.syntax.markup_heading, gpui::rgba(0x3a86a0ff));
+        assert_eq!(theme.syntax.diff_plus, gpui::rgba(0x2e7638ff));
+        assert_eq!(theme.syntax.variable, Some(gpui::rgba(0x2b241dff)));
+        assert_eq!(theme_label("sunset_veil"), Some("Sunset Veil".to_string()));
+    }
+
+    #[test]
+    fn bundled_theme_assets_explicitly_define_new_syntax_keys() {
+        const REQUIRED_KEYS: &[&str] = &[
+            "\"string_regex\"",
+            "\"string_special\"",
+            "\"preproc\"",
+            "\"constructor\"",
+            "\"namespace\"",
+            "\"variable_builtin\"",
+            "\"label\"",
+            "\"constant_builtin\"",
+            "\"punctuation_special\"",
+            "\"punctuation_list_marker\"",
+            "\"markup_heading\"",
+            "\"markup_link\"",
+            "\"text_literal\"",
+            "\"diff_plus\"",
+            "\"diff_minus\"",
+            "\"diff_delta\"",
+        ];
+
+        for file in EMBEDDED_THEME_FILES {
+            for key in REQUIRED_KEYS {
+                assert!(
+                    file.json.contains(key),
+                    "embedded theme file {} should explicitly define {}",
+                    file.stem,
+                    key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_theme_file_exposes_multiple_themes() {
+        let json = r##"{
+            "name": "Classic",
+            "themes": [
+                {
+                    "key": "classic_light",
+                    "name": "Classic Light",
+                    "appearance": "light",
+                    "colors": {
+                        "window_bg": "#ffffffff",
+                        "surface_bg": "#f9f9f9ff",
+                        "surface_bg_elevated": "#f7f7f7ff",
+                        "active_section": "#ffffffff",
+                        "border": "#d2d2d2ff",
+                        "text": "#000000ff",
+                        "text_muted": "#505050ff",
+                        "accent": "#1f6ae2ff",
+                        "hover": "#d0d0d0ff",
+                        "active": "#c7deffff",
+                        "focus_ring": { "hex": "#1f6ae2ff", "alpha": 0.52 },
+                        "focus_ring_bg": { "hex": "#1f6ae2ff", "alpha": 0.12 },
+                        "scrollbar_thumb": "#c8c8c8aa",
+                        "scrollbar_thumb_hover": "#c8c8c8aa",
+                        "scrollbar_thumb_active": "#c8c8c8ff",
+                        "danger": "#c5060bff",
+                        "warning": "#c99401ff",
+                        "success": "#036a07ff"
+                    },
+                    "radii": {
+                        "panel": 2.0,
+                        "pill": 2.0,
+                        "row": 2.0
+                    }
+                },
+                {
+                    "key": "classic_dark",
+                    "name": "Classic Dark",
+                    "appearance": "dark",
+                    "colors": {
+                        "window_bg": "#131313ff",
+                        "surface_bg": "#1e1d1eff",
+                        "surface_bg_elevated": "#1e1d1eff",
+                        "active_section": "#353436ff",
+                        "border": "#404040ff",
+                        "text": "#cacccaff",
+                        "text_muted": "#9e9e9eff",
+                        "accent": "#c28b12ff",
+                        "hover": "#353436ff",
+                        "active": "#474646ff",
+                        "focus_ring": { "hex": "#c28b12ff", "alpha": 0.60 },
+                        "focus_ring_bg": { "hex": "#c28b12ff", "alpha": 0.16 },
+                        "scrollbar_thumb": "#4c4d4daa",
+                        "scrollbar_thumb_hover": "#4c4d4dff",
+                        "scrollbar_thumb_active": "#4c4d4dff",
+                        "danger": "#c74028ff",
+                        "warning": "#b0a878ff",
+                        "success": "#62ba46ff"
+                    },
+                    "radii": {
+                        "panel": 2.0,
+                        "pill": 2.0,
+                        "row": 2.0
+                    }
+                }
+            ]
+        }"##;
+
+        let specs = load_theme_specs_from_json(json).expect("bundle should parse");
+
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].option.key, "classic_light");
+        assert_eq!(specs[0].option.label, "Classic Light");
+        assert!(!specs[0].theme.is_dark);
+        assert_eq!(specs[1].option.key, "classic_dark");
+        assert_eq!(specs[1].option.label, "Classic Dark");
+        assert!(specs[1].theme.is_dark);
+    }
+
+    #[test]
+    fn embedded_theme_registry_exposes_default_keys() {
+        let themes = available_themes();
+
+        assert!(!themes.is_empty());
+        assert!(has_theme_key(DEFAULT_DARK_THEME_KEY));
+        assert!(has_theme_key(DEFAULT_LIGHT_THEME_KEY));
+        assert_eq!(
+            theme_label(DEFAULT_DARK_THEME_KEY),
+            Some("GitComet Dark".to_string())
+        );
+        assert_eq!(
+            theme_label(DEFAULT_LIGHT_THEME_KEY),
+            Some("GitComet Light".to_string())
+        );
+    }
+
+    #[test]
+    fn ensure_runtime_theme_dir_creates_missing_directory() {
+        let dir = tempdir().expect("temp dir should exist");
+        let path = dir.path().join("themes");
+
+        assert!(!path.exists(), "theme subdirectory should start absent");
+
+        let resolved = resolved_runtime_themes_dir(Some(&path))
+            .expect("runtime theme helper should resolve a writable directory");
+
+        assert_eq!(resolved, path);
+        assert!(resolved.is_dir(), "theme directory should be created");
+    }
+
+    #[test]
+    fn runtime_theme_dir_extends_embedded_themes_with_custom_entries() {
+        let dir = tempdir().expect("temp dir should exist");
+        fs::write(
+            dir.path().join("custom_theme.json"),
+            r##"{
+                "name": "Custom Theme",
+                "themes": [
+                    {
+                        "key": "custom_theme",
+                        "name": "Custom Theme",
+                        "appearance": "dark",
+                        "colors": {
+                            "window_bg": "#000000ff",
+                            "surface_bg": "#111111ff",
+                            "surface_bg_elevated": "#222222ff",
+                            "active_section": "#333333ff",
+                            "border": "#444444ff",
+                            "text": "#eeeeeeff",
+                            "text_muted": "#999999ff",
+                            "accent": "#abcdef12",
+                            "hover": "#555555ff",
+                            "active": { "hex": "#666666ff", "alpha": 0.9 },
+                            "focus_ring": { "hex": "#777777ff", "alpha": 0.5 },
+                            "focus_ring_bg": { "hex": "#777777ff", "alpha": 0.2 },
+                            "scrollbar_thumb": "#88888880",
+                            "scrollbar_thumb_hover": "#888888ff",
+                            "scrollbar_thumb_active": "#999999ff",
+                            "danger": "#aa0000ff",
+                            "warning": "#bb9900ff",
+                            "success": "#00aa00ff"
+                        },
+                        "radii": {
+                            "panel": 2.0,
+                            "pill": 2.0,
+                            "row": 2.0
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .expect("custom theme file should be written");
+
+        let themes = merged_theme_options(Some(dir.path()));
+        let custom = themes
+            .iter()
+            .find(|theme| theme.key == "custom_theme")
+            .expect("custom theme should be discovered");
+
+        assert_eq!(custom.label, "Custom Theme");
+        assert!(
+            themes
+                .iter()
+                .any(|theme| theme.key == DEFAULT_DARK_THEME_KEY)
+        );
+    }
+
+    #[test]
+    fn runtime_theme_dir_ignores_reserved_system_theme_filenames() {
+        let dir = tempdir().expect("temp dir should exist");
+        fs::write(
+            dir.path().join("gitcomet.json"),
+            r##"{
+                "name": "Shadow Theme",
+                "themes": [
+                    {
+                        "key": "shadow_theme",
+                        "name": "Shadow Theme",
+                        "appearance": "dark",
+                        "colors": {
+                            "window_bg": "#000000ff",
+                            "surface_bg": "#111111ff",
+                            "surface_bg_elevated": "#111111ff",
+                            "active_section": "#222222ff",
+                            "border": "#333333ff",
+                            "text": "#eeeeeeff",
+                            "text_muted": "#999999ff",
+                            "accent": "#abcdef12",
+                            "hover": "#222222ff",
+                            "active": "#222222ff",
+                            "focus_ring": "#abcdef12",
+                            "focus_ring_bg": "#abcdef12",
+                            "scrollbar_thumb": "#88888880",
+                            "scrollbar_thumb_hover": "#888888aa",
+                            "scrollbar_thumb_active": "#888888ff",
+                            "danger": "#aa0000ff",
+                            "warning": "#bb9900ff",
+                            "success": "#00aa00ff"
+                        },
+                        "radii": {
+                            "panel": 2.0,
+                            "pill": 2.0,
+                            "row": 2.0
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .expect("reserved theme file should be written");
+
+        let themes = merged_theme_options(Some(dir.path()));
+
+        assert!(
+            themes.iter().all(|theme| theme.key != "shadow_theme"),
+            "custom themes in reserved bundled filenames should be ignored"
+        );
+    }
+
+    #[test]
+    fn runtime_theme_dir_ignores_every_reserved_system_theme_filename() {
+        let dir = tempdir().expect("temp dir should exist");
+
+        for (ix, file) in EMBEDDED_THEME_FILES.iter().enumerate() {
+            let theme_key = format!("reserved_shadow_{ix}");
+            let theme_name = format!("Reserved Shadow {ix}");
+            let json = format!(
+                r##"{{
+                    "name": "Reserved Shadow Pack {ix}",
+                    "themes": [
+                        {{
+                            "key": "{theme_key}",
+                            "name": "{theme_name}",
+                            "appearance": "dark",
+                            "colors": {{
+                                "window_bg": "#000000ff",
+                                "surface_bg": "#111111ff",
+                                "surface_bg_elevated": "#111111ff",
+                                "active_section": "#222222ff",
+                                "border": "#333333ff",
+                                "text": "#eeeeeeff",
+                                "text_muted": "#999999ff",
+                                "accent": "#abcdef12",
+                                "hover": "#222222ff",
+                                "active": "#222222ff",
+                                "focus_ring": "#abcdef12",
+                                "focus_ring_bg": "#abcdef12",
+                                "scrollbar_thumb": "#88888880",
+                                "scrollbar_thumb_hover": "#888888aa",
+                                "scrollbar_thumb_active": "#888888ff",
+                                "danger": "#aa0000ff",
+                                "warning": "#bb9900ff",
+                                "success": "#00aa00ff"
+                            }},
+                            "radii": {{
+                                "panel": 2.0,
+                                "pill": 2.0,
+                                "row": 2.0
+                            }}
+                        }}
+                    ]
+                }}"##,
+            );
+            fs::write(dir.path().join(format!("{}.json", file.stem)), json)
+                .expect("reserved theme file should be written");
+        }
+
+        let runtime_themes = runtime_themes_with_dir(Some(dir.path()));
+        let merged_themes = merged_theme_options(Some(dir.path()));
+
+        for ix in 0..EMBEDDED_THEME_FILES.len() {
+            let theme_key = format!("reserved_shadow_{ix}");
+            assert!(
+                !runtime_themes.contains_key(&theme_key),
+                "runtime themes should ignore reserved bundled filename entry `{theme_key}`"
+            );
+            assert!(
+                merged_themes.iter().all(|theme| theme.key != theme_key),
+                "available themes should ignore reserved bundled filename entry `{theme_key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_theme_dir_ignores_embedded_theme_key_collisions_but_keeps_custom_entries() {
+        let dir = tempdir().expect("temp dir should exist");
+        fs::write(
+            dir.path().join("mixed_theme.json"),
+            r##"{
+                "name": "Mixed Theme",
+                "themes": [
+                    {
+                        "key": "gitcomet_dark",
+                        "name": "Fake GitComet Dark",
+                        "appearance": "dark",
+                        "colors": {
+                            "window_bg": "#000000ff",
+                            "surface_bg": "#111111ff",
+                            "surface_bg_elevated": "#222222ff",
+                            "active_section": "#333333ff",
+                            "border": "#444444ff",
+                            "text": "#eeeeeeff",
+                            "text_muted": "#999999ff",
+                            "accent": "#abcdef12",
+                            "hover": "#555555ff",
+                            "active": "#666666ff",
+                            "focus_ring": "#777777ff",
+                            "focus_ring_bg": "#888888ff",
+                            "scrollbar_thumb": "#99999980",
+                            "scrollbar_thumb_hover": "#999999aa",
+                            "scrollbar_thumb_active": "#999999ff",
+                            "danger": "#aa0000ff",
+                            "warning": "#bb9900ff",
+                            "success": "#00aa00ff"
+                        },
+                        "radii": {
+                            "panel": 2.0,
+                            "pill": 2.0,
+                            "row": 2.0
+                        }
+                    },
+                    {
+                        "key": "custom_keep",
+                        "name": "Custom Keep",
+                        "appearance": "light",
+                        "colors": {
+                            "window_bg": "#ffffffff",
+                            "surface_bg": "#f0f0f0ff",
+                            "surface_bg_elevated": "#f7f7f7ff",
+                            "active_section": "#ffffffff",
+                            "border": "#d2d2d2ff",
+                            "text": "#000000ff",
+                            "text_muted": "#505050ff",
+                            "accent": "#1f6ae2ff",
+                            "hover": "#d0d0d0ff",
+                            "active": "#c7deffff",
+                            "focus_ring": "#1f6ae2ff",
+                            "focus_ring_bg": "#1f6ae233",
+                            "scrollbar_thumb": "#c8c8c8aa",
+                            "scrollbar_thumb_hover": "#c8c8c8cc",
+                            "scrollbar_thumb_active": "#c8c8c8ff",
+                            "danger": "#c5060bff",
+                            "warning": "#c99401ff",
+                            "success": "#036a07ff"
+                        },
+                        "radii": {
+                            "panel": 2.0,
+                            "pill": 2.0,
+                            "row": 2.0
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .expect("mixed theme file should be written");
+
+        let runtime_themes = runtime_themes_with_dir(Some(dir.path()));
+        assert!(
+            !runtime_themes.contains_key(DEFAULT_DARK_THEME_KEY),
+            "runtime themes should ignore entries that reuse embedded system keys"
+        );
+        assert!(
+            runtime_themes.contains_key("custom_keep"),
+            "runtime themes should keep valid custom entries from mixed bundles"
+        );
+
+        let themes = merged_theme_options(Some(dir.path()));
+        assert_eq!(
+            themes
+                .iter()
+                .find(|theme| theme.key == DEFAULT_DARK_THEME_KEY)
+                .map(|theme| theme.label.as_str()),
+            Some("GitComet Dark"),
+            "embedded theme labels should remain authoritative"
+        );
+        assert_eq!(
+            themes
+                .iter()
+                .filter(|theme| theme.key == DEFAULT_DARK_THEME_KEY)
+                .count(),
+            1,
+            "embedded system keys should appear only once in the merged theme list"
+        );
+        assert!(
+            themes.iter().any(|theme| theme.key == "custom_keep"),
+            "valid custom themes should still appear in available theme options"
+        );
+    }
+
+    #[test]
+    fn themes_markdown_example_matches_current_theme_parser() {
+        let example = themes_markdown_example();
+        let json = strip_json_line_comments(&example);
+        let themes = load_theme_specs_from_json(&json)
+            .expect("THEMES.md example should stay in sync with the runtime parser");
+
+        assert_eq!(themes.len(), 1, "docs example should define a single theme");
+        assert_eq!(themes[0].option.key, "my_theme_dark");
+    }
+
+    #[test]
+    fn themes_markdown_lists_current_supported_syntax_keys() {
+        const REQUIRED_DOC_KEYS: &[&str] = &[
+            "comment",
+            "comment_doc",
+            "string",
+            "string_escape",
+            "string_regex",
+            "string_special",
+            "keyword",
+            "keyword_control",
+            "preproc",
+            "number",
+            "boolean",
+            "function",
+            "function_method",
+            "function_special",
+            "constructor",
+            "type",
+            "type_builtin",
+            "type_interface",
+            "namespace",
+            "variable",
+            "variable_parameter",
+            "variable_special",
+            "variable_builtin",
+            "property",
+            "label",
+            "constant",
+            "constant_builtin",
+            "operator",
+            "punctuation",
+            "punctuation_bracket",
+            "punctuation_delimiter",
+            "punctuation_special",
+            "punctuation_list_marker",
+            "tag",
+            "attribute",
+            "markup_heading",
+            "markup_link",
+            "text_literal",
+            "diff_plus",
+            "diff_minus",
+            "diff_delta",
+            "lifetime",
+        ];
+
+        let markdown = fs::read_to_string(themes_markdown_path())
+            .expect("THEMES.md should be readable for supported-key checks");
+
+        for key in REQUIRED_DOC_KEYS {
+            assert!(
+                markdown.contains(&format!("`{key}`")),
+                "THEMES.md should mention the supported syntax key `{key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn themes_markdown_documents_custom_theme_override_rules() {
+        let markdown = fs::read_to_string(themes_markdown_path())
+            .expect("THEMES.md should be readable for override behavior checks");
+
+        for snippet in [
+            "GitComet creates the user themes directory on startup",
+            "ignores files whose basename matches a bundled system theme file",
+            "cannot override built-in system theme keys",
+        ] {
+            assert!(
+                markdown.contains(snippet),
+                "THEMES.md should document `{snippet}`"
+            );
+        }
+    }
+
+    #[test]
+    fn readme_themes_section_points_to_theme_guide() {
+        let readme =
+            fs::read_to_string(readme_path()).expect("README.md should be readable for docs tests");
+
+        for snippet in [
+            "Custom themes are loaded from JSON bundle files in your per-user themes directory",
+            "creates on startup",
+            "[THEMES.md](docs/themes.md)",
+        ] {
+            assert!(
+                readme.contains(snippet),
+                "README.md theme section should mention `{snippet}`"
+            );
+        }
     }
 }

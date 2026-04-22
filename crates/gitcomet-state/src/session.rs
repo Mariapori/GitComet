@@ -1,11 +1,14 @@
-use crate::model::{AppState, RepoId};
-use gitcomet_core::domain::LogScope;
+use crate::model::{AppState, GitLogTagFetchMode, RepoId};
+use gitcomet_core::domain::{HistoryMode, LogScope};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use smallvec::SmallVec;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{env, fs, io};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -13,20 +16,34 @@ pub struct UiSession {
     pub open_repos: Vec<PathBuf>,
     pub active_repo: Option<PathBuf>,
     pub recent_repos: Vec<PathBuf>,
+    pub repo_sidebar_collapsed_items: BTreeMap<PathBuf, BTreeSet<String>>,
     pub window_width: Option<u32>,
     pub window_height: Option<u32>,
     pub sidebar_width: Option<u32>,
     pub details_width: Option<u32>,
     pub theme_mode: Option<String>,
+    pub ui_scale_percent: Option<u32>,
+    pub ui_font_family: Option<String>,
+    pub editor_font_family: Option<String>,
+    pub use_font_ligatures: Option<bool>,
     pub date_time_format: Option<String>,
     pub timezone: Option<String>,
     pub show_timezone: Option<bool>,
+    pub change_tracking_view: Option<String>,
+    pub diff_scroll_sync: Option<String>,
+    pub change_tracking_height: Option<u32>,
+    pub untracked_height: Option<u32>,
+    pub history_show_graph: Option<bool>,
     pub history_show_author: Option<bool>,
     pub history_show_date: Option<bool>,
     pub history_show_sha: Option<bool>,
+    pub history_show_tags: Option<bool>,
+    pub history_tag_fetch_mode: Option<GitLogTagFetchMode>,
+    pub default_history_mode: Option<HistoryMode>,
+    pub git_executable_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum HistoryScopeSetting {
     CurrentBranch,
@@ -36,8 +53,11 @@ enum HistoryScopeSetting {
 impl From<LogScope> for HistoryScopeSetting {
     fn from(value: LogScope) -> Self {
         match value {
-            LogScope::CurrentBranch => Self::CurrentBranch,
-            LogScope::AllBranches => Self::AllBranches,
+            HistoryMode::AllBranches => Self::AllBranches,
+            HistoryMode::FullReachable
+            | HistoryMode::FirstParent
+            | HistoryMode::NoMerges
+            | HistoryMode::MergesOnly => Self::CurrentBranch,
         }
     }
 }
@@ -51,6 +71,40 @@ impl From<HistoryScopeSetting> for LogScope {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HistoryModeSetting {
+    FullReachable,
+    FirstParent,
+    NoMerges,
+    MergesOnly,
+    AllBranches,
+}
+
+impl From<HistoryMode> for HistoryModeSetting {
+    fn from(value: HistoryMode) -> Self {
+        match value {
+            HistoryMode::FullReachable => Self::FullReachable,
+            HistoryMode::FirstParent => Self::FirstParent,
+            HistoryMode::NoMerges => Self::NoMerges,
+            HistoryMode::MergesOnly => Self::MergesOnly,
+            HistoryMode::AllBranches => Self::AllBranches,
+        }
+    }
+}
+
+impl From<HistoryModeSetting> for HistoryMode {
+    fn from(value: HistoryModeSetting) -> Self {
+        match value {
+            HistoryModeSetting::FullReachable => Self::FullReachable,
+            HistoryModeSetting::FirstParent => Self::FirstParent,
+            HistoryModeSetting::NoMerges => Self::NoMerges,
+            HistoryModeSetting::MergesOnly => Self::MergesOnly,
+            HistoryModeSetting::AllBranches => Self::AllBranches,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct UiSessionFileV1 {
     version: u32,
@@ -59,30 +113,49 @@ struct UiSessionFileV1 {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct UiSessionFileV2 {
+struct UiSessionFile {
     version: u32,
     open_repos: Vec<String>,
     active_repo: Option<String>,
     recent_repos: Option<Vec<String>>,
+    repo_sidebar_collapsed_items: Option<BTreeMap<String, BTreeSet<String>>>,
     window_width: Option<u32>,
     window_height: Option<u32>,
     sidebar_width: Option<u32>,
     details_width: Option<u32>,
     theme_mode: Option<String>,
+    ui_scale_percent: Option<u32>,
+    ui_font_family: Option<String>,
+    editor_font_family: Option<String>,
+    use_font_ligatures: Option<bool>,
     date_time_format: Option<String>,
     timezone: Option<String>,
     show_timezone: Option<bool>,
+    change_tracking_view: Option<String>,
+    diff_scroll_sync: Option<String>,
+    change_tracking_height: Option<u32>,
+    untracked_height: Option<u32>,
+    history_show_graph: Option<bool>,
     history_show_author: Option<bool>,
     history_show_date: Option<bool>,
     history_show_sha: Option<bool>,
+    history_show_tags: Option<bool>,
+    history_tag_fetch_mode: Option<GitLogTagFetchMode>,
+    default_history_mode: Option<HistoryModeSetting>,
+    git_executable_path: Option<String>,
+    repo_history_modes: Option<BTreeMap<String, HistoryModeSetting>>,
     repo_history_scopes: Option<BTreeMap<String, HistoryScopeSetting>>,
     repo_fetch_prune_deleted_remote_tracking_branches: Option<BTreeMap<String, bool>>,
 }
 
 const SESSION_FILE_VERSION_V1: u32 = 1;
 const SESSION_FILE_VERSION_V2: u32 = 2;
-const CURRENT_SESSION_FILE_VERSION: u32 = SESSION_FILE_VERSION_V2;
+const SESSION_FILE_VERSION_V3: u32 = 3;
+const CURRENT_SESSION_FILE_VERSION: u32 = SESSION_FILE_VERSION_V3;
 const MAX_RECENT_REPOS: usize = 15;
+const DEFAULT_UI_SCALE_PERCENT: u32 = 100;
+const MIN_UI_SCALE_PERCENT: u32 = 80;
+const MAX_UI_SCALE_PERCENT: u32 = 200;
 #[cfg(unix)]
 const SESSION_PATH_BYTES_PREFIX: &str = "gitcomet-path-bytes:";
 #[cfg(windows)]
@@ -100,54 +173,215 @@ pub fn load() -> UiSession {
 }
 
 pub fn load_from_path(path: &Path) -> UiSession {
-    let Some(file) = load_file_v2(path) else {
+    let Some(file) = load_file(path) else {
         return UiSession::default();
     };
 
     let (open_repos, active_repo) = parse_repos(file.open_repos, file.active_repo);
     let recent_repos = parse_path_list(file.recent_repos.unwrap_or_default());
+    let repo_sidebar_collapsed_items =
+        parse_path_keyed_string_sets(file.repo_sidebar_collapsed_items.unwrap_or_default());
     UiSession {
         open_repos,
         active_repo,
         recent_repos,
+        repo_sidebar_collapsed_items,
         window_width: file.window_width,
         window_height: file.window_height,
         sidebar_width: file.sidebar_width,
         details_width: file.details_width,
         theme_mode: file.theme_mode,
+        ui_scale_percent: file.ui_scale_percent,
+        ui_font_family: file.ui_font_family,
+        editor_font_family: file.editor_font_family,
+        use_font_ligatures: file.use_font_ligatures,
         date_time_format: file.date_time_format,
         timezone: file.timezone,
         show_timezone: file.show_timezone,
+        change_tracking_view: file.change_tracking_view,
+        diff_scroll_sync: file.diff_scroll_sync,
+        change_tracking_height: file.change_tracking_height,
+        untracked_height: file.untracked_height,
+        history_show_graph: file.history_show_graph,
         history_show_author: file.history_show_author,
         history_show_date: file.history_show_date,
         history_show_sha: file.history_show_sha,
+        history_show_tags: file.history_show_tags,
+        history_tag_fetch_mode: file.history_tag_fetch_mode,
+        default_history_mode: file.default_history_mode.map(Into::into),
+        git_executable_path: file
+            .git_executable_path
+            .as_deref()
+            .map(path_from_storage_key),
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RepoSessionPreferences {
+    pub(crate) default_history_mode: Option<HistoryMode>,
+    pub(crate) repo_history_modes: BTreeMap<String, HistoryMode>,
+    pub(crate) repo_history_scopes: BTreeMap<String, LogScope>,
+    pub(crate) repo_fetch_prune_deleted_remote_tracking_branches: BTreeMap<String, bool>,
+}
+
+pub(crate) fn load_repo_session_preferences() -> RepoSessionPreferences {
+    let Some(session_file_path) = default_session_file_path() else {
+        return RepoSessionPreferences::default();
+    };
+    load_repo_session_preferences_from_path(&session_file_path)
+}
+
+pub(crate) fn load_repo_session_preferences_from_path(
+    session_file_path: &Path,
+) -> RepoSessionPreferences {
+    let Some(file) = load_file(session_file_path) else {
+        return RepoSessionPreferences::default();
+    };
+
+    RepoSessionPreferences {
+        default_history_mode: file.default_history_mode.map(Into::into),
+        repo_history_modes: file
+            .repo_history_modes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, v.into()))
+            .collect(),
+        repo_history_scopes: file
+            .repo_history_scopes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, v.into()))
+            .collect(),
+        repo_fetch_prune_deleted_remote_tracking_branches: file
+            .repo_fetch_prune_deleted_remote_tracking_branches
+            .unwrap_or_default(),
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionReposSnapshot {
-    pub open_repos: Vec<String>,
-    pub active_repo: Option<String>,
+    pub open_repos: Arc<[Arc<str>]>,
+    pub active_repo_index: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CachedSessionReposSnapshot {
+    repo_ids: SmallVec<[RepoId; 24]>,
+    repo_keys: SmallVec<[Arc<str>; 24]>,
+    dedup_indexes_by_repo: SmallVec<[usize; 24]>,
+    open_repos: Arc<[Arc<str>]>,
+}
+
+thread_local! {
+    static SESSION_REPOS_SNAPSHOT_CACHE: RefCell<Option<CachedSessionReposSnapshot>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SESSION_FILE_PATH_OVERRIDE: RefCell<Vec<Option<PathBuf>>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestSessionFilePathGuard;
+
+#[cfg(test)]
+pub(crate) fn push_test_session_file_path_override(
+    path: impl Into<Option<PathBuf>>,
+) -> TestSessionFilePathGuard {
+    TEST_SESSION_FILE_PATH_OVERRIDE.with(|stack| stack.borrow_mut().push(path.into()));
+    TestSessionFilePathGuard
+}
+
+#[cfg(test)]
+impl Drop for TestSessionFilePathGuard {
+    fn drop(&mut self) {
+        TEST_SESSION_FILE_PATH_OVERRIDE.with(|stack| {
+            let popped = stack.borrow_mut().pop();
+            debug_assert!(popped.is_some(), "session path override stack underflow");
+        });
+    }
+}
+
+#[cfg(test)]
+fn test_session_file_path_override() -> Option<Option<PathBuf>> {
+    TEST_SESSION_FILE_PATH_OVERRIDE.with(|stack| stack.borrow().last().cloned())
+}
+
+fn snapshot_repos_from_cache(state: &AppState) -> Option<SessionReposSnapshot> {
+    SESSION_REPOS_SNAPSHOT_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        let cached = cache.as_ref()?;
+        if cached.repo_ids.len() != state.repos.len() {
+            return None;
+        }
+
+        let mut active_repo_index = None;
+        for (repo_ix, repo) in state.repos.iter().enumerate() {
+            if cached.repo_ids[repo_ix] != repo.id
+                || !Arc::ptr_eq(&cached.repo_keys[repo_ix], repo.session_workdir_key())
+            {
+                return None;
+            }
+            if active_repo_index.is_none() && Some(repo.id) == state.active_repo {
+                active_repo_index = Some(cached.dedup_indexes_by_repo[repo_ix]);
+            }
+        }
+
+        Some(SessionReposSnapshot {
+            open_repos: Arc::clone(&cached.open_repos),
+            active_repo_index,
+        })
+    })
 }
 
 pub fn snapshot_repos_from_state(state: &AppState) -> SessionReposSnapshot {
-    let mut open_repos: Vec<String> = Vec::with_capacity(state.repos.len());
-    let mut seen: FxHashSet<&Path> = FxHashSet::default();
-    for repo in &state.repos {
-        let workdir = repo.spec.workdir.as_path();
-        if !seen.insert(workdir) {
-            continue;
-        }
-        open_repos.push(path_storage_key(workdir));
+    if let Some(snapshot) = snapshot_repos_from_cache(state) {
+        return snapshot;
     }
 
-    let active_repo: Option<String> = active_repo_path(state, state.active_repo)
-        .filter(|p| seen.contains(*p))
-        .map(path_storage_key);
+    // Repo switches rarely change the open-tab order, so cache the last exact repo sequence and
+    // reuse its dedup map on steady-state switches. When the sequence changes, rebuild once with
+    // a linear scan over the small user-scale repo list.
+    let mut repo_ids = SmallVec::<[RepoId; 24]>::with_capacity(state.repos.len());
+    let mut repo_keys = SmallVec::<[Arc<str>; 24]>::with_capacity(state.repos.len());
+    let mut unique_keys = SmallVec::<[Arc<str>; 24]>::new();
+    let mut dedup_indexes_by_repo = SmallVec::<[usize; 24]>::with_capacity(state.repos.len());
+    let active_repo_id = state.active_repo;
+    let mut active_repo_index = None;
+
+    for repo in &state.repos {
+        repo_ids.push(repo.id);
+        let key = repo.session_workdir_key();
+        repo_keys.push(Arc::clone(key));
+
+        let unique_ix = if let Some(ix) = unique_keys
+            .iter()
+            .position(|seen| seen.as_ref() == key.as_ref())
+        {
+            ix
+        } else {
+            unique_keys.push(Arc::clone(key));
+            unique_keys.len() - 1
+        };
+        dedup_indexes_by_repo.push(unique_ix);
+        if active_repo_index.is_none() && Some(repo.id) == active_repo_id {
+            active_repo_index = Some(unique_ix);
+        }
+    }
+
+    let open_repos: Arc<[Arc<str>]> = unique_keys.into_vec().into();
+    SESSION_REPOS_SNAPSHOT_CACHE.with(|cache| {
+        *cache.borrow_mut() = Some(CachedSessionReposSnapshot {
+            repo_ids,
+            repo_keys,
+            dedup_indexes_by_repo,
+            open_repos: Arc::clone(&open_repos),
+        });
+    });
 
     SessionReposSnapshot {
         open_repos,
-        active_repo,
+        active_repo_index,
     }
 }
 
@@ -176,10 +410,17 @@ pub fn persist_repos_snapshot_to_path(
     snapshot: &SessionReposSnapshot,
     path: &Path,
 ) -> io::Result<()> {
-    let mut file = load_file_v2(path).unwrap_or_default();
+    let mut file = load_file(path).unwrap_or_default();
     file.version = CURRENT_SESSION_FILE_VERSION;
-    file.open_repos = snapshot.open_repos.clone();
-    file.active_repo = snapshot.active_repo.clone();
+    file.open_repos = snapshot
+        .open_repos
+        .iter()
+        .map(|path| path.to_string())
+        .collect();
+    file.active_repo = snapshot
+        .active_repo_index
+        .and_then(|ix| snapshot.open_repos.get(ix))
+        .map(|path| path.to_string());
 
     persist_to_path(path, &file)
 }
@@ -192,7 +433,7 @@ pub fn persist_recent_repo(workdir: &Path) -> io::Result<()> {
 }
 
 pub fn persist_recent_repo_to_path(workdir: &Path, session_file_path: &Path) -> io::Result<()> {
-    let mut file = load_file_v2(session_file_path).unwrap_or_default();
+    let mut file = load_file(session_file_path).unwrap_or_default();
     file.version = CURRENT_SESSION_FILE_VERSION;
 
     let workdir_key = path_storage_key(workdir);
@@ -215,7 +456,7 @@ pub fn remove_recent_repo(workdir: &Path) -> io::Result<()> {
 }
 
 pub fn remove_recent_repo_to_path(workdir: &Path, session_file_path: &Path) -> io::Result<()> {
-    let mut file = load_file_v2(session_file_path).unwrap_or_default();
+    let mut file = load_file(session_file_path).unwrap_or_default();
     file.version = CURRENT_SESSION_FILE_VERSION;
 
     let workdir_key = path_storage_key(workdir);
@@ -233,13 +474,27 @@ pub struct UiSettings {
     pub window_height: Option<u32>,
     pub sidebar_width: Option<u32>,
     pub details_width: Option<u32>,
+    pub repo_sidebar_collapsed_items: Option<BTreeMap<PathBuf, BTreeSet<String>>>,
     pub theme_mode: Option<String>,
+    pub ui_scale_percent: Option<u32>,
+    pub ui_font_family: Option<String>,
+    pub editor_font_family: Option<String>,
+    pub use_font_ligatures: Option<bool>,
     pub date_time_format: Option<String>,
     pub timezone: Option<String>,
     pub show_timezone: Option<bool>,
+    pub change_tracking_view: Option<String>,
+    pub diff_scroll_sync: Option<String>,
+    pub change_tracking_height: Option<u32>,
+    pub untracked_height: Option<u32>,
+    pub history_show_graph: Option<bool>,
     pub history_show_author: Option<bool>,
     pub history_show_date: Option<bool>,
     pub history_show_sha: Option<bool>,
+    pub history_show_tags: Option<bool>,
+    pub history_tag_fetch_mode: Option<GitLogTagFetchMode>,
+    pub default_history_mode: Option<HistoryMode>,
+    pub git_executable_path: Option<Option<PathBuf>>,
 }
 
 pub fn persist_ui_settings(settings: UiSettings) -> io::Result<()> {
@@ -250,7 +505,7 @@ pub fn persist_ui_settings(settings: UiSettings) -> io::Result<()> {
 }
 
 pub fn persist_ui_settings_to_path(settings: UiSettings, path: &Path) -> io::Result<()> {
-    let mut file = load_file_v2(path).unwrap_or_default();
+    let mut file = load_file(path).unwrap_or_default();
     file.version = CURRENT_SESSION_FILE_VERSION;
     if settings.window_width.is_some() && settings.window_height.is_some() {
         file.window_width = settings.window_width;
@@ -262,8 +517,24 @@ pub fn persist_ui_settings_to_path(settings: UiSettings, path: &Path) -> io::Res
     if let Some(w) = settings.details_width {
         file.details_width = Some(w);
     }
+    if let Some(items) = settings.repo_sidebar_collapsed_items {
+        let items = path_keyed_string_sets_to_storage(items);
+        file.repo_sidebar_collapsed_items = (!items.is_empty()).then_some(items);
+    }
     if let Some(theme_mode) = settings.theme_mode {
         file.theme_mode = Some(theme_mode);
+    }
+    if let Some(percent) = settings.ui_scale_percent {
+        file.ui_scale_percent = Some(percent);
+    }
+    if let Some(font_family) = settings.ui_font_family {
+        file.ui_font_family = Some(font_family);
+    }
+    if let Some(font_family) = settings.editor_font_family {
+        file.editor_font_family = Some(font_family);
+    }
+    if let Some(value) = settings.use_font_ligatures {
+        file.use_font_ligatures = Some(value);
     }
     if let Some(fmt) = settings.date_time_format {
         file.date_time_format = Some(fmt);
@@ -274,6 +545,21 @@ pub fn persist_ui_settings_to_path(settings: UiSettings, path: &Path) -> io::Res
     if let Some(value) = settings.show_timezone {
         file.show_timezone = Some(value);
     }
+    if let Some(value) = settings.change_tracking_view {
+        file.change_tracking_view = Some(value);
+    }
+    if let Some(value) = settings.diff_scroll_sync {
+        file.diff_scroll_sync = Some(value);
+    }
+    if let Some(value) = settings.change_tracking_height {
+        file.change_tracking_height = Some(value);
+    }
+    if let Some(value) = settings.untracked_height {
+        file.untracked_height = Some(value);
+    }
+    if let Some(value) = settings.history_show_graph {
+        file.history_show_graph = Some(value);
+    }
     if let Some(value) = settings.history_show_author {
         file.history_show_author = Some(value);
     }
@@ -283,8 +569,155 @@ pub fn persist_ui_settings_to_path(settings: UiSettings, path: &Path) -> io::Res
     if let Some(value) = settings.history_show_sha {
         file.history_show_sha = Some(value);
     }
+    if let Some(value) = settings.history_show_tags {
+        file.history_show_tags = Some(value);
+    }
+    if let Some(value) = settings.history_tag_fetch_mode {
+        file.history_tag_fetch_mode = Some(value);
+    }
+    if let Some(value) = settings.default_history_mode {
+        file.default_history_mode = Some(value.into());
+    }
+    if let Some(path) = settings.git_executable_path {
+        file.git_executable_path = path.map(|path| path_storage_key(&path));
+    }
 
     persist_to_path(path, &file)
+}
+
+pub fn load_default_history_mode() -> Option<HistoryMode> {
+    let session_file_path = default_session_file_path()?;
+    load_default_history_mode_from_path(&session_file_path)
+}
+
+pub fn load_default_history_mode_from_path(session_file_path: &Path) -> Option<HistoryMode> {
+    let file = load_file(session_file_path)?;
+    file.default_history_mode.map(Into::into)
+}
+
+pub fn load_repo_history_mode(workdir: &Path) -> Option<HistoryMode> {
+    let session_file_path = default_session_file_path()?;
+    load_repo_history_mode_from_path(workdir, &session_file_path)
+}
+
+pub fn load_repo_history_mode_from_path(
+    workdir: &Path,
+    session_file_path: &Path,
+) -> Option<HistoryMode> {
+    let workdir_key = path_storage_key(workdir);
+    let file = load_file(session_file_path)?;
+    let modes = file.repo_history_modes?;
+    modes.get(&workdir_key).copied().map(Into::into)
+}
+
+pub fn load_repo_history_modes() -> BTreeMap<String, HistoryMode> {
+    let Some(session_file_path) = default_session_file_path() else {
+        return BTreeMap::new();
+    };
+    load_repo_history_modes_from_path(&session_file_path)
+}
+
+pub fn load_repo_history_modes_from_path(
+    session_file_path: &Path,
+) -> BTreeMap<String, HistoryMode> {
+    let Some(file) = load_file(session_file_path) else {
+        return BTreeMap::new();
+    };
+    file.repo_history_modes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, v)| (k, v.into()))
+        .collect()
+}
+
+pub fn persist_repo_history_mode(workdir: &Path, mode: HistoryMode) -> io::Result<()> {
+    let Some(session_file_path) = default_session_file_path() else {
+        return Ok(());
+    };
+    persist_repo_history_mode_to_path(workdir, mode, &session_file_path)
+}
+
+fn repo_history_mode_setting_from_file(
+    file: &UiSessionFile,
+    workdir: &Path,
+) -> Option<HistoryModeSetting> {
+    file.repo_history_modes.as_ref().and_then(|modes| {
+        workdir
+            .to_str()
+            .and_then(|path| modes.get(path).copied())
+            .or_else(|| {
+                let workdir_key = path_storage_key(workdir);
+                modes.get(&workdir_key).copied()
+            })
+    })
+}
+
+pub fn persist_repo_history_mode_to_path(
+    workdir: &Path,
+    mode: HistoryMode,
+    session_file_path: &Path,
+) -> io::Result<()> {
+    let mut file = load_file(session_file_path).unwrap_or_default();
+    let mode = HistoryModeSetting::from(mode);
+
+    if repo_history_mode_setting_from_file(&file, workdir).is_some_and(|existing| existing == mode)
+    {
+        return Ok(());
+    }
+
+    file.version = CURRENT_SESSION_FILE_VERSION;
+    let workdir_key = path_storage_key(workdir);
+    file.repo_history_modes
+        .get_or_insert_with(BTreeMap::new)
+        .insert(workdir_key, mode);
+
+    persist_to_path(session_file_path, &file)
+}
+
+pub(crate) fn persist_repo_history_modes_batch(
+    updates: &[(PathBuf, HistoryMode)],
+) -> io::Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let Some(session_file_path) = default_session_file_path() else {
+        return Ok(());
+    };
+    persist_repo_history_modes_batch_to_path(updates, &session_file_path)
+}
+
+pub(crate) fn persist_repo_history_modes_batch_to_path(
+    updates: &[(PathBuf, HistoryMode)],
+    session_file_path: &Path,
+) -> io::Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    let mut file = load_file(session_file_path).unwrap_or_default();
+    let mut changed = false;
+
+    for (workdir, mode) in updates {
+        let mode = HistoryModeSetting::from(*mode);
+        if repo_history_mode_setting_from_file(&file, workdir)
+            .is_some_and(|existing| existing == mode)
+        {
+            continue;
+        }
+
+        let workdir_key = path_storage_key(workdir);
+        file.repo_history_modes
+            .get_or_insert_with(BTreeMap::new)
+            .insert(workdir_key, mode);
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(());
+    }
+
+    file.version = CURRENT_SESSION_FILE_VERSION;
+    persist_to_path(session_file_path, &file)
 }
 
 pub fn load_repo_history_scope(workdir: &Path) -> Option<LogScope> {
@@ -297,7 +730,7 @@ pub fn load_repo_history_scope_from_path(
     session_file_path: &Path,
 ) -> Option<LogScope> {
     let workdir_key = path_storage_key(workdir);
-    let file = load_file_v2(session_file_path)?;
+    let file = load_file(session_file_path)?;
     let scopes = file.repo_history_scopes?;
     scopes.get(&workdir_key).copied().map(Into::into)
 }
@@ -310,7 +743,7 @@ pub fn load_repo_history_scopes() -> BTreeMap<String, LogScope> {
 }
 
 pub fn load_repo_history_scopes_from_path(session_file_path: &Path) -> BTreeMap<String, LogScope> {
-    let Some(file) = load_file_v2(session_file_path) else {
+    let Some(file) = load_file(session_file_path) else {
         return BTreeMap::new();
     };
     file.repo_history_scopes
@@ -332,12 +765,27 @@ pub fn persist_repo_history_scope_to_path(
     scope: LogScope,
     session_file_path: &Path,
 ) -> io::Result<()> {
-    let mut file = load_file_v2(session_file_path).unwrap_or_default();
+    let mut file = load_file(session_file_path).unwrap_or_default();
+    let scope = HistoryScopeSetting::from(scope);
+
+    if let Some(existing_scope) = file.repo_history_scopes.as_ref().and_then(|scopes| {
+        workdir
+            .to_str()
+            .and_then(|path| scopes.get(path).copied())
+            .or_else(|| {
+                let workdir_key = path_storage_key(workdir);
+                scopes.get(&workdir_key).copied()
+            })
+    }) && existing_scope == scope
+    {
+        return Ok(());
+    }
+
     file.version = CURRENT_SESSION_FILE_VERSION;
     let workdir_key = path_storage_key(workdir);
     file.repo_history_scopes
         .get_or_insert_with(BTreeMap::new)
-        .insert(workdir_key, scope.into());
+        .insert(workdir_key, scope);
 
     persist_to_path(session_file_path, &file)
 }
@@ -352,7 +800,7 @@ pub fn load_repo_fetch_prune_deleted_remote_tracking_branches_from_path(
     session_file_path: &Path,
 ) -> Option<bool> {
     let workdir_key = path_storage_key(workdir);
-    let file = load_file_v2(session_file_path)?;
+    let file = load_file(session_file_path)?;
     let settings = file.repo_fetch_prune_deleted_remote_tracking_branches?;
     settings.get(&workdir_key).copied()
 }
@@ -367,7 +815,7 @@ pub fn load_repo_fetch_prune_deleted_remote_tracking_branches_by_repo() -> BTree
 pub fn load_repo_fetch_prune_deleted_remote_tracking_branches_by_repo_from_path(
     session_file_path: &Path,
 ) -> BTreeMap<String, bool> {
-    let Some(file) = load_file_v2(session_file_path) else {
+    let Some(file) = load_file(session_file_path) else {
         return BTreeMap::new();
     };
     file.repo_fetch_prune_deleted_remote_tracking_branches
@@ -393,7 +841,7 @@ pub fn persist_repo_fetch_prune_deleted_remote_tracking_branches_to_path(
     enabled: bool,
     session_file_path: &Path,
 ) -> io::Result<()> {
-    let mut file = load_file_v2(session_file_path).unwrap_or_default();
+    let mut file = load_file(session_file_path).unwrap_or_default();
     file.version = CURRENT_SESSION_FILE_VERSION;
     let workdir_key = path_storage_key(workdir);
     file.repo_fetch_prune_deleted_remote_tracking_branches
@@ -442,7 +890,82 @@ fn parse_path_list(paths_raw: Vec<String>) -> Vec<PathBuf> {
     paths
 }
 
-fn load_file_v2(path: &Path) -> Option<UiSessionFileV2> {
+fn parse_path_keyed_string_sets(
+    paths_raw: BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<PathBuf, BTreeSet<String>> {
+    let mut paths: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    for (raw_path, values) in paths_raw {
+        let raw_path = raw_path.trim();
+        if raw_path.is_empty() {
+            continue;
+        }
+        let path = path_from_storage_key(raw_path);
+        let entry = paths.entry(path).or_default();
+        for value in values {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            entry.insert(value.to_string());
+        }
+    }
+    paths.retain(|_, values| !values.is_empty());
+    paths
+}
+
+fn path_keyed_string_sets_to_storage(
+    paths: BTreeMap<PathBuf, BTreeSet<String>>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut stored = BTreeMap::new();
+    for (path, values) in paths {
+        let mut normalized = BTreeSet::new();
+        for value in values {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            normalized.insert(value.to_string());
+        }
+        if normalized.is_empty() {
+            continue;
+        }
+        stored.insert(path_storage_key(&path), normalized);
+    }
+    stored
+}
+
+fn sanitize_ui_scale_percent(percent: Option<u32>) -> u32 {
+    percent
+        .unwrap_or(DEFAULT_UI_SCALE_PERCENT)
+        .clamp(MIN_UI_SCALE_PERCENT, MAX_UI_SCALE_PERCENT)
+}
+
+fn migrate_scaled_dimension_to_design_units(
+    value: Option<u32>,
+    ui_scale_percent: Option<u32>,
+) -> Option<u32> {
+    let value = value? as f32;
+    let factor =
+        sanitize_ui_scale_percent(ui_scale_percent) as f32 / DEFAULT_UI_SCALE_PERCENT as f32;
+    let design_units = (value / factor).round();
+    (design_units.is_finite() && design_units >= 1.0).then_some(design_units as u32)
+}
+
+fn migrate_v2_file(mut file: UiSessionFile) -> UiSessionFile {
+    let ui_scale_percent = file.ui_scale_percent;
+    file.version = CURRENT_SESSION_FILE_VERSION;
+    file.sidebar_width =
+        migrate_scaled_dimension_to_design_units(file.sidebar_width, ui_scale_percent);
+    file.details_width =
+        migrate_scaled_dimension_to_design_units(file.details_width, ui_scale_percent);
+    file.change_tracking_height =
+        migrate_scaled_dimension_to_design_units(file.change_tracking_height, ui_scale_percent);
+    file.untracked_height =
+        migrate_scaled_dimension_to_design_units(file.untracked_height, ui_scale_percent);
+    file
+}
+
+fn load_file(path: &Path) -> Option<UiSessionFile> {
     let Ok(contents) = fs::read_to_string(path) else {
         return None;
     };
@@ -456,25 +979,20 @@ fn load_file_v2(path: &Path) -> Option<UiSessionFileV2> {
     match version {
         SESSION_FILE_VERSION_V1 => {
             let file: UiSessionFileV1 = serde_json::from_value(value).ok()?;
-            Some(UiSessionFileV2 {
+            Some(UiSessionFile {
                 version: CURRENT_SESSION_FILE_VERSION,
                 open_repos: file.open_repos,
                 active_repo: file.active_repo,
-                ..UiSessionFileV2::default()
+                ..UiSessionFile::default()
             })
         }
-        SESSION_FILE_VERSION_V2 => serde_json::from_value::<UiSessionFileV2>(value).ok(),
+        SESSION_FILE_VERSION_V2 => {
+            let file = serde_json::from_value::<UiSessionFile>(value).ok()?;
+            Some(migrate_v2_file(file))
+        }
+        SESSION_FILE_VERSION_V3 => serde_json::from_value::<UiSessionFile>(value).ok(),
         _ => None,
     }
-}
-
-fn active_repo_path(state: &AppState, active_repo_id: Option<RepoId>) -> Option<&Path> {
-    let active_repo_id = active_repo_id?;
-    state
-        .repos
-        .iter()
-        .find(|r| r.id == active_repo_id)
-        .map(|r| r.spec.workdir.as_path())
 }
 
 pub fn path_storage_key(path: &Path) -> String {
@@ -511,6 +1029,14 @@ pub fn path_storage_key(path: &Path) -> String {
     {
         path.display().to_string()
     }
+}
+
+pub fn path_storage_key_shared(path: &Path) -> Arc<str> {
+    if let Some(text) = path.to_str() {
+        return Arc::from(text);
+    }
+
+    Arc::from(path_storage_key(path))
 }
 
 pub fn path_from_storage_key(raw: &str) -> PathBuf {
@@ -593,6 +1119,11 @@ fn persist_to_path(path: &Path, session: &impl Serialize) -> io::Result<()> {
 }
 
 fn default_session_file_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = test_session_file_path_override() {
+        return path;
+    }
+
     if let Some(path) = env::var_os(SESSION_FILE_ENV)
         && !path.is_empty()
     {
@@ -643,41 +1174,112 @@ fn looks_like_cargo_test_binary_name(stem: &OsStr) -> bool {
     suffix.len() == 16 && suffix.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn app_state_dir() -> Option<PathBuf> {
+pub fn user_themes_dir() -> Option<PathBuf> {
+    if cfg!(test) || running_under_test_harness() {
+        return None;
+    }
+
+    Some(app_data_dir()?.join("themes"))
+}
+
+fn non_empty_path(value: Option<&OsStr>) -> Option<PathBuf> {
+    let value = value?;
+    if value.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(value))
+}
+
+fn app_data_dir() -> Option<PathBuf> {
     // Follow XDG on linux; otherwise fall back to platform conventions.
     #[cfg(target_os = "linux")]
     {
-        if let Some(state_home) = env::var_os("XDG_STATE_HOME") {
-            return Some(PathBuf::from(state_home).join("gitcomet"));
-        }
-        let home = env::var_os("HOME")?;
-        Some(PathBuf::from(home).join(".local/state/gitcomet"))
+        app_data_dir_linux(
+            env::var_os("XDG_DATA_HOME").as_deref(),
+            env::var_os("HOME").as_deref(),
+        )
     }
 
     #[cfg(target_os = "macos")]
     {
-        let home = env::var_os("HOME")?;
-        Some(PathBuf::from(home).join("Library/Application Support/gitcomet"))
+        let home = non_empty_path(env::var_os("HOME").as_deref())?;
+        Some(home.join("Library/Application Support/gitcomet"))
     }
 
     #[cfg(target_os = "windows")]
     {
-        let appdata = env::var_os("LOCALAPPDATA").or_else(|| env::var_os("APPDATA"))?;
-        Some(PathBuf::from(appdata).join("gitcomet"))
+        let appdata = env::var_os("LOCALAPPDATA").or_else(|| env::var_os("APPDATA"));
+        Some(non_empty_path(appdata.as_deref())?.join("gitcomet"))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        env::var_os("HOME").map(|home| PathBuf::from(home).join(".gitcomet"))
+        non_empty_path(env::var_os("HOME").as_deref()).map(|home| home.join(".gitcomet"))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn app_data_dir_linux(xdg_data_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(data_home) = non_empty_path(xdg_data_home) {
+        return Some(data_home.join("gitcomet"));
+    }
+    let home = non_empty_path(home)?;
+    Some(home.join(".local/share/gitcomet"))
+}
+
+fn app_state_dir() -> Option<PathBuf> {
+    // Follow XDG on linux; otherwise fall back to platform conventions.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(state_home) = non_empty_path(env::var_os("XDG_STATE_HOME").as_deref()) {
+            return Some(state_home.join("gitcomet"));
+        }
+        let home = non_empty_path(env::var_os("HOME").as_deref())?;
+        Some(home.join(".local/state/gitcomet"))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = non_empty_path(env::var_os("HOME").as_deref())?;
+        Some(home.join("Library/Application Support/gitcomet"))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = env::var_os("LOCALAPPDATA").or_else(|| env::var_os("APPDATA"));
+        Some(non_empty_path(appdata.as_deref())?.join("gitcomet"))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        non_empty_path(env::var_os("HOME").as_deref()).map(|home| home.join(".gitcomet"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::RepoState;
-    use gitcomet_core::domain::LogScope;
-    use gitcomet_core::domain::RepoSpec;
+    use crate::model::{RepoId, RepoState};
+    use gitcomet_core::domain::{HistoryMode, LogScope, RepoSpec};
+
+    fn clear_session_repos_snapshot_cache() {
+        SESSION_REPOS_SNAPSHOT_CACHE.with(|cache| {
+            cache.borrow_mut().take();
+        });
+    }
+
+    fn unique_session_test_dir(label: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-session-unit-test-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
 
     #[test]
     fn session_file_round_trips() {
@@ -721,6 +1323,153 @@ mod tests {
     }
 
     #[test]
+    fn load_repo_session_preferences_collects_current_and_legacy_history_settings() {
+        let dir = unique_session_test_dir("repo-session-preferences");
+        let session_file = dir.join("session.json");
+        let repo_mode = dir.join("repo-mode");
+        let repo_legacy = dir.join("repo-legacy");
+        let repo_fetch = dir.join("repo-fetch");
+        let _ = fs::create_dir_all(&repo_mode);
+        let _ = fs::create_dir_all(&repo_legacy);
+        let _ = fs::create_dir_all(&repo_fetch);
+
+        assert_eq!(
+            load_repo_session_preferences_from_path(&dir.join("missing.json")),
+            RepoSessionPreferences::default()
+        );
+
+        persist_ui_settings_to_path(
+            UiSettings {
+                default_history_mode: Some(HistoryMode::MergesOnly),
+                ..UiSettings::default()
+            },
+            &session_file,
+        )
+        .expect("persist default history mode");
+        persist_repo_history_mode_to_path(&repo_mode, HistoryMode::NoMerges, &session_file)
+            .expect("persist explicit history mode");
+        persist_repo_history_scope_to_path(&repo_legacy, LogScope::CurrentBranch, &session_file)
+            .expect("persist legacy history scope");
+        persist_repo_fetch_prune_deleted_remote_tracking_branches_to_path(
+            &repo_fetch,
+            true,
+            &session_file,
+        )
+        .expect("persist fetch-prune setting");
+
+        let loaded = load_repo_session_preferences_from_path(&session_file);
+        assert_eq!(loaded.default_history_mode, Some(HistoryMode::MergesOnly));
+        assert_eq!(
+            loaded.repo_history_modes.get(&path_storage_key(&repo_mode)),
+            Some(&HistoryMode::NoMerges)
+        );
+        assert_eq!(
+            loaded
+                .repo_history_scopes
+                .get(&path_storage_key(&repo_legacy)),
+            Some(&HistoryMode::FirstParent)
+        );
+        assert_eq!(
+            loaded
+                .repo_fetch_prune_deleted_remote_tracking_branches
+                .get(&path_storage_key(&repo_fetch)),
+            Some(&true)
+        );
+    }
+
+    #[test]
+    fn persist_repo_history_modes_batch_skips_empty_and_unchanged_updates() {
+        let dir = unique_session_test_dir("repo-history-mode-batch");
+        let session_file = dir.join("session.json");
+        let missing_file = dir.join("missing.json");
+        let repo_a = dir.join("repo-a");
+        let repo_b = dir.join("repo-b");
+        let repo_c = dir.join("repo-c");
+        let _ = fs::create_dir_all(&repo_a);
+        let _ = fs::create_dir_all(&repo_b);
+        let _ = fs::create_dir_all(&repo_c);
+
+        persist_repo_history_modes_batch_to_path(&[], &missing_file)
+            .expect("empty updates should succeed");
+        assert!(
+            !missing_file.exists(),
+            "empty batch updates should not create a session file"
+        );
+
+        persist_ui_settings_to_path(
+            UiSettings {
+                default_history_mode: Some(HistoryMode::MergesOnly),
+                ..UiSettings::default()
+            },
+            &session_file,
+        )
+        .expect("persist default history mode");
+        persist_repo_history_scope_to_path(&repo_b, LogScope::CurrentBranch, &session_file)
+            .expect("persist legacy history scope");
+        persist_repo_fetch_prune_deleted_remote_tracking_branches_to_path(
+            &repo_c,
+            true,
+            &session_file,
+        )
+        .expect("persist fetch-prune setting");
+        persist_repo_history_mode_to_path(&repo_a, HistoryMode::FirstParent, &session_file)
+            .expect("persist repo_a history mode");
+
+        let before = fs::read_to_string(&session_file).expect("read session file");
+
+        persist_repo_history_modes_batch_to_path(&[], &session_file)
+            .expect("empty updates should not rewrite the file");
+        assert_eq!(
+            fs::read_to_string(&session_file).expect("read session file after empty batch"),
+            before
+        );
+
+        persist_repo_history_modes_batch_to_path(
+            &[(repo_a.clone(), HistoryMode::FirstParent)],
+            &session_file,
+        )
+        .expect("unchanged updates should not rewrite the file");
+        assert_eq!(
+            fs::read_to_string(&session_file).expect("read session file after unchanged batch"),
+            before
+        );
+
+        persist_repo_history_modes_batch_to_path(
+            &[
+                (repo_b.clone(), HistoryMode::AllBranches),
+                (repo_c.clone(), HistoryMode::NoMerges),
+            ],
+            &session_file,
+        )
+        .expect("persist changed batch updates");
+
+        let loaded = load_repo_session_preferences_from_path(&session_file);
+        assert_eq!(loaded.default_history_mode, Some(HistoryMode::MergesOnly));
+        assert_eq!(
+            loaded.repo_history_modes.get(&path_storage_key(&repo_a)),
+            Some(&HistoryMode::FirstParent)
+        );
+        assert_eq!(
+            loaded.repo_history_modes.get(&path_storage_key(&repo_b)),
+            Some(&HistoryMode::AllBranches)
+        );
+        assert_eq!(
+            loaded.repo_history_modes.get(&path_storage_key(&repo_c)),
+            Some(&HistoryMode::NoMerges)
+        );
+        assert_eq!(
+            loaded.repo_history_scopes.get(&path_storage_key(&repo_b)),
+            Some(&HistoryMode::FirstParent)
+        );
+        assert_eq!(
+            loaded
+                .repo_fetch_prune_deleted_remote_tracking_branches
+                .get(&path_storage_key(&repo_c)),
+            Some(&true)
+        );
+    }
+
+    #[test]
     fn detects_test_harness_executable_paths() {
         // `cargo test` / nextest binaries are typically located under a `deps` directory.
         assert!(looks_like_test_binary(Path::new(
@@ -740,6 +1489,27 @@ mod tests {
         assert!(!looks_like_test_binary(Path::new(
             "/tmp/target/debug/gitcomet"
         )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn app_data_dir_prefers_xdg_data_home() {
+        assert_eq!(
+            app_data_dir_linux(
+                Some(OsStr::new("/tmp/gitcomet-data")),
+                Some(OsStr::new("/home/alice"))
+            ),
+            Some(PathBuf::from("/tmp/gitcomet-data/gitcomet"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn app_data_dir_falls_back_to_local_share() {
+        assert_eq!(
+            app_data_dir_linux(None, Some(OsStr::new("/home/alice"))),
+            Some(PathBuf::from("/home/alice/.local/share/gitcomet"))
+        );
     }
 
     #[test]
@@ -809,8 +1579,11 @@ mod tests {
         };
 
         let snapshot = snapshot_repos_from_state(&state);
-        assert_eq!(snapshot.open_repos, vec![path_storage_key(&repo_a)]);
-        assert_eq!(snapshot.active_repo, None);
+        assert_eq!(
+            snapshot.open_repos.as_ref(),
+            &[path_storage_key_shared(&repo_a)]
+        );
+        assert_eq!(snapshot.active_repo_index, None);
 
         let state = AppState {
             repos: vec![
@@ -820,16 +1593,190 @@ mod tests {
                         workdir: repo_a.clone(),
                     },
                 ),
-                RepoState::new_opening(RepoId(2), RepoSpec { workdir: repo_b }),
+                RepoState::new_opening(
+                    RepoId(2),
+                    RepoSpec {
+                        workdir: repo_b.clone(),
+                    },
+                ),
             ],
             active_repo: Some(RepoId(2)),
             ..Default::default()
         };
         let snapshot = snapshot_repos_from_state(&state);
+        assert_eq!(snapshot.active_repo_index, Some(1));
+        assert_eq!(snapshot.open_repos[1].as_ref(), "/tmp/repo-b");
+    }
+
+    #[test]
+    fn snapshot_repos_from_state_reuses_cached_open_repo_slice_for_same_repo_list() {
+        let state = AppState {
+            repos: vec![
+                RepoState::new_opening(
+                    RepoId(1),
+                    RepoSpec {
+                        workdir: PathBuf::from("/tmp/repo-a"),
+                    },
+                ),
+                RepoState::new_opening(
+                    RepoId(2),
+                    RepoSpec {
+                        workdir: PathBuf::from("/tmp/repo-b"),
+                    },
+                ),
+            ],
+            active_repo: Some(RepoId(2)),
+            ..Default::default()
+        };
+
+        let first = snapshot_repos_from_state(&state);
+        let second = snapshot_repos_from_state(&state);
+
+        assert!(Arc::ptr_eq(&first.open_repos, &second.open_repos));
+    }
+
+    #[test]
+    fn snapshot_repos_from_state_cache_keeps_dedup_index_for_duplicate_workdirs() {
+        let repo_a = PathBuf::from("/tmp/repo-a");
+        let mut state = AppState {
+            repos: vec![
+                RepoState::new_opening(
+                    RepoId(1),
+                    RepoSpec {
+                        workdir: repo_a.clone(),
+                    },
+                ),
+                RepoState::new_opening(RepoId(2), RepoSpec { workdir: repo_a }),
+            ],
+            active_repo: Some(RepoId(1)),
+            ..Default::default()
+        };
+
+        let first = snapshot_repos_from_state(&state);
+        state.active_repo = Some(RepoId(2));
+        let second = snapshot_repos_from_state(&state);
+
+        assert!(Arc::ptr_eq(&first.open_repos, &second.open_repos));
+        assert_eq!(second.active_repo_index, Some(0));
+    }
+
+    #[test]
+    fn snapshot_repos_from_state_preserves_first_seen_order_for_repeated_workdirs() {
+        clear_session_repos_snapshot_cache();
+
+        let repo_a = PathBuf::from("/tmp/repo-a");
+        let repo_b = PathBuf::from("/tmp/repo-b");
+        let state = AppState {
+            repos: vec![
+                RepoState::new_opening(
+                    RepoId(1),
+                    RepoSpec {
+                        workdir: repo_a.clone(),
+                    },
+                ),
+                RepoState::new_opening(
+                    RepoId(2),
+                    RepoSpec {
+                        workdir: repo_b.clone(),
+                    },
+                ),
+                RepoState::new_opening(
+                    RepoId(3),
+                    RepoSpec {
+                        workdir: repo_a.clone(),
+                    },
+                ),
+            ],
+            active_repo: Some(RepoId(3)),
+            ..Default::default()
+        };
+
+        let snapshot = snapshot_repos_from_state(&state);
         assert_eq!(
-            snapshot.active_repo,
-            Some(path_storage_key(Path::new("/tmp/repo-b")))
+            snapshot.open_repos.as_ref(),
+            &[
+                path_storage_key_shared(&repo_a),
+                path_storage_key_shared(&repo_b)
+            ]
         );
+        assert_eq!(snapshot.active_repo_index, Some(0));
+    }
+
+    #[test]
+    fn snapshot_repos_from_state_cache_invalidates_when_repo_order_changes() {
+        clear_session_repos_snapshot_cache();
+
+        let repo_a = PathBuf::from("/tmp/repo-a");
+        let repo_b = PathBuf::from("/tmp/repo-b");
+        let mut state = AppState {
+            repos: vec![
+                RepoState::new_opening(
+                    RepoId(1),
+                    RepoSpec {
+                        workdir: repo_a.clone(),
+                    },
+                ),
+                RepoState::new_opening(
+                    RepoId(2),
+                    RepoSpec {
+                        workdir: repo_b.clone(),
+                    },
+                ),
+            ],
+            active_repo: Some(RepoId(1)),
+            ..Default::default()
+        };
+
+        let first = snapshot_repos_from_state(&state);
+        state.repos.swap(0, 1);
+        let second = snapshot_repos_from_state(&state);
+
+        assert!(
+            !Arc::ptr_eq(&first.open_repos, &second.open_repos),
+            "reordering repos should invalidate the cached open-repo slice"
+        );
+        assert_eq!(
+            second.open_repos.as_ref(),
+            &[
+                path_storage_key_shared(&repo_b),
+                path_storage_key_shared(&repo_a)
+            ]
+        );
+        assert_eq!(second.active_repo_index, Some(1));
+    }
+
+    #[test]
+    fn snapshot_repos_from_state_cache_invalidates_when_repo_spec_changes() {
+        clear_session_repos_snapshot_cache();
+
+        let repo_a = PathBuf::from("/tmp/repo-a");
+        let repo_b = PathBuf::from("/tmp/repo-b");
+        let mut state = AppState {
+            repos: vec![RepoState::new_opening(
+                RepoId(1),
+                RepoSpec {
+                    workdir: repo_a.clone(),
+                },
+            )],
+            active_repo: Some(RepoId(1)),
+            ..Default::default()
+        };
+
+        let first = snapshot_repos_from_state(&state);
+        state.repos[0].set_spec(RepoSpec {
+            workdir: repo_b.clone(),
+        });
+        let second = snapshot_repos_from_state(&state);
+
+        assert!(
+            !Arc::ptr_eq(&first.open_repos, &second.open_repos),
+            "changing the repo spec should invalidate the cached open-repo slice"
+        );
+        assert_eq!(
+            second.open_repos.as_ref(),
+            &[path_storage_key_shared(&repo_b)]
+        );
+        assert_eq!(second.active_repo_index, Some(0));
     }
 
     #[test]
@@ -869,6 +1816,88 @@ mod tests {
     }
 
     #[test]
+    fn load_from_path_migrates_v2_scaled_dimensions_to_design_units() {
+        let cases = [
+            (100, 280, 420, 222, 111),
+            (125, 350, 525, 278, 139),
+            (200, 560, 840, 444, 222),
+        ];
+
+        for (percent, sidebar_width, details_width, change_tracking_height, untracked_height) in
+            cases
+        {
+            let dir = env::temp_dir().join(format!(
+                "gitcomet-session-v2-migration-test-{}-{}-{percent}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            let _ = fs::create_dir_all(&dir);
+            let path = dir.join("session.json");
+
+            persist_to_path(
+                &path,
+                &UiSessionFile {
+                    version: SESSION_FILE_VERSION_V2,
+                    open_repos: Vec::new(),
+                    active_repo: None,
+                    sidebar_width: Some(sidebar_width),
+                    details_width: Some(details_width),
+                    ui_scale_percent: Some(percent),
+                    change_tracking_height: Some(change_tracking_height),
+                    untracked_height: Some(untracked_height),
+                    ..UiSessionFile::default()
+                },
+            )
+            .expect("persist succeeds");
+
+            let loaded = load_from_path(&path);
+            assert_eq!(loaded.ui_scale_percent, Some(percent));
+            assert_eq!(loaded.sidebar_width, Some(280));
+            assert_eq!(loaded.details_width, Some(420));
+            assert_eq!(loaded.change_tracking_height, Some(222));
+            assert_eq!(loaded.untracked_height, Some(111));
+        }
+    }
+
+    #[test]
+    fn load_from_path_migrates_v2_scaled_dimensions_without_saved_zoom_as_100_percent() {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-session-v2-migration-default-scale-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.json");
+
+        persist_to_path(
+            &path,
+            &UiSessionFile {
+                version: SESSION_FILE_VERSION_V2,
+                open_repos: Vec::new(),
+                active_repo: None,
+                sidebar_width: Some(280),
+                details_width: Some(420),
+                change_tracking_height: Some(222),
+                untracked_height: Some(111),
+                ..UiSessionFile::default()
+            },
+        )
+        .expect("persist succeeds");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(loaded.sidebar_width, Some(280));
+        assert_eq!(loaded.details_width, Some(420));
+        assert_eq!(loaded.change_tracking_height, Some(222));
+        assert_eq!(loaded.untracked_height, Some(111));
+    }
+
+    #[test]
     fn persist_recent_repo_round_trips_dedup_and_reorders() {
         let dir = env::temp_dir().join(format!(
             "gitcomet-recent-repos-test-{}-{}",
@@ -888,11 +1917,11 @@ mod tests {
 
         persist_to_path(
             &path,
-            &UiSessionFileV2 {
+            &UiSessionFile {
                 version: CURRENT_SESSION_FILE_VERSION,
                 open_repos: Vec::new(),
                 active_repo: None,
-                ..UiSessionFileV2::default()
+                ..UiSessionFile::default()
             },
         )
         .expect("seed session file");
@@ -925,12 +1954,12 @@ mod tests {
 
         persist_to_path(
             &path,
-            &UiSessionFileV2 {
+            &UiSessionFile {
                 version: CURRENT_SESSION_FILE_VERSION,
                 open_repos: Vec::new(),
                 active_repo: None,
                 recent_repos: Some(vec![path_storage_key(&repo_a), path_storage_key(&repo_b)]),
-                ..UiSessionFileV2::default()
+                ..UiSessionFile::default()
             },
         )
         .expect("seed session file");
@@ -962,12 +1991,12 @@ mod tests {
 
         persist_to_path(
             &path,
-            &UiSessionFileV2 {
+            &UiSessionFile {
                 version: CURRENT_SESSION_FILE_VERSION,
                 open_repos: Vec::new(),
                 active_repo: None,
                 recent_repos: Some(recent_repos),
-                ..UiSessionFileV2::default()
+                ..UiSessionFile::default()
             },
         )
         .expect("seed session file");
@@ -1012,7 +2041,7 @@ mod tests {
 
         persist_to_path(
             &path,
-            &UiSessionFileV2 {
+            &UiSessionFile {
                 version: CURRENT_SESSION_FILE_VERSION,
                 open_repos: Vec::new(),
                 active_repo: None,
@@ -1023,13 +2052,87 @@ mod tests {
                     path_storage_key(&repo_b),
                     "".to_string(),
                 ]),
-                ..UiSessionFileV2::default()
+                ..UiSessionFile::default()
             },
         )
         .expect("seed session file");
 
         let loaded = load_from_path(&path);
         assert_eq!(loaded.recent_repos, vec![repo_a, repo_b]);
+    }
+
+    #[test]
+    fn persist_ui_settings_round_trips_repo_sidebar_collapsed_items() {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-ui-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.json");
+        let repo_a = dir.join("repo-a");
+        let repo_b = dir.join("repo-b");
+
+        persist_to_path(
+            &path,
+            &UiSessionFile {
+                version: CURRENT_SESSION_FILE_VERSION,
+                open_repos: Vec::new(),
+                active_repo: None,
+                ..UiSessionFile::default()
+            },
+        )
+        .expect("seed session file");
+
+        let mut repo_sidebar_collapsed_items = BTreeMap::new();
+        repo_sidebar_collapsed_items.insert(
+            repo_a.clone(),
+            BTreeSet::from([
+                "section:branches".to_string(),
+                "group:local:feature".to_string(),
+            ]),
+        );
+        repo_sidebar_collapsed_items.insert(
+            repo_b.clone(),
+            BTreeSet::from(["section:worktrees".to_string()]),
+        );
+
+        persist_ui_settings_to_path(
+            UiSettings {
+                window_width: None,
+                window_height: None,
+                sidebar_width: None,
+                details_width: None,
+                repo_sidebar_collapsed_items: Some(repo_sidebar_collapsed_items.clone()),
+                theme_mode: None,
+                ui_font_family: None,
+                editor_font_family: None,
+                use_font_ligatures: None,
+                date_time_format: None,
+                timezone: None,
+                show_timezone: None,
+                change_tracking_view: None,
+                diff_scroll_sync: None,
+                change_tracking_height: None,
+                untracked_height: None,
+                history_show_author: None,
+                history_show_date: None,
+                history_show_sha: None,
+                git_executable_path: None,
+                ..UiSettings::default()
+            },
+            &path,
+        )
+        .expect("persist ui settings");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(
+            loaded.repo_sidebar_collapsed_items,
+            repo_sidebar_collapsed_items
+        );
     }
 
     #[test]
@@ -1047,11 +2150,11 @@ mod tests {
 
         persist_to_path(
             &path,
-            &UiSessionFileV2 {
+            &UiSessionFile {
                 version: CURRENT_SESSION_FILE_VERSION,
                 open_repos: Vec::new(),
                 active_repo: None,
-                ..UiSessionFileV2::default()
+                ..UiSessionFile::default()
             },
         )
         .expect("seed session file");
@@ -1062,13 +2165,23 @@ mod tests {
                 window_height: None,
                 sidebar_width: None,
                 details_width: None,
+                repo_sidebar_collapsed_items: None,
                 theme_mode: None,
+                ui_font_family: None,
+                editor_font_family: None,
+                use_font_ligatures: None,
                 date_time_format: Some("ymd_hm_utc".to_string()),
                 timezone: None,
                 show_timezone: None,
+                change_tracking_view: None,
+                diff_scroll_sync: None,
+                change_tracking_height: None,
+                untracked_height: None,
                 history_show_author: None,
                 history_show_date: None,
                 history_show_sha: None,
+                git_executable_path: None,
+                ..UiSettings::default()
             },
             &path,
         )
@@ -1093,11 +2206,11 @@ mod tests {
 
         persist_to_path(
             &path,
-            &UiSessionFileV2 {
+            &UiSessionFile {
                 version: CURRENT_SESSION_FILE_VERSION,
                 open_repos: Vec::new(),
                 active_repo: None,
-                ..UiSessionFileV2::default()
+                ..UiSessionFile::default()
             },
         )
         .expect("seed session file");
@@ -1108,13 +2221,23 @@ mod tests {
                 window_height: None,
                 sidebar_width: None,
                 details_width: None,
+                repo_sidebar_collapsed_items: None,
                 theme_mode: None,
+                ui_font_family: None,
+                editor_font_family: None,
+                use_font_ligatures: Some(false),
                 date_time_format: None,
                 timezone: None,
                 show_timezone: Some(false),
+                change_tracking_view: None,
+                diff_scroll_sync: None,
+                change_tracking_height: None,
+                untracked_height: None,
                 history_show_author: None,
                 history_show_date: None,
                 history_show_sha: None,
+                git_executable_path: None,
+                ..UiSettings::default()
             },
             &path,
         )
@@ -1122,6 +2245,234 @@ mod tests {
 
         let loaded = load_from_path(&path);
         assert_eq!(loaded.show_timezone, Some(false));
+    }
+
+    #[test]
+    fn persist_ui_settings_round_trips_font_ligatures() {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-ui-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.json");
+
+        persist_to_path(
+            &path,
+            &UiSessionFile {
+                version: CURRENT_SESSION_FILE_VERSION,
+                open_repos: Vec::new(),
+                active_repo: None,
+                ..UiSessionFile::default()
+            },
+        )
+        .expect("seed session file");
+
+        persist_ui_settings_to_path(
+            UiSettings {
+                window_width: None,
+                window_height: None,
+                sidebar_width: None,
+                details_width: None,
+                repo_sidebar_collapsed_items: None,
+                theme_mode: None,
+                ui_font_family: None,
+                editor_font_family: None,
+                use_font_ligatures: Some(true),
+                date_time_format: None,
+                timezone: None,
+                show_timezone: None,
+                change_tracking_view: None,
+                diff_scroll_sync: None,
+                change_tracking_height: None,
+                untracked_height: None,
+                history_show_author: None,
+                history_show_date: None,
+                history_show_sha: None,
+                git_executable_path: None,
+                ..UiSettings::default()
+            },
+            &path,
+        )
+        .expect("persist ui settings");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(loaded.use_font_ligatures, Some(true));
+    }
+
+    #[test]
+    fn persist_ui_settings_round_trips_change_tracking_view() {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-ui-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.json");
+
+        persist_to_path(
+            &path,
+            &UiSessionFile {
+                version: CURRENT_SESSION_FILE_VERSION,
+                open_repos: Vec::new(),
+                active_repo: None,
+                ..UiSessionFile::default()
+            },
+        )
+        .expect("seed session file");
+
+        persist_ui_settings_to_path(
+            UiSettings {
+                window_width: None,
+                window_height: None,
+                sidebar_width: None,
+                details_width: None,
+                repo_sidebar_collapsed_items: None,
+                theme_mode: None,
+                ui_font_family: None,
+                editor_font_family: None,
+                use_font_ligatures: None,
+                date_time_format: None,
+                timezone: None,
+                show_timezone: None,
+                change_tracking_view: Some("split_untracked".to_string()),
+                diff_scroll_sync: None,
+                change_tracking_height: None,
+                untracked_height: None,
+                history_show_author: None,
+                history_show_date: None,
+                history_show_sha: None,
+                git_executable_path: None,
+                ..UiSettings::default()
+            },
+            &path,
+        )
+        .expect("persist ui settings");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(
+            loaded.change_tracking_view.as_deref(),
+            Some("split_untracked")
+        );
+    }
+
+    #[test]
+    fn persist_ui_settings_round_trips_diff_scroll_sync() {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-ui-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.json");
+
+        persist_to_path(
+            &path,
+            &UiSessionFile {
+                version: CURRENT_SESSION_FILE_VERSION,
+                open_repos: Vec::new(),
+                active_repo: None,
+                ..UiSessionFile::default()
+            },
+        )
+        .expect("seed session file");
+
+        persist_ui_settings_to_path(
+            UiSettings {
+                window_width: None,
+                window_height: None,
+                sidebar_width: None,
+                details_width: None,
+                repo_sidebar_collapsed_items: None,
+                theme_mode: None,
+                ui_font_family: None,
+                editor_font_family: None,
+                use_font_ligatures: None,
+                date_time_format: None,
+                timezone: None,
+                show_timezone: None,
+                change_tracking_view: None,
+                diff_scroll_sync: Some("horizontal".to_string()),
+                change_tracking_height: None,
+                untracked_height: None,
+                history_show_author: None,
+                history_show_date: None,
+                history_show_sha: None,
+                git_executable_path: None,
+                ..UiSettings::default()
+            },
+            &path,
+        )
+        .expect("persist ui settings");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(loaded.diff_scroll_sync.as_deref(), Some("horizontal"));
+    }
+
+    #[test]
+    fn persist_ui_settings_round_trips_change_tracking_heights() {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-ui-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.json");
+
+        persist_to_path(
+            &path,
+            &UiSessionFile {
+                version: CURRENT_SESSION_FILE_VERSION,
+                open_repos: Vec::new(),
+                active_repo: None,
+                ..UiSessionFile::default()
+            },
+        )
+        .expect("seed session file");
+
+        persist_ui_settings_to_path(
+            UiSettings {
+                window_width: None,
+                window_height: None,
+                sidebar_width: None,
+                details_width: None,
+                repo_sidebar_collapsed_items: None,
+                theme_mode: None,
+                ui_font_family: None,
+                editor_font_family: None,
+                use_font_ligatures: None,
+                date_time_format: None,
+                timezone: None,
+                show_timezone: None,
+                change_tracking_view: None,
+                diff_scroll_sync: None,
+                change_tracking_height: Some(222),
+                untracked_height: Some(111),
+                history_show_author: None,
+                history_show_date: None,
+                history_show_sha: None,
+                git_executable_path: None,
+                ..UiSettings::default()
+            },
+            &path,
+        )
+        .expect("persist ui settings");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(loaded.change_tracking_height, Some(222));
+        assert_eq!(loaded.untracked_height, Some(111));
     }
 
     #[test]
@@ -1139,11 +2490,11 @@ mod tests {
 
         persist_to_path(
             &path,
-            &UiSessionFileV2 {
+            &UiSessionFile {
                 version: CURRENT_SESSION_FILE_VERSION,
                 open_repos: Vec::new(),
                 active_repo: None,
-                ..UiSessionFileV2::default()
+                ..UiSessionFile::default()
             },
         )
         .expect("seed session file");
@@ -1154,13 +2505,23 @@ mod tests {
                 window_height: None,
                 sidebar_width: None,
                 details_width: None,
+                repo_sidebar_collapsed_items: None,
                 theme_mode: Some("dark".to_string()),
+                ui_font_family: None,
+                editor_font_family: None,
+                use_font_ligatures: None,
                 date_time_format: None,
                 timezone: None,
                 show_timezone: None,
+                change_tracking_view: None,
+                diff_scroll_sync: None,
+                change_tracking_height: None,
+                untracked_height: None,
                 history_show_author: None,
                 history_show_date: None,
                 history_show_sha: None,
+                git_executable_path: None,
+                ..UiSettings::default()
             },
             &path,
         )
@@ -1169,6 +2530,100 @@ mod tests {
         let loaded = load_from_path(&path);
         assert_eq!(loaded.theme_mode.as_deref(), Some("dark"));
     }
+
+    #[test]
+    fn persist_ui_settings_round_trips_ui_scale_percent() {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-ui-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.json");
+
+        persist_to_path(
+            &path,
+            &UiSessionFile {
+                version: CURRENT_SESSION_FILE_VERSION,
+                open_repos: Vec::new(),
+                active_repo: None,
+                ..UiSessionFile::default()
+            },
+        )
+        .expect("seed session file");
+
+        persist_ui_settings_to_path(
+            UiSettings {
+                ui_scale_percent: Some(125),
+                ..UiSettings::default()
+            },
+            &path,
+        )
+        .expect("persist ui settings");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(loaded.ui_scale_percent, Some(125));
+    }
+
+    #[test]
+    fn persist_ui_settings_round_trips_empty_custom_git_executable_path() {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-ui-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.json");
+
+        persist_to_path(
+            &path,
+            &UiSessionFile {
+                version: CURRENT_SESSION_FILE_VERSION,
+                open_repos: Vec::new(),
+                active_repo: None,
+                ..UiSessionFile::default()
+            },
+        )
+        .expect("seed session file");
+
+        persist_ui_settings_to_path(
+            UiSettings {
+                window_width: None,
+                window_height: None,
+                sidebar_width: None,
+                details_width: None,
+                repo_sidebar_collapsed_items: None,
+                theme_mode: None,
+                ui_font_family: None,
+                editor_font_family: None,
+                use_font_ligatures: None,
+                date_time_format: None,
+                timezone: None,
+                show_timezone: None,
+                change_tracking_view: None,
+                diff_scroll_sync: None,
+                change_tracking_height: None,
+                untracked_height: None,
+                history_show_author: None,
+                history_show_date: None,
+                history_show_sha: None,
+                git_executable_path: Some(Some(PathBuf::new())),
+                ..UiSettings::default()
+            },
+            &path,
+        )
+        .expect("persist ui settings");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(loaded.git_executable_path, Some(PathBuf::new()));
+    }
+
     #[test]
     fn persist_repo_history_scope_round_trips() {
         let dir = env::temp_dir().join(format!(
@@ -1187,11 +2642,11 @@ mod tests {
 
         persist_to_path(
             &session_path,
-            &UiSessionFileV2 {
+            &UiSessionFile {
                 version: CURRENT_SESSION_FILE_VERSION,
                 open_repos: Vec::new(),
                 active_repo: None,
-                ..UiSessionFileV2::default()
+                ..UiSessionFile::default()
             },
         )
         .expect("seed session file");
@@ -1201,5 +2656,56 @@ mod tests {
 
         let loaded = load_repo_history_scope_from_path(&repo_a, &session_path);
         assert_eq!(loaded, Some(LogScope::AllBranches));
+    }
+
+    #[test]
+    fn persist_repo_history_scope_skips_rewriting_unchanged_value() {
+        let dir = env::temp_dir().join(format!(
+            "gitcomet-repo-history-scope-noop-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let session_path = dir.join("session.json");
+        let repo_a = dir.join("repo-a");
+        let _ = fs::create_dir_all(&repo_a);
+
+        persist_repo_history_scope_to_path(&repo_a, LogScope::AllBranches, &session_path)
+            .expect("persist repo history scope");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let metadata_before = fs::metadata(&session_path).expect("session metadata before");
+            let inode_before = metadata_before.ino();
+
+            persist_repo_history_scope_to_path(&repo_a, LogScope::AllBranches, &session_path)
+                .expect("persist unchanged repo history scope");
+
+            let metadata_after = fs::metadata(&session_path).expect("session metadata after");
+            assert_eq!(
+                metadata_after.ino(),
+                inode_before,
+                "unchanged history scope should not rewrite the session file"
+            );
+        }
+
+        #[cfg(not(unix))]
+        {
+            let contents_before = fs::read(&session_path).expect("session bytes before");
+
+            persist_repo_history_scope_to_path(&repo_a, LogScope::AllBranches, &session_path)
+                .expect("persist unchanged repo history scope");
+
+            let contents_after = fs::read(&session_path).expect("session bytes after");
+            assert_eq!(
+                contents_after, contents_before,
+                "unchanged history scope should not rewrite the session file"
+            );
+        }
     }
 }

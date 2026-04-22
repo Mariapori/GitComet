@@ -14,13 +14,15 @@ impl Render for HistoryView {
 impl HistoryView {
     fn history_view_inner(&mut self, cx: &mut gpui::Context<Self>) -> gpui::Div {
         let theme = self.theme;
+        let scrollbar_gutter = super::history_scrollbar_gutter();
         self.ensure_history_cache(cx);
+        self.drive_pending_history_reveal(cx);
         let (show_working_tree_summary_row, _) = self.ensure_history_worktree_summary_cache();
         let repo = self.active_repo();
         let commits_count = self
             .history_cache
             .as_ref()
-            .map(|c| c.visible_indices.len())
+            .map(|cache| cache.base.visible_indices.len())
             .unwrap_or(0);
         let count = commits_count + usize::from(show_working_tree_summary_row);
 
@@ -48,11 +50,11 @@ impl HistoryView {
                 cx.processor(Self::render_history_table_rows),
             )
             .h_full()
-            .track_scroll(self.history_scroll.clone());
+            .track_scroll(&self.history_scroll);
             let should_load_more = {
                 let state = self.history_scroll.0.borrow();
                 let scroll_handle = state.base_handle.clone();
-                let max_offset = scroll_handle.max_offset().height.max(px(0.0));
+                let max_offset = scroll_handle.max_offset().y.max(px(0.0));
                 let should_load_by_scroll = if max_offset > px(0.0) {
                     scroll_is_near_bottom(&scroll_handle, px(240.0))
                 } else {
@@ -76,12 +78,19 @@ impl HistoryView {
                 .id("history_main_scroll_container")
                 .relative()
                 .h_full()
-                .child(list)
+                .child(
+                    div()
+                        .h_full()
+                        .min_h(px(0.0))
+                        .pr(scrollbar_gutter)
+                        .child(list),
+                )
                 .child(
                     components::Scrollbar::new(
                         "history_main_scrollbar",
                         self.history_scroll.clone(),
                     )
+                    .always_visible()
                     .render(theme),
                 )
                 .into_any_element()
@@ -98,8 +107,8 @@ impl HistoryView {
             .track_focus(&self.history_panel_focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _e: &MouseDownEvent, window, _cx| {
-                    window.focus(&this.history_panel_focus_handle);
+                cx.listener(|this, _e: &MouseDownEvent, window, cx| {
+                    window.focus(&this.history_panel_focus_handle, cx);
                 }),
             )
             .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _window, cx| {
@@ -123,10 +132,16 @@ impl HistoryView {
                 }
             }))
             .child(
-                self.history_column_headers(cx)
+                div()
+                    .w_full()
                     .bg(bg)
                     .border_b_1()
-                    .border_color(theme.colors.border),
+                    .border_color(theme.colors.border)
+                    .child(
+                        div()
+                            .pr(scrollbar_gutter)
+                            .child(self.history_column_headers(cx)),
+                    ),
             )
             .child(
                 div()
@@ -138,7 +153,7 @@ impl HistoryView {
             )
     }
 
-    fn history_select_adjacent_commit(
+    pub(in crate::view) fn history_select_adjacent_commit(
         &mut self,
         direction: i8,
         _cx: &mut gpui::Context<Self>,
@@ -150,13 +165,20 @@ impl HistoryView {
         let (show_working_tree_summary_row, _) = self.ensure_history_worktree_summary_cache();
         let offset = usize::from(show_working_tree_summary_row);
 
-        let (selected_commit, page) = match self.active_repo() {
+        let (selected_commit, page, log_rev, stashes_rev, history_scope) = match self.active_repo()
+        {
             Some(repo) => {
-                let page = match &repo.log {
-                    Loadable::Ready(page) => Arc::clone(page),
-                    _ => return false,
+                let page = match Self::display_log_page_for_repo(repo) {
+                    Some(page) => page,
+                    None => return false,
                 };
-                (repo.history_state.selected_commit.clone(), page)
+                (
+                    repo.history_state.selected_commit.clone(),
+                    page,
+                    repo.log_rev,
+                    repo.stashes_rev,
+                    repo.history_state.history_scope,
+                )
             }
             None => return false,
         };
@@ -164,33 +186,29 @@ impl HistoryView {
         let cache = self
             .history_cache
             .as_ref()
-            .filter(|c| c.request.repo_id == repo_id);
+            .filter(|cache| cache.base.request.repo_id == repo_id);
         let Some(cache) = cache else {
             return false;
         };
 
-        let total_commits = cache.visible_indices.len();
+        let total_commits = cache.base.visible_indices.len();
         if total_commits == 0 {
             return false;
         }
 
         let list_len = total_commits + offset;
 
-        let current_list_ix = if show_working_tree_summary_row && selected_commit.is_none() {
-            Some(0)
-        } else if let Some(selected_id) = selected_commit.as_ref() {
-            cache
-                .visible_indices
-                .iter()
-                .position(|&commit_ix| {
-                    page.commits
-                        .get(commit_ix)
-                        .is_some_and(|c| &c.id == selected_id)
-                })
-                .map(|ix| ix + offset)
-        } else {
-            None
-        };
+        let current_list_ix = super::resolve_history_selected_list_index(
+            &mut self.history_selected_list_index_cache,
+            repo_id,
+            log_rev,
+            stashes_rev,
+            history_scope,
+            show_working_tree_summary_row,
+            selected_commit.as_ref(),
+            &cache.base.visible_indices,
+            &page.commits,
+        );
 
         let next_list_ix = match (current_list_ix, direction.is_negative()) {
             (Some(current_list_ix), true) => current_list_ix.saturating_sub(1),
@@ -213,13 +231,23 @@ impl HistoryView {
         if show_working_tree_summary_row && next_list_ix == 0 {
             self.store.dispatch(Msg::ClearCommitSelection { repo_id });
             self.store.dispatch(Msg::ClearDiffSelection { repo_id });
+            super::set_history_selected_list_index_cache(
+                &mut self.history_selected_list_index_cache,
+                repo_id,
+                log_rev,
+                stashes_rev,
+                history_scope,
+                show_working_tree_summary_row,
+                None,
+                0,
+            );
             self.history_scroll
                 .scroll_to_item_strict(0, gpui::ScrollStrategy::Center);
             return true;
         }
 
         let visible_ix = next_list_ix.saturating_sub(offset);
-        let Some(&commit_ix) = cache.visible_indices.get(visible_ix) else {
+        let Some(commit_ix) = cache.base.visible_indices.get(visible_ix) else {
             return false;
         };
         let Some(commit) = page.commits.get(commit_ix) else {
@@ -230,6 +258,16 @@ impl HistoryView {
             repo_id,
             commit_id: commit.id.clone(),
         });
+        super::set_history_selected_list_index_cache(
+            &mut self.history_selected_list_index_cache,
+            repo_id,
+            log_rev,
+            stashes_rev,
+            history_scope,
+            show_working_tree_summary_row,
+            Some(commit.id.clone()),
+            next_list_ix,
+        );
         self.history_scroll
             .scroll_to_item_strict(next_list_ix, gpui::ScrollStrategy::Center);
         true
@@ -237,24 +275,30 @@ impl HistoryView {
 
     fn history_column_headers(&mut self, cx: &mut gpui::Context<Self>) -> gpui::Div {
         let theme = self.theme;
+        let scaled_px = |value| ui_scale::design_px_from_percent(value, self.ui_scale_percent);
         let icon_muted = with_alpha(theme.colors.accent, if theme.is_dark { 0.72 } else { 0.82 });
-        let (show_author, show_date, show_sha) = self.history_visible_columns();
+        let (show_graph, show_author, show_date, show_sha) = self.history_visible_columns();
         let col_author = self.history_col_author;
         let col_date = self.history_col_date;
         let col_sha = self.history_col_sha;
-        let handle_w = px(HISTORY_COL_HANDLE_PX);
-        let handle_half = px(HISTORY_COL_HANDLE_PX / 2.0);
+        let handle_w = scaled_px(HISTORY_COL_HANDLE_PX);
+        let handle_half = scaled_px(HISTORY_COL_HANDLE_PX / 2.0);
         let cell_pad = handle_half;
         let scope_label: SharedString = self
             .active_repo()
-            .map(|r| match r.history_state.history_scope {
-                gitcomet_core::domain::LogScope::CurrentBranch => "Current branch".to_string(),
-                gitcomet_core::domain::LogScope::AllBranches => "All branches".to_string(),
+            .map(|r| {
+                crate::view::history_mode::history_mode_label(r.history_state.history_scope)
+                    .to_string()
             })
-            .unwrap_or_else(|| "Current branch".to_string())
+            .unwrap_or_else(|| {
+                crate::view::history_mode::history_mode_label(
+                    gitcomet_core::domain::HistoryMode::default(),
+                )
+                .to_string()
+            })
             .into();
         let scope_repo_id = self.active_repo_id();
-        let scope_invoker: SharedString = "history_scope_header".into();
+        let scope_invoker: SharedString = "history_mode_header".into();
         let scope_anchor_bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::new(RefCell::new(None));
         let scope_anchor_bounds_for_prepaint = Rc::clone(&scope_anchor_bounds);
         let scope_anchor_bounds_for_click = Rc::clone(&scope_anchor_bounds);
@@ -262,73 +306,6 @@ impl HistoryView {
             .active_context_menu_invoker
             .as_ref()
             .is_some_and(|id| id.as_ref() == scope_invoker.as_ref());
-        let column_settings_invoker: SharedString = "history_columns_settings_btn".into();
-        let column_settings_anchor_bounds: Rc<RefCell<Option<Bounds<Pixels>>>> =
-            Rc::new(RefCell::new(None));
-        let column_settings_anchor_bounds_for_prepaint = Rc::clone(&column_settings_anchor_bounds);
-        let column_settings_anchor_bounds_for_click = Rc::clone(&column_settings_anchor_bounds);
-        let column_settings_active =
-            self.active_context_menu_invoker.as_ref() == Some(&column_settings_invoker);
-        let open_column_settings = {
-            let column_settings_invoker = column_settings_invoker.clone();
-            cx.listener(move |this, e: &ClickEvent, window, cx| {
-                this.activate_context_menu_invoker(column_settings_invoker.clone(), cx);
-                if let Some(bounds) = *column_settings_anchor_bounds_for_click.borrow() {
-                    this.open_popover_for_bounds(
-                        PopoverKind::HistoryColumnSettings,
-                        bounds,
-                        window,
-                        cx,
-                    );
-                } else {
-                    this.open_popover_at(
-                        PopoverKind::HistoryColumnSettings,
-                        e.position(),
-                        window,
-                        cx,
-                    );
-                }
-            })
-        };
-        let column_settings_btn_inner = div()
-            .id("history_columns_settings_btn")
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(18.0))
-            .h(px(18.0))
-            .rounded(px(theme.radii.row))
-            .when(column_settings_active, |d| d.bg(theme.colors.active))
-            .hover(move |s| {
-                if column_settings_active {
-                    s.bg(theme.colors.active)
-                } else {
-                    s.bg(with_alpha(theme.colors.hover, 0.55))
-                }
-            })
-            .active(move |s| s.bg(theme.colors.active))
-            .cursor(CursorStyle::PointingHand)
-            .child(svg_icon("icons/cog.svg", icon_muted, px(12.0)))
-            .on_click(open_column_settings)
-            .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
-                let text: SharedString = "History columns".into();
-                let mut changed = false;
-                if *hovering {
-                    changed |= this.set_tooltip_text_if_changed(Some(text.clone()), cx);
-                } else {
-                    changed |= this.clear_tooltip_if_matches(&text, cx);
-                }
-                if changed {
-                    cx.notify();
-                }
-            }));
-        let column_settings_btn = div()
-            .on_children_prepainted(move |children_bounds, _w, _cx| {
-                if let Some(bounds) = children_bounds.first() {
-                    *column_settings_anchor_bounds_for_prepaint.borrow_mut() = Some(*bounds);
-                }
-            })
-            .child(column_settings_btn_inner);
 
         let resize_handle = |id: &'static str, handle: HistoryColResizeHandle| {
             div()
@@ -343,7 +320,12 @@ impl HistoryView {
                 .cursor(CursorStyle::ResizeLeftRight)
                 .hover(move |s| s.bg(theme.colors.hover))
                 .active(move |s| s.bg(theme.colors.active))
-                .child(div().w(px(1.0)).h(px(14.0)).bg(theme.colors.border))
+                .child(
+                    div()
+                        .w(scaled_px(1.0))
+                        .h(scaled_px(14.0))
+                        .bg(theme.colors.border),
+                )
                 .on_drag(handle, |_handle, _offset, _window, cx| {
                     cx.new(|_cx| HistoryColResizeDragGhost)
                 })
@@ -354,111 +336,51 @@ impl HistoryView {
                         if handle == HistoryColResizeHandle::Graph {
                             this.history_col_graph_auto = false;
                         }
-                        this.history_col_resize = Some(HistoryColResizeState {
-                            handle,
-                            start_x: e.position.x,
-                            start_branch: this.history_col_branch,
-                            start_graph: this.history_col_graph,
-                            start_author: this.history_col_author,
-                            start_date: this.history_col_date,
-                            start_sha: this.history_col_sha,
-                        });
-                        cx.notify();
-                    }),
-                )
-                .on_drag_move(cx.listener(
-                    move |this, e: &gpui::DragMoveEvent<HistoryColResizeHandle>, _w, cx| {
-                        let Some(state) = this.history_col_resize else {
-                            return;
-                        };
-                        if state.handle != *e.drag(cx) {
-                            return;
-                        }
-
-                        let dx = e.event.position.x - state.start_x;
-                        let available_width =
-                            super::history_columns_available_width(this.last_window_size.width);
-                        let show_author_pref = this.history_show_author;
-                        let show_date_pref = this.history_show_date;
-                        let show_sha_pref = this.history_show_sha;
+                        let available_width = this.history_content_width;
                         let drag_layout = super::HistoryColumnDragLayout {
-                            show_author: show_author_pref,
-                            show_date: show_date_pref,
-                            show_sha: show_sha_pref,
+                            show_graph: this.history_show_graph,
+                            show_author: this.history_show_author,
+                            show_date: this.history_show_date,
+                            show_sha: this.history_show_sha,
                             branch_w: this.history_col_branch,
                             graph_w: this.history_col_graph,
                             author_w: this.history_col_author,
                             date_w: this.history_col_date,
                             sha_w: this.history_col_sha,
                         };
-                        let mut changed = false;
-                        match state.handle {
-                            HistoryColResizeHandle::Branch => {
-                                let candidate = state.start_branch + dx;
-                                let next = super::history_column_drag_clamped_width(
-                                    HistoryColResizeHandle::Branch,
-                                    candidate,
-                                    available_width,
-                                    drag_layout,
-                                );
-                                if this.history_col_branch != next {
-                                    this.history_col_branch = next;
-                                    changed = true;
-                                }
-                            }
-                            HistoryColResizeHandle::Graph => {
-                                let candidate = state.start_graph + dx;
-                                let next = super::history_column_drag_clamped_width(
-                                    HistoryColResizeHandle::Graph,
-                                    candidate,
-                                    available_width,
-                                    drag_layout,
-                                );
-                                if this.history_col_graph != next {
-                                    this.history_col_graph = next;
-                                    changed = true;
-                                }
-                            }
-                            HistoryColResizeHandle::Author => {
-                                let candidate = state.start_author - dx;
-                                let next = super::history_column_drag_clamped_width(
-                                    HistoryColResizeHandle::Author,
-                                    candidate,
-                                    available_width,
-                                    drag_layout,
-                                );
-                                if this.history_col_author != next {
-                                    this.history_col_author = next;
-                                    changed = true;
-                                }
-                            }
-                            HistoryColResizeHandle::Date => {
-                                let candidate = state.start_date - dx;
-                                let next = super::history_column_drag_clamped_width(
-                                    HistoryColResizeHandle::Date,
-                                    candidate,
-                                    available_width,
-                                    drag_layout,
-                                );
-                                if this.history_col_date != next {
-                                    this.history_col_date = next;
-                                    changed = true;
-                                }
-                            }
-                            HistoryColResizeHandle::Sha => {
-                                let candidate = state.start_sha - dx;
-                                let next = super::history_column_drag_clamped_width(
-                                    HistoryColResizeHandle::Sha,
-                                    candidate,
-                                    available_width,
-                                    drag_layout,
-                                );
-                                if this.history_col_sha != next {
-                                    this.history_col_sha = next;
-                                    changed = true;
-                                }
-                            }
+                        this.history_col_resize = Some(super::history_column_resize_state(
+                            handle,
+                            e.position.x,
+                            available_width,
+                            drag_layout,
+                            this.ui_scale_percent,
+                        ));
+                        cx.notify();
+                    }),
+                )
+                .on_drag_move(cx.listener(
+                    move |this, e: &gpui::DragMoveEvent<HistoryColResizeHandle>, _w, cx| {
+                        let Some(mut state) = this.history_col_resize else {
+                            return;
+                        };
+                        if state.handle != *e.drag(cx) {
+                            return;
                         }
+
+                        let available_width = this.history_content_width;
+                        let next = super::history_column_drag_clamped_width_for_state(
+                            &mut state,
+                            e.event.position.x,
+                            available_width,
+                            this.ui_scale_percent,
+                        );
+                        let width = this.history_column_width_mut(state.handle);
+                        let changed = *width != next;
+                        if changed {
+                            *width = next;
+                            this.sync_history_column_design_widths_from_pixels();
+                        }
+                        this.history_col_resize = Some(state);
                         if changed {
                             cx.notify();
                         }
@@ -483,7 +405,7 @@ impl HistoryView {
         let mut header = div()
             .relative()
             .flex()
-            .h(px(24.0))
+            .h(scaled_px(24.0))
             .w_full()
             .items_center()
             .px_2()
@@ -508,13 +430,13 @@ impl HistoryView {
                             })
                             .child(
                                 div()
-                                    .id("history_scope_header")
+                                    .id("history_mode_header")
                                     .flex()
                                     .items_center()
                                     .gap_1()
                                     .px_1()
-                                    .h(px(18.0))
-                                    .line_height(px(18.0))
+                                    .h(scaled_px(18.0))
+                                    .line_height(scaled_px(18.0))
                                     .rounded(px(theme.radii.row))
                                     .when(scope_active, |d| d.bg(theme.colors.active))
                                     .hover(move |s| {
@@ -533,7 +455,11 @@ impl HistoryView {
                                             .whitespace_nowrap()
                                             .child(scope_label.clone()),
                                     )
-                                    .child(svg_icon("icons/chevron_down.svg", icon_muted, px(12.0)))
+                                    .child(svg_icon(
+                                        "icons/chevron_down.svg",
+                                        icon_muted,
+                                        scaled_px(12.0),
+                                    ))
                                     .when_some(scope_repo_id, |this, repo_id| {
                                         let scope_invoker = scope_invoker.clone();
                                         let scope_anchor_bounds_for_click =
@@ -573,7 +499,8 @@ impl HistoryView {
                                     })
                                     .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
                                         let text: SharedString =
-                                            "History scope (Current branch / All branches)".into();
+                                            crate::view::history_mode::HISTORY_MODE_TOOLTIP_TEXT
+                                                .into();
                                         let mut changed = false;
                                         if *hovering {
                                             changed |= this.set_tooltip_text_if_changed(
@@ -590,24 +517,23 @@ impl HistoryView {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .w(self.history_col_graph)
-                    .flex()
-                    .justify_center()
-                    .px(cell_pad)
-                    .font_family(".SystemUIFont")
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .child("GRAPH"),
-            )
+            .when(show_graph, |header| {
+                header.child(
+                    div()
+                        .w(self.history_col_graph)
+                        .flex()
+                        .justify_center()
+                        .px(cell_pad)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child("GRAPH"),
+                )
+            })
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
                     .flex()
-                    .items_center()
-                    .justify_between()
                     .px(cell_pad)
                     .whitespace_nowrap()
                     .overflow_hidden()
@@ -618,8 +544,7 @@ impl HistoryView {
                             .line_clamp(1)
                             .whitespace_nowrap()
                             .child("COMMIT MESSAGE"),
-                    )
-                    .child(column_settings_btn),
+                    ),
             )
             .when(show_author, |header| {
                 header.child(
@@ -665,16 +590,18 @@ impl HistoryView {
             );
         }
 
-        let mut header_with_handles = header
-            .child(
-                resize_handle("history_col_resize_branch", HistoryColResizeHandle::Branch)
-                    .left((self.history_col_branch - handle_half).max(px(0.0))),
-            )
-            .child(
+        let mut header_with_handles = header.child(
+            resize_handle("history_col_resize_branch", HistoryColResizeHandle::Branch)
+                .left((self.history_col_branch - handle_half).max(px(0.0))),
+        );
+
+        if show_graph {
+            header_with_handles = header_with_handles.child(
                 resize_handle("history_col_resize_graph", HistoryColResizeHandle::Graph).left(
                     (self.history_col_branch + self.history_col_graph - handle_half).max(px(0.0)),
                 ),
             );
+        }
 
         if show_author {
             let right_fixed = col_author

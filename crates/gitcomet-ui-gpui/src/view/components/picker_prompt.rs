@@ -1,6 +1,7 @@
-use super::CONTROL_HEIGHT_MD_PX;
-use crate::kit::{Scrollbar, TextInput};
+use super::control_height_md;
+use crate::kit::{Scrollbar, ScrollbarAxis, TextInput};
 use crate::theme::AppTheme;
+use crate::ui_scale::UiScale;
 use gpui::prelude::*;
 use gpui::{
     ClickEvent, CursorStyle, Div, Entity, FontWeight, ScrollHandle, SharedString, Window, div, px,
@@ -48,11 +49,14 @@ impl PickerPrompt {
     pub fn render<V: 'static>(
         self,
         theme: AppTheme,
+        ui_scale: impl Into<UiScale>,
         cx: &gpui::Context<V>,
         on_select: impl Fn(&mut V, usize, &ClickEvent, &mut Window, &mut gpui::Context<V>) + 'static,
     ) -> Div {
         let on_select: Arc<OnSelectFn<V>> = Arc::new(on_select);
         let scroll_handle = self.scroll_handle;
+        let ui_scale = ui_scale.into();
+        let scaled_px = |value| ui_scale.px(value);
 
         let query = self
             .query_input
@@ -83,12 +87,13 @@ impl PickerPrompt {
         if matches.is_empty() {
             list = list.child(
                 div()
-                    .h(px(CONTROL_HEIGHT_MD_PX))
+                    .h(control_height_md(ui_scale))
                     .w_full()
                     .flex()
                     .items_center()
-                    .px_2()
+                    .px(scaled_px(8.0))
                     .text_sm()
+                    .line_height(scaled_px(18.0))
                     .text_color(theme.colors.text_muted)
                     .child(self.empty_text),
             );
@@ -101,11 +106,11 @@ impl PickerPrompt {
                     div()
                         .id(("picker_prompt_item", original_index))
                         .debug_selector(move || format!("picker_prompt_item_{original_index}"))
-                        .h(px(CONTROL_HEIGHT_MD_PX))
+                        .h(control_height_md(ui_scale))
                         .w_full()
                         .flex()
                         .items_center()
-                        .px_2()
+                        .px(scaled_px(8.0))
                         .rounded(px(theme.radii.row))
                         .hover(move |s| s.bg(theme.colors.hover))
                         .active(move |s| s.bg(theme.colors.active))
@@ -118,6 +123,9 @@ impl PickerPrompt {
             }
         }
 
+        let scrollbar_gutter =
+            Scrollbar::visible_gutter(scroll_handle.clone(), ScrollbarAxis::Vertical);
+        let list = list.pr(scrollbar_gutter);
         let scrollbar = {
             let scrollbar = Scrollbar::new("picker_prompt_scrollbar", scroll_handle);
             #[cfg(test)]
@@ -141,7 +149,7 @@ impl PickerPrompt {
 struct Match {
     index: usize,
     range: Option<Range<usize>>,
-    sort_key: (usize, usize, String),
+    sort_key: (usize, usize, SharedString),
 }
 
 fn match_items(items: &[SharedString], query: &str) -> Vec<Match> {
@@ -152,21 +160,30 @@ fn match_items(items: &[SharedString], query: &str) -> Vec<Match> {
             .map(|(index, label)| Match {
                 index,
                 range: None,
-                sort_key: (0, label.len(), label.to_string()),
+                sort_key: (0, label.len(), label.clone()),
             })
             .collect();
     }
 
     let mut out = Vec::with_capacity(items.len());
+    let needle_bytes = query.as_bytes();
+    let first_lower = needle_bytes[0].to_ascii_lowercase();
+    let first_upper = needle_bytes[0].to_ascii_uppercase();
+
     for (index, label) in items.iter().enumerate() {
-        let Some(range) = find_ascii_case_insensitive(label, query) else {
+        let Some(range) = find_ascii_case_insensitive_precomputed(
+            label.as_bytes(),
+            needle_bytes,
+            first_lower,
+            first_upper,
+        ) else {
             continue;
         };
         let start = range.start;
         out.push(Match {
             index,
             range: Some(range),
-            sort_key: (start, label.len(), label.to_string()),
+            sort_key: (start, label.len(), label.clone()),
         });
     }
 
@@ -205,19 +222,29 @@ fn highlighted_label(
         .child(suffix.to_string())
 }
 
-fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<Range<usize>> {
-    if needle.is_empty() {
+/// Substring search with precomputed first-byte lowercase/uppercase values.
+/// Skips positions where the first byte cannot match, avoiding the inner loop
+/// overhead for most non-matching positions.
+fn find_ascii_case_insensitive_precomputed(
+    haystack_bytes: &[u8],
+    needle_bytes: &[u8],
+    first_lower: u8,
+    first_upper: u8,
+) -> Option<Range<usize>> {
+    if needle_bytes.is_empty() {
         return Some(0..0);
     }
-
-    let haystack_bytes = haystack.as_bytes();
-    let needle_bytes = needle.as_bytes();
-    if needle_bytes.len() > haystack_bytes.len() {
+    if haystack_bytes.len() < needle_bytes.len() {
         return None;
     }
 
-    'outer: for start in 0..=(haystack_bytes.len() - needle_bytes.len()) {
-        for (offset, needle_byte) in needle_bytes.iter().copied().enumerate() {
+    let end = haystack_bytes.len() - needle_bytes.len();
+    'outer: for start in 0..=end {
+        let first = haystack_bytes[start];
+        if first != first_lower && first != first_upper {
+            continue;
+        }
+        for (offset, needle_byte) in needle_bytes.iter().copied().enumerate().skip(1) {
             let haystack_byte = haystack_bytes[start + offset];
             if !haystack_byte.eq_ignore_ascii_case(&needle_byte) {
                 continue 'outer;
@@ -227,4 +254,32 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<Range<usi
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_items_skips_queries_longer_than_candidate_labels() {
+        let items = vec!["ab".into(), "alphabet".into()];
+
+        let matches = match_items(&items, "alphabet soup");
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn ascii_matcher_returns_none_when_needle_is_longer_than_haystack() {
+        let needle = b"alphabet soup";
+
+        let range = find_ascii_case_insensitive_precomputed(
+            b"ab",
+            needle,
+            needle[0].to_ascii_lowercase(),
+            needle[0].to_ascii_uppercase(),
+        );
+
+        assert_eq!(range, None);
+    }
 }

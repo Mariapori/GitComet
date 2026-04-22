@@ -1,4 +1,4 @@
-## <img alt="GitComet logo" src="assets/gitcomet_logo.svg" width="26" /> GitComet 
+## <img alt="GitComet logo" src="assets/gitcomet_logo.svg" width="26" /> GitComet
 
 [![Build Status](https://github.com/Auto-Explore/GitComet/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/Auto-Explore/GitComet/actions/workflows/rust.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/2ufDGP8RnA)
@@ -20,42 +20,54 @@ Available for Linux, Windows, and macOS.
 
 Download the latest prebuilt binaries/installers from [GitHub Releases](https://github.com/Auto-Explore/GitComet/releases).
 
-#### Homebrew (macOs / Linux)
+<details>
+<summary>Windows</summary>
 
-install app from tap (recommended):
+Download the latest Windows installer or portable binary from [GitHub Releases](https://github.com/Auto-Explore/GitComet/releases).
+
+Install from the Microsoft Store:
+
+<a href="https://apps.microsoft.com/detail/XPFD182V1H793R?referrer=appbadge&mode=full" target="_blank"  rel="noopener noreferrer">
+  <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"/>
+</a>
+
+</details>
+
+<details>
+<summary>Homebrew (macOS / Linux)</summary>
+
+App and `gitcomet` command from tap:
 
 ```bash
 brew tap auto-explore/gitcomet
 brew install --cask gitcomet
 ```
 
+On Linux, the cask installs the AppImage build. If your system cannot launch AppImages, use the APT repo, AUR package, release tarball, or `.deb` instead.
 
-**MacOS Troubleshooting:** If you downloaded the app manually and macOS reports that GitComet *"is damaged and can't be opened"*, this is due to Apple's Gatekeeper quarantine for apps downloaded outside the App Store. To resolve this, run the following command in your terminal to remove the quarantine attribute:
+</details>
 
-```bash
-xattr -d com.apple.quarantine /Applications/GitComet.app
-```
-
-optional CLI install:
-
-```bash
-brew install gitcomet-cli
-```
-
-#### AUR (Arch Linux)
+<details>
+<summary>AUR (Arch Linux)</summary>
 
 ```bash
 git clone https://aur.archlinux.org/gitcomet.git
 cd gitcomet && makepkg -si
 ```
 
-#### GURU (Gentoo Linux)
+</details>
+
+<details>
+<summary>GURU (Gentoo Linux)</summary>
 
 ```bash
 emerge --ask dev-vcs/gitcomet
 ```
 
-#### apt (Debian/Ubuntu)
+</details>
+
+<details>
+<summary>apt (Debian/Ubuntu)</summary>
 
 ```bash
 curl -fsSL https://apt.gitcomet.dev/gitcomet-archive-keyring.gpg | sudo tee /usr/share/keyrings/gitcomet-archive-keyring.gpg >/dev/null
@@ -63,6 +75,14 @@ curl -fsSL https://apt.gitcomet.dev/gitcomet.sources | sudo tee /etc/apt/sources
 sudo apt update
 sudo apt install gitcomet
 ```
+
+If you install a Linux tarball or Homebrew binary on Debian, Ubuntu, or WSLg instead of the official `apt` package, install the GUI runtime libraries separately:
+
+```bash
+sudo apt install libxcb1 libxkbcommon0 libxkbcommon-x11-0
+```
+
+</details>
 
 ### Requirements
 
@@ -77,20 +97,6 @@ GitComet requires a local Git installation of `2.50` or newer.
 ### Why GitComet
 
 GitComet started from frustration with existing tools on huge codebases like Chromium. We could not find a product that stays responsive and functional when browsing large repositories and file diffs.
-
-#### Chromium benchmark snapshot
-
-| Tool | Version | Time to open Chromium repo | Memory while opening |
-| --- | --- | ---: | ---: |
-| GitComet | v0.2.0 | 1s | 265MB |
-| GitFiend | v0.45.3 | 1s | 289MB |
-| SourceGit | v2026.6 | 3.5s | 301MB |
-| SmartGit | v25.1.110 | 18s | 4.8GB |
-| GitKraken | v11.10.0 | 25s | 2GB |
-| Megit | v0.10.0 | 29s | 14.4GB |
-| Gittyup | v2.0.0 | 43s | 2.5GB + 1.5GB indexer |
-
-Measured on Linux 6.19.6-zen (x64), Ryzen 5950x, 128GB DDR4. Detailed test steps will be published.
 
 ### Editions (planned)
 
@@ -114,7 +120,7 @@ Measured on Linux 6.19.6-zen (x64), Ryzen 5950x, 128GB DDR4. Detailed test steps
   - Code test coverage workflows
   - GitHub and Azure DevOps integrations
   - Priority improvements during early access
-- Join waitlist: [gitcomet.dev/#pricing](https://gitcomet.dev/#pricing)
+- Join waitlist: [gitcomet.dev/#editions](https://gitcomet.dev/#editions)
 
 ### Build from source
 
@@ -212,6 +218,14 @@ Also reads `LOCAL`/`REMOTE`/`MERGED`/`BASE` from environment. Base is optional f
 #### Compatibility
 
 KDiff3 and Meld invocation forms are supported (`--L1/--L2/--L3`, `-o/--output/--out`, `--base`, positional arguments), so GitComet can be a drop-in replacement.
+
+### Themes
+
+GitComet supports built-in themes and user-provided custom themes.
+
+Built-in themes are embedded in the GitComet binary. Custom themes are loaded from JSON bundle files in your per-user themes directory, which GitComet creates on startup.
+
+The full theme guide, including file locations, schema details, example bundles, and override behavior, now lives in [THEMES.md](docs/themes.md).
 
 ### Crash logs
 

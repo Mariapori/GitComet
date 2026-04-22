@@ -1,24 +1,35 @@
 use crate::assets::GitCometAssets;
 use crate::launch_guard::{UiLaunchError, run_with_panic_guard};
+use crate::ui_scale;
 use crate::view::{
     FocusedMergetoolLabels, FocusedMergetoolViewConfig, GitCometView, GitCometViewConfig,
-    GitCometViewMode, StartupCrashReport,
+    GitCometViewMode, InitialRepositoryLaunchMode, SettingsWindowView, StartupCrashReport,
+    TextInputCommitSubmit, TextInputDiffNextChange, TextInputDiffNextFile,
+    TextInputDiffNextSearchMatchOrChange, TextInputDiffPrevChange, TextInputDiffPrevFile,
+    TextInputDiffPrevSearchMatchOrChange,
 };
+use gitcomet_core::path_utils::canonicalize_or_original;
 use gitcomet_core::services::GitBackend;
 use gitcomet_state::session;
 use gitcomet_state::store::AppStore;
+#[cfg(target_os = "windows")]
+use gpui::WindowsPlatform;
 #[cfg(target_os = "macos")]
 use gpui::{Action, Menu, MenuItem, OsAction, SystemMenuType};
 use gpui::{
-    App, AppContext, Application, BorrowAppContext, Bounds, KeyBinding, TitlebarOptions,
-    WindowBounds, WindowDecorations, WindowOptions, actions, point, px, size,
+    App, AppContext, BorrowAppContext, Bounds, KeyBinding, Pixels, Point, Size, TitlebarOptions,
+    Window, WindowBounds, WindowDecorations, WindowOptions, actions, point, px, size,
 };
+#[cfg(target_os = "windows")]
+use raw_window_handle::RawWindowHandle;
 use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(target_os = "macos")]
 use schemars::JsonSchema;
 #[cfg(target_os = "macos")]
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -46,6 +57,9 @@ actions!(
         MinimizeWindow,
         ZoomWindow,
         ToggleFullScreen,
+        IncreaseUiScale,
+        DecreaseUiScale,
+        ResetUiScale,
         Hide,
         HideOthers,
         ShowAll,
@@ -75,6 +89,29 @@ struct WindowLaunchConfig {
     title: String,
     app_id: String,
     view_config: GitCometViewConfig,
+}
+
+pub(crate) fn main_window_min_size_for_percent(percent: u32) -> Size<Pixels> {
+    ui_scale::design_size_from_percent(WINDOW_MIN_WIDTH_PX, WINDOW_MIN_HEIGHT_PX, percent)
+}
+
+fn main_window_default_size_for_percent(percent: u32) -> Size<Pixels> {
+    ui_scale::design_size_from_percent(WINDOW_DEFAULT_WIDTH_PX, WINDOW_DEFAULT_HEIGHT_PX, percent)
+}
+
+fn window_traffic_light_position(_percent: u32) -> Point<Pixels> {
+    point(px(9.0), px(9.0))
+}
+
+pub(crate) fn ensure_window_respects_min_size(window: &mut Window, min_size: Size<Pixels>) {
+    let current = window.viewport_size();
+    let next = size(
+        current.width.max(min_size.width),
+        current.height.max(min_size.height),
+    );
+    if next != current {
+        window.resize(next);
+    }
 }
 
 pub fn run(backend: Arc<dyn GitBackend>) -> Result<(), UiLaunchError> {
@@ -115,10 +152,26 @@ fn normal_launch_config(
     initial_path: Option<PathBuf>,
     startup_crash_report: Option<StartupCrashReport>,
 ) -> WindowLaunchConfig {
+    let mut view_config = GitCometViewConfig::normal(startup_crash_report);
+    view_config.initial_path = initial_path;
     WindowLaunchConfig {
         title: "GitComet".to_string(),
         app_id: "gitcomet".to_string(),
-        view_config: GitCometViewConfig::normal(initial_path, startup_crash_report),
+        view_config,
+    }
+}
+
+fn normal_launch_config_with_initial_repository(
+    initial_path: PathBuf,
+    startup_crash_report: Option<StartupCrashReport>,
+) -> WindowLaunchConfig {
+    WindowLaunchConfig {
+        title: "GitComet".to_string(),
+        app_id: "gitcomet".to_string(),
+        view_config: GitCometViewConfig::normal_with_initial_repository(
+            initial_path,
+            startup_crash_report,
+        ),
     }
 }
 
@@ -131,6 +184,7 @@ fn focused_mergetool_launch_config(
         app_id: "gitcomet-mergetool".to_string(),
         view_config: GitCometViewConfig {
             initial_path: Some(config.repo_path.clone()),
+            initial_repository_launch_mode: InitialRepositoryLaunchMode::RestoreSession,
             view_mode: GitCometViewMode::FocusedMergetool,
             focused_mergetool: Some(FocusedMergetoolViewConfig {
                 repo_path: config.repo_path.clone(),
@@ -155,9 +209,133 @@ fn focused_mergetool_window_title(conflicted_file_path: &Path) -> String {
     format!("GitComet - Mergetool ({display})")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowZoomAction {
+    Zoom,
+    Restore,
+}
+
+pub(crate) fn window_zoom_action(is_maximized: bool) -> WindowZoomAction {
+    if cfg!(target_os = "windows") && is_maximized {
+        WindowZoomAction::Restore
+    } else {
+        WindowZoomAction::Zoom
+    }
+}
+
+pub(crate) fn toggle_window_zoom(window: &Window) {
+    match window_zoom_action(window.is_maximized()) {
+        WindowZoomAction::Zoom => window.zoom_window(),
+        WindowZoomAction::Restore => {
+            #[cfg(target_os = "windows")]
+            if restore_maximized_window(window) {
+                return;
+            }
+
+            window.zoom_window();
+        }
+    }
+}
+
+pub(crate) fn show_window_system_menu(window: &Window, position: Point<Pixels>) {
+    #[cfg(target_os = "windows")]
+    if show_windows_window_system_menu(window, position) {
+        return;
+    }
+
+    window.show_window_menu(position);
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn application() -> gpui::Application {
+    gpui::Application::with_platform(Rc::new(
+        WindowsPlatform::new(false).expect("failed to initialize Windows platform"),
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn application() -> gpui::Application {
+    gpui::application()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn window_menu_position(position: Point<Pixels>, scale_factor: f32) -> (i32, i32) {
+    (
+        (f32::from(position.x) * scale_factor).round() as i32,
+        (f32::from(position.y) * scale_factor).round() as i32,
+    )
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WindowSystemMenuRequest {
+    pub hwnd: isize,
+    pub x: i32,
+    pub y: i32,
+}
+
+#[cfg(target_os = "windows")]
+fn window_hwnd(window: &Window) -> Option<isize> {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return None;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+
+    Some(handle.hwnd.get())
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn begin_window_move(window: &Window) {
+    if let Some(hwnd) = window_hwnd(window)
+        && gitcomet_win32_window_utils::begin_window_move(hwnd)
+    {
+        return;
+    }
+
+    window.start_window_move();
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn begin_window_move(window: &Window) {
+    window.start_window_move();
+}
+
+#[cfg(target_os = "windows")]
+fn restore_maximized_window(window: &Window) -> bool {
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+
+    // GPUI's Windows zoom path currently maps directly to SW_MAXIMIZE, so
+    // restore must go through the native Win32 API until upstream toggles.
+    gitcomet_win32_window_utils::restore_window(hwnd)
+}
+
+#[cfg(target_os = "windows")]
+fn show_windows_window_system_menu(window: &Window, position: Point<Pixels>) -> bool {
+    let Some(request) = window_system_menu_request(window, position) else {
+        return false;
+    };
+
+    gitcomet_win32_window_utils::show_window_system_menu(request.hwnd, request.x, request.y);
+    true
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn window_system_menu_request(
+    window: &Window,
+    position: Point<Pixels>,
+) -> Option<WindowSystemMenuRequest> {
+    let (x, y) = window_menu_position(position, window.scale_factor());
+    let hwnd = window_hwnd(window)?;
+    Some(WindowSystemMenuRequest { hwnd, x, y })
+}
+
 fn run_windowed_app(backend: Arc<dyn GitBackend>, launch: WindowLaunchConfig) {
     let quit_when_all_windows_closed = should_quit_when_all_windows_closed(&launch);
-    let application = Application::new().with_assets(GitCometAssets);
+    let application = application().with_assets(GitCometAssets);
 
     #[cfg(target_os = "macos")]
     let open_urls_rx = if launch.view_config.view_mode == GitCometViewMode::Normal {
@@ -183,6 +361,9 @@ fn run_windowed_app(backend: Arc<dyn GitBackend>, launch: WindowLaunchConfig) {
     }
 
     application.run(move |cx: &mut App| {
+        if let Err(err) = crate::bundled_fonts::register(cx) {
+            eprintln!("Failed to register bundled fonts: {err:#}");
+        }
         bind_text_input_keys(cx);
         if quit_when_all_windows_closed {
             cx.on_window_closed(|cx| {
@@ -222,29 +403,33 @@ fn open_gitcomet_window(
     launch: &WindowLaunchConfig,
 ) -> gpui::WindowHandle<GitCometView> {
     let ui_session = session::load();
+    let ui_scale = ui_scale::current_or_initialize_from_session(&ui_session, cx);
+    let min_size = main_window_min_size_for_percent(ui_scale.percent);
+    let default_size = main_window_default_size_for_percent(ui_scale.percent);
     let restored_w = ui_session
         .window_width
         .map(|w| px(w as f32))
-        .unwrap_or(px(WINDOW_DEFAULT_WIDTH_PX))
-        .max(px(WINDOW_MIN_WIDTH_PX));
+        .unwrap_or(default_size.width)
+        .max(min_size.width);
     let restored_h = ui_session
         .window_height
         .map(|h| px(h as f32))
-        .unwrap_or(px(WINDOW_DEFAULT_HEIGHT_PX))
-        .max(px(WINDOW_MIN_HEIGHT_PX));
+        .unwrap_or(default_size.height)
+        .max(min_size.height);
     let bounds = Bounds::centered(None, size(restored_w, restored_h), cx);
     let window_title = launch.title.clone();
     let app_id = launch.app_id.clone();
     let view_config = launch.view_config.clone();
+    let ui_scale_percent = ui_scale.percent;
 
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(WINDOW_MIN_WIDTH_PX), px(WINDOW_MIN_HEIGHT_PX))),
+            window_min_size: Some(min_size),
             titlebar: Some(TitlebarOptions {
                 title: Some(window_title.into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(9.0), px(9.0))),
+                traffic_light_position: Some(window_traffic_light_position(ui_scale_percent)),
             }),
             app_id: Some(app_id),
             window_decorations: Some(WindowDecorations::Client),
@@ -253,6 +438,7 @@ fn open_gitcomet_window(
             ..Default::default()
         },
         move |window, cx| {
+            ui_scale::apply_to_window(window, ui_scale_percent);
             let (store, events) = AppStore::new(Arc::clone(&backend));
             cx.new(|cx| {
                 GitCometView::new_with_config(store, events, view_config.clone(), window, cx)
@@ -260,6 +446,50 @@ fn open_gitcomet_window(
         },
     )
     .expect("failed to open main GitComet window")
+}
+
+fn current_or_default_ui_scale_percent(cx: &mut App) -> u32 {
+    let current = ui_scale::current(cx);
+    if current.initialized {
+        current.percent
+    } else {
+        ui_scale::DEFAULT_UI_SCALE_PERCENT
+    }
+}
+
+fn apply_ui_scale_to_open_windows(cx: &mut App, percent: u32) {
+    for handle in cx.windows() {
+        let _ = handle.update(cx, |root_view, window, cx| {
+            let root_view = match root_view.downcast::<GitCometView>() {
+                Ok(view) => {
+                    view.update(cx, |view, cx| {
+                        view.apply_ui_scale_percent(percent, window, cx);
+                    });
+                    return;
+                }
+                Err(root_view) => root_view,
+            };
+
+            if let Ok(view) = root_view.downcast::<SettingsWindowView>() {
+                view.update(cx, |view, cx| {
+                    view.apply_ui_scale_percent(percent, window, cx);
+                });
+                return;
+            }
+
+            ui_scale::apply_to_window(window, percent);
+        });
+    }
+}
+
+pub(crate) fn set_app_ui_scale_percent(cx: &mut App, percent: u32) {
+    let current = ui_scale::current(cx);
+    let next = ui_scale::set_current(cx, percent);
+    if current.initialized && current.percent == next.percent {
+        return;
+    }
+
+    apply_ui_scale_to_open_windows(cx, next.percent);
 }
 
 fn install_app_actions(cx: &mut App, backend: Arc<dyn GitBackend>) {
@@ -274,13 +504,18 @@ fn install_app_actions(cx: &mut App, backend: Arc<dyn GitBackend>) {
     });
 
     cx.on_action(|_: &OpenSettings, cx| {
-        cx.defer(crate::view::open_settings_window);
+        cx.defer(|cx| {
+            crate::view::open_settings_window(cx);
+        });
     });
 
     let repo_backend = Arc::clone(&backend);
     cx.on_action(move |_: &OpenRepository, cx| {
         let backend = Arc::clone(&repo_backend);
         cx.defer(move |cx| {
+            if active_normal_gitcomet_window_blocks_non_repository_actions(cx) {
+                return;
+            }
             prompt_open_repository(cx, backend);
         });
     });
@@ -289,6 +524,9 @@ fn install_app_actions(cx: &mut App, backend: Arc<dyn GitBackend>) {
     cx.on_action(move |_: &OpenRecentPicker, cx| {
         let backend = Arc::clone(&recent_picker_backend);
         cx.defer(move |cx| {
+            if active_normal_gitcomet_window_blocks_non_repository_actions(cx) {
+                return;
+            }
             open_recent_repository_picker_in_existing_or_new_window(cx, backend);
         });
     });
@@ -333,7 +571,7 @@ fn install_app_actions(cx: &mut App, backend: Arc<dyn GitBackend>) {
         cx.defer(|cx| {
             if let Some(window) = cx.active_window() {
                 let _ = window.update(cx, |_root, window, _cx| {
-                    window.zoom_window();
+                    toggle_window_zoom(window);
                 });
             }
         });
@@ -345,6 +583,23 @@ fn install_app_actions(cx: &mut App, backend: Arc<dyn GitBackend>) {
                     window.toggle_fullscreen();
                 });
             }
+        });
+    });
+    cx.on_action(|_: &IncreaseUiScale, cx| {
+        cx.defer(|cx| {
+            let next = ui_scale::step_up(current_or_default_ui_scale_percent(cx));
+            set_app_ui_scale_percent(cx, next);
+        });
+    });
+    cx.on_action(|_: &DecreaseUiScale, cx| {
+        cx.defer(|cx| {
+            let next = ui_scale::step_down(current_or_default_ui_scale_percent(cx));
+            set_app_ui_scale_percent(cx, next);
+        });
+    });
+    cx.on_action(|_: &ResetUiScale, cx| {
+        cx.defer(|cx| {
+            set_app_ui_scale_percent(cx, ui_scale::DEFAULT_UI_SCALE_PERCENT);
         });
     });
     cx.on_action(|_: &Hide, cx| cx.defer(|cx| cx.hide()));
@@ -382,6 +637,10 @@ fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-w", CloseWindow, None),
         KeyBinding::new("secondary-pageup", PreviousRepository, None),
         KeyBinding::new("secondary-pagedown", NextRepository, None),
+        KeyBinding::new("secondary-+", IncreaseUiScale, None),
+        KeyBinding::new("secondary-=", IncreaseUiScale, None),
+        KeyBinding::new("secondary--", DecreaseUiScale, None),
+        KeyBinding::new("secondary-0", ResetUiScale, None),
         KeyBinding::new("secondary-q", Quit, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("alt-cmd-o", OpenRecentPicker, None),
@@ -420,6 +679,7 @@ fn macos_app_menus() -> Vec<Menu> {
         file_items.push(MenuItem::submenu(Menu {
             name: "Recent Repositories".into(),
             items: recent_repo_items,
+            disabled: false,
         }));
     }
 
@@ -444,10 +704,12 @@ fn macos_app_menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Quit GitComet", Quit),
             ],
+            disabled: false,
         },
         Menu {
             name: "File".into(),
             items: file_items,
+            disabled: false,
         },
         Menu {
             name: "Edit".into(),
@@ -461,6 +723,7 @@ fn macos_app_menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::os_action("Select All", crate::kit::SelectAll, OsAction::SelectAll),
             ],
+            disabled: false,
         },
         Menu {
             name: "Window".into(),
@@ -468,11 +731,16 @@ fn macos_app_menus() -> Vec<Menu> {
                 MenuItem::action("Minimize", MinimizeWindow),
                 MenuItem::action("Zoom", ZoomWindow),
                 MenuItem::separator(),
+                MenuItem::action("Zoom In", IncreaseUiScale),
+                MenuItem::action("Zoom Out", DecreaseUiScale),
+                MenuItem::action("Actual Size", ResetUiScale),
+                MenuItem::separator(),
                 MenuItem::action("Previous Repository", PreviousRepository),
                 MenuItem::action("Next Repository", NextRepository),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Full Screen", ToggleFullScreen),
             ],
+            disabled: false,
         },
     ]
 }
@@ -496,7 +764,7 @@ fn register_macos_open_request_handler(
             }
 
             let backend = Arc::clone(&backend);
-            let _ = cx.update(move |cx| {
+            cx.update(move |cx| {
                 open_repositories_in_existing_or_new_window(cx, backend, paths);
             });
         }
@@ -605,6 +873,11 @@ fn update_active_normal_gitcomet_window<R>(
     window.view.update(cx, f).ok()
 }
 
+fn active_normal_gitcomet_window_blocks_non_repository_actions(cx: &mut App) -> bool {
+    update_active_normal_gitcomet_window(cx, |view, _cx| view.blocks_non_repository_actions())
+        .unwrap_or(false)
+}
+
 fn close_active_window(cx: &mut App) {
     if let Some(window) = cx.active_window() {
         let _ = window.update(cx, |_root, window, _cx| {
@@ -679,7 +952,7 @@ fn focus_existing_repository_window(cx: &mut App, window: &GitCometWindowEntry, 
     cx.add_recent_document(path);
 }
 
-#[allow(dead_code)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn focus_existing_repository_window_for_path(cx: &mut App, path: &Path) -> bool {
     let Some(window) = find_normal_gitcomet_window_for_repo(cx, path) else {
         return false;
@@ -696,7 +969,7 @@ fn normalize_repository_open_path(path: PathBuf) -> PathBuf {
     } else {
         path
     };
-    std::fs::canonicalize(&path).unwrap_or(path)
+    canonicalize_or_original(path)
 }
 
 #[cfg(target_os = "macos")]
@@ -757,6 +1030,42 @@ fn open_recent_repository_picker_in_existing_or_new_window(
     cx.activate(true);
 }
 
+fn show_open_repository_manual_entry_in_window(
+    cx: &mut App,
+    window: &GitCometWindowEntry,
+    show_notice: bool,
+) {
+    let _ = window.handle.update(cx, |root_view, window, cx| {
+        let Ok(view) = root_view.downcast::<GitCometView>() else {
+            return;
+        };
+        view.update(cx, |view, cx| {
+            view.show_open_repo_panel_fallback(Some(window), show_notice, cx);
+        });
+    });
+    if cx.active_window().map(|active| active.window_id()) != Some(window.handle.window_id()) {
+        activate_gitcomet_window(cx, window.handle);
+    }
+}
+
+fn show_open_repository_manual_entry_in_existing_or_new_window(
+    cx: &mut App,
+    backend: Arc<dyn GitBackend>,
+) {
+    if let Some(window) = find_normal_gitcomet_window(cx) {
+        show_open_repository_manual_entry_in_window(cx, &window, true);
+        return;
+    }
+
+    let launch = normal_launch_config(None, None);
+    let window = open_gitcomet_window(cx, backend, &launch);
+    let _ = window.update(cx, |view, window, cx| {
+        view.show_open_repo_panel_fallback(Some(window), true, cx);
+    });
+    activate_gitcomet_window(cx, window.into());
+    cx.activate(true);
+}
+
 fn open_repositories_in_existing_or_new_window(
     cx: &mut App,
     backend: Arc<dyn GitBackend>,
@@ -776,7 +1085,7 @@ fn open_repositories_in_existing_or_new_window(
             continue;
         }
 
-        let launch = normal_launch_config(Some(path), None);
+        let launch = normal_launch_config_with_initial_repository(path, None);
         let window = open_gitcomet_window(cx, Arc::clone(&backend), &launch);
         activate_gitcomet_window(cx, window.into());
         target_window = find_normal_gitcomet_window(cx);
@@ -809,13 +1118,21 @@ fn prompt_open_repository(cx: &mut App, backend: Arc<dyn GitBackend>) {
         let paths = match result {
             Ok(Ok(Some(paths))) => paths,
             Ok(Ok(None)) => return,
-            Ok(Err(_)) | Err(_) => return,
+            Ok(Err(_)) | Err(_) => {
+                cx.update(move |cx| {
+                    show_open_repository_manual_entry_in_existing_or_new_window(
+                        cx,
+                        Arc::clone(&backend),
+                    );
+                });
+                return;
+            }
         };
         let Some(path) = paths.into_iter().next() else {
             return;
         };
 
-        let _ = cx.update(move |cx| {
+        cx.update(move |cx| {
             open_repository_in_existing_or_new_window(cx, Arc::clone(&backend), path);
         });
     })
@@ -846,7 +1163,7 @@ fn prompt_apply_patch(cx: &mut App) {
             return;
         };
 
-        let _ = cx.update(move |cx| {
+        cx.update(move |cx| {
             let Some(window) = find_normal_gitcomet_window(cx) else {
                 return;
             };
@@ -865,7 +1182,7 @@ fn prompt_apply_patch(cx: &mut App) {
 }
 
 #[cfg(target_os = "macos")]
-fn ensure_graphics_device_available(context: &'static str) -> Result<(), UiLaunchError> {
+pub(crate) fn ensure_graphics_device_available(context: &'static str) -> Result<(), UiLaunchError> {
     if metal::Device::all().is_empty() {
         return Err(UiLaunchError::from_launch_failure(
             context,
@@ -876,14 +1193,30 @@ fn ensure_graphics_device_available(context: &'static str) -> Result<(), UiLaunc
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-fn ensure_graphics_device_available(_context: &'static str) -> Result<(), UiLaunchError> {
+#[cfg(target_os = "linux")]
+pub(crate) fn ensure_graphics_device_available(context: &'static str) -> Result<(), UiLaunchError> {
+    let env = crate::linux_gui_env::LinuxGuiEnvironment::detect();
+    if env.session_is_gui_capable() {
+        return Ok(());
+    }
+
+    Err(UiLaunchError::from_launch_failure(
+        context,
+        env.launch_failure_message(),
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn ensure_graphics_device_available(
+    _context: &'static str,
+) -> Result<(), UiLaunchError> {
     Ok(())
 }
 
 fn bind_text_input_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("backspace", crate::kit::Backspace, Some("TextInput")),
+        KeyBinding::new("shift-backspace", crate::kit::Backspace, Some("TextInput")),
         KeyBinding::new("delete", crate::kit::Delete, Some("TextInput")),
         KeyBinding::new(
             "ctrl-backspace",
@@ -902,6 +1235,24 @@ fn bind_text_input_keys(cx: &mut App) {
         ),
         KeyBinding::new("alt-delete", crate::kit::DeleteWordRight, Some("TextInput")),
         KeyBinding::new("enter", crate::kit::Enter, Some("TextInput")),
+        KeyBinding::new("shift-enter", crate::kit::ShiftEnter, Some("TextInput")),
+        KeyBinding::new("secondary-enter", TextInputCommitSubmit, Some("TextInput")),
+        KeyBinding::new("f1", TextInputDiffPrevFile, Some("TextInput")),
+        KeyBinding::new("f4", TextInputDiffNextFile, Some("TextInput")),
+        KeyBinding::new(
+            "f2",
+            TextInputDiffPrevSearchMatchOrChange,
+            Some("TextInput"),
+        ),
+        KeyBinding::new(
+            "f3",
+            TextInputDiffNextSearchMatchOrChange,
+            Some("TextInput"),
+        ),
+        KeyBinding::new("shift-f7", TextInputDiffPrevChange, Some("TextInput")),
+        KeyBinding::new("f7", TextInputDiffNextChange, Some("TextInput")),
+        KeyBinding::new("alt-up", TextInputDiffPrevChange, Some("TextInput")),
+        KeyBinding::new("alt-down", TextInputDiffNextChange, Some("TextInput")),
         KeyBinding::new("left", crate::kit::Left, Some("TextInput")),
         KeyBinding::new("right", crate::kit::Right, Some("TextInput")),
         KeyBinding::new("up", crate::kit::Up, Some("TextInput")),
@@ -973,6 +1324,11 @@ fn bind_text_input_keys(cx: &mut App) {
 }
 
 #[cfg(test)]
+pub(crate) fn bind_text_input_keys_for_test(cx: &mut App) {
+    bind_text_input_keys(cx);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{
@@ -982,7 +1338,9 @@ mod tests {
     use crate::test_support::lock_visual_test;
     use gitcomet_core::error::{Error, ErrorKind};
     use gitcomet_core::services::{GitRepository, Result};
+    use gitcomet_state::msg::Msg;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     struct TestBackend;
 
@@ -992,6 +1350,56 @@ mod tests {
                 "test backend does not open repositories",
             )))
         }
+    }
+
+    fn seed_workspace_repo(
+        cx: &mut gpui::VisualTestContext,
+        store: &AppStore,
+        view: gpui::Entity<GitCometView>,
+    ) {
+        store.dispatch(Msg::OpenRepo(PathBuf::from("/tmp/gitcomet-app-test-repo")));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            cx.update(|window, app| {
+                view.update(app, |this, cx| {
+                    crate::view::test_support::sync_store_snapshot(this, cx)
+                });
+                let _ = window.draw(app);
+            });
+            cx.run_until_parked();
+
+            let ready = cx.update(|_window, app| !view.read(app).blocks_non_repository_actions());
+            if ready {
+                return;
+            }
+
+            if Instant::now() >= deadline {
+                panic!("timed out waiting for the workspace view to leave the splash state");
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn window_zoom_action_restores_only_on_windows_when_already_maximized() {
+        assert_eq!(window_zoom_action(false), WindowZoomAction::Zoom);
+
+        let expected = if cfg!(target_os = "windows") {
+            WindowZoomAction::Restore
+        } else {
+            WindowZoomAction::Zoom
+        };
+        assert_eq!(window_zoom_action(true), expected);
+    }
+
+    #[test]
+    fn window_menu_position_scales_logical_pixels_to_device_pixels() {
+        assert_eq!(
+            window_menu_position(point(px(12.4), px(7.6)), 1.25),
+            (16, 10)
+        );
     }
 
     struct KeyBindingProbe {
@@ -1043,6 +1451,7 @@ mod tests {
                 .on_action(record_action_listener!(crate::kit::DeleteWordLeft))
                 .on_action(record_action_listener!(crate::kit::DeleteWordRight))
                 .on_action(record_action_listener!(crate::kit::Enter))
+                .on_action(record_action_listener!(crate::kit::ShiftEnter))
                 .on_action(record_action_listener!(crate::kit::Left))
                 .on_action(record_action_listener!(crate::kit::Right))
                 .on_action(record_action_listener!(crate::kit::Up))
@@ -1069,6 +1478,21 @@ mod tests {
                 .on_action(record_action_listener!(crate::kit::Copy))
                 .on_action(record_action_listener!(crate::kit::Undo))
                 .on_action(record_action_listener!(crate::kit::Redo))
+                .on_action(record_action_listener!(crate::view::TextInputCommitSubmit))
+                .on_action(record_action_listener!(crate::view::TextInputDiffPrevFile))
+                .on_action(record_action_listener!(crate::view::TextInputDiffNextFile))
+                .on_action(record_action_listener!(
+                    crate::view::TextInputDiffPrevSearchMatchOrChange
+                ))
+                .on_action(record_action_listener!(
+                    crate::view::TextInputDiffNextSearchMatchOrChange
+                ))
+                .on_action(record_action_listener!(
+                    crate::view::TextInputDiffPrevChange
+                ))
+                .on_action(record_action_listener!(
+                    crate::view::TextInputDiffNextChange
+                ))
                 .on_action(record_action_listener!(NewWindow))
                 .on_action(record_action_listener!(OpenSettings))
                 .on_action(record_action_listener!(OpenRepository))
@@ -1080,6 +1504,9 @@ mod tests {
                 .on_action(record_action_listener!(MinimizeWindow))
                 .on_action(record_action_listener!(ZoomWindow))
                 .on_action(record_action_listener!(ToggleFullScreen))
+                .on_action(record_action_listener!(IncreaseUiScale))
+                .on_action(record_action_listener!(DecreaseUiScale))
+                .on_action(record_action_listener!(ResetUiScale))
                 .on_action(record_action_listener!(Hide))
                 .on_action(record_action_listener!(HideOthers))
                 .on_action(record_action_listener!(ShowAll))
@@ -1153,18 +1580,35 @@ mod tests {
             app.clear_key_bindings();
             bind_text_input_keys(app);
             let focus = view.update(app, |view, _cx| view.focus_handle());
-            window.focus(&focus);
+            window.focus(&focus, app);
             let _ = window.draw(app);
         });
 
         let cases: Vec<(&str, &'static str)> = vec![
             ("backspace", crate::kit::Backspace.name()),
+            ("shift-backspace", crate::kit::Backspace.name()),
             ("delete", crate::kit::Delete.name()),
             ("ctrl-backspace", crate::kit::DeleteWordLeft.name()),
             ("ctrl-delete", crate::kit::DeleteWordRight.name()),
             ("alt-backspace", crate::kit::DeleteWordLeft.name()),
             ("alt-delete", crate::kit::DeleteWordRight.name()),
             ("enter", crate::kit::Enter.name()),
+            ("shift-enter", crate::kit::ShiftEnter.name()),
+            ("secondary-enter", crate::view::TextInputCommitSubmit.name()),
+            ("f1", crate::view::TextInputDiffPrevFile.name()),
+            ("f4", crate::view::TextInputDiffNextFile.name()),
+            (
+                "f2",
+                crate::view::TextInputDiffPrevSearchMatchOrChange.name(),
+            ),
+            (
+                "f3",
+                crate::view::TextInputDiffNextSearchMatchOrChange.name(),
+            ),
+            ("shift-f7", crate::view::TextInputDiffPrevChange.name()),
+            ("f7", crate::view::TextInputDiffNextChange.name()),
+            ("alt-up", crate::view::TextInputDiffPrevChange.name()),
+            ("alt-down", crate::view::TextInputDiffNextChange.name()),
             ("left", crate::kit::Left.name()),
             ("right", crate::kit::Right.name()),
             ("up", crate::kit::Up.name()),
@@ -1250,7 +1694,7 @@ mod tests {
             app.clear_key_bindings();
             bind_text_input_keys(app);
             let focus = input.read(app).focus_handle();
-            window.focus(&focus);
+            window.focus(&focus, app);
 
             input.update(app, |input, cx| {
                 input.set_text("alpha", cx);
@@ -1290,7 +1734,7 @@ mod tests {
             app.clear_key_bindings();
             bind_text_input_keys(app);
             let focus = input.read(app).focus_handle();
-            window.focus(&focus);
+            window.focus(&focus, app);
 
             input.update(app, |input, cx| {
                 input.set_text("alpha", cx);
@@ -1335,6 +1779,34 @@ mod tests {
     }
 
     #[test]
+    fn normal_launch_config_keeps_startup_paths_in_restore_session_mode() {
+        let launch = normal_launch_config(Some(PathBuf::from("/repo")), None);
+
+        assert_eq!(
+            launch.view_config.initial_path,
+            Some(PathBuf::from("/repo"))
+        );
+        assert_eq!(
+            launch.view_config.initial_repository_launch_mode,
+            InitialRepositoryLaunchMode::RestoreSession
+        );
+    }
+
+    #[test]
+    fn explicit_repository_launch_config_marks_initial_path_as_explicit() {
+        let launch = normal_launch_config_with_initial_repository(PathBuf::from("/repo"), None);
+
+        assert_eq!(
+            launch.view_config.initial_path,
+            Some(PathBuf::from("/repo"))
+        );
+        assert_eq!(
+            launch.view_config.initial_repository_launch_mode,
+            InitialRepositoryLaunchMode::OpenExplicitly
+        );
+    }
+
+    #[test]
     fn recent_repository_label_formats_repo_name_and_parent() {
         let label = recent_repository_label(Path::new("/Users/sampo/projects/gitcomet"));
         assert_eq!(label, "gitcomet - /Users/sampo/projects");
@@ -1362,7 +1834,7 @@ mod tests {
             app.clear_key_bindings();
             bind_app_keys(app);
             let focus = view.update(app, |view, _cx| view.focus_handle());
-            window.focus(&focus);
+            window.focus(&focus, app);
             let _ = window.draw(app);
         });
 
@@ -1376,6 +1848,10 @@ mod tests {
             ("secondary-shift-w", CloseWindow.name()),
             ("secondary-pageup", PreviousRepository.name()),
             ("secondary-pagedown", NextRepository.name()),
+            ("secondary-+", IncreaseUiScale.name()),
+            ("secondary-=", IncreaseUiScale.name()),
+            ("secondary--", DecreaseUiScale.name()),
+            ("secondary-0", ResetUiScale.name()),
             ("secondary-q", Quit.name()),
         ];
 
@@ -1419,14 +1895,17 @@ mod tests {
         let _visual_guard = lock_visual_test();
         let backend: Arc<dyn GitBackend> = Arc::new(TestBackend);
         let (store, events) = AppStore::new(Arc::clone(&backend));
-        let (_view, cx) =
-            cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
+        let store_for_view = store.clone();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            GitCometView::new(store_for_view, events, None, window, cx)
+        });
 
         cx.update(|window, app| {
             install_app_shortcuts_for_test(app, Arc::clone(&backend));
             let _ = window.draw(app);
             window.activate_window();
         });
+        seed_workspace_repo(cx, &store, view);
 
         assert_eq!(cx.update(|_window, app| app.windows().len()), 1);
         cx.simulate_keystrokes("secondary-,");
@@ -1435,18 +1914,73 @@ mod tests {
     }
 
     #[gpui::test]
-    fn recent_picker_shortcut_opens_the_popover(cx: &mut gpui::TestAppContext) {
+    fn settings_shortcut_reuses_existing_window_and_activates_it(cx: &mut gpui::TestAppContext) {
         let _visual_guard = lock_visual_test();
         let backend: Arc<dyn GitBackend> = Arc::new(TestBackend);
         let (store, events) = AppStore::new(Arc::clone(&backend));
         let (_view, cx) =
             cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
 
+        let main_window = cx.update(|window, app| {
+            install_app_shortcuts_for_test(app, Arc::clone(&backend));
+            let _ = window.draw(app);
+            window.activate_window();
+            window.window_handle()
+        });
+        let main_window_id = main_window.window_id();
+
+        cx.simulate_keystrokes("secondary-,");
+        cx.run_until_parked();
+
+        let settings_window_id = cx.cx.update(|app| {
+            assert_eq!(app.windows().len(), 2);
+            app.windows()
+                .into_iter()
+                .map(|window| window.window_id())
+                .find(|window_id| *window_id != main_window_id)
+                .expect("expected the settings window to be open")
+        });
+
+        cx.cx.update(|app| {
+            let _ = main_window.update(app, |_, window, _cx| {
+                window.activate_window();
+            });
+            assert_eq!(
+                app.active_window().map(|window| window.window_id()),
+                Some(main_window_id),
+                "expected the main window to become active before reopening settings"
+            );
+        });
+
+        cx.simulate_keystrokes("secondary-,");
+        cx.run_until_parked();
+
+        cx.cx.update(|app| {
+            assert_eq!(app.windows().len(), 2);
+            assert_eq!(
+                app.active_window().map(|window| window.window_id()),
+                Some(settings_window_id),
+                "expected reopening settings to activate the existing settings window"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn recent_picker_shortcut_opens_the_popover(cx: &mut gpui::TestAppContext) {
+        let _visual_guard = lock_visual_test();
+        let backend: Arc<dyn GitBackend> = Arc::new(TestBackend);
+        let (store, events) = AppStore::new(Arc::clone(&backend));
+        let store_for_view = store.clone();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            GitCometView::new(store_for_view, events, None, window, cx)
+        });
+
         cx.update(|window, app| {
             install_app_shortcuts_for_test(app, Arc::clone(&backend));
             let _ = window.draw(app);
             window.activate_window();
         });
+        seed_workspace_repo(cx, &store, view);
 
         cx.simulate_keystrokes("secondary-shift-o");
         cx.update(|window, app| {
@@ -1478,6 +2012,75 @@ mod tests {
         cx.simulate_keystrokes("secondary-shift-n");
         cx.run_until_parked();
         assert_eq!(cx.update(|_window, app| app.windows().len()), 3);
+    }
+
+    #[gpui::test]
+    fn close_button_closes_only_the_clicked_window_after_opening_a_new_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        if cfg!(target_os = "macos") {
+            // The custom Min/Max/Close controls are only rendered on non-macOS.
+            return;
+        }
+
+        let _visual_guard = lock_visual_test();
+        let backend: Arc<dyn GitBackend> = Arc::new(TestBackend);
+        let (store, events) = AppStore::new(Arc::clone(&backend));
+        let (_view, cx) =
+            cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
+
+        let first_window_id = cx.update(|window, app| {
+            install_app_shortcuts_for_test(app, Arc::clone(&backend));
+            let _ = window.draw(app);
+            window.activate_window();
+            window.window_handle().window_id()
+        });
+
+        cx.simulate_keystrokes("secondary-n");
+        cx.run_until_parked();
+
+        let second_window_id = cx.cx.update(|app| {
+            assert_eq!(app.windows().len(), 2, "expected two GitComet windows");
+            app.windows()
+                .into_iter()
+                .map(|window| window.window_id())
+                .find(|window_id| *window_id != first_window_id)
+                .expect("expected the new window to remain open")
+        });
+
+        cx.update(|window, app| {
+            let _ = window.draw(app);
+        });
+
+        let close_bounds = cx
+            .debug_bounds("titlebar_win_close")
+            .expect("expected titlebar close control bounds");
+        cx.simulate_mouse_move(close_bounds.center(), None, gpui::Modifiers::default());
+        cx.simulate_mouse_down(
+            close_bounds.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            close_bounds.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+
+        cx.cx.update(|app| {
+            let remaining_windows = app.windows();
+            assert_eq!(
+                remaining_windows.len(),
+                1,
+                "expected the close control to remove only the clicked window"
+            );
+            assert_eq!(
+                remaining_windows[0].window_id(),
+                second_window_id,
+                "expected the new window to remain open after closing the original window"
+            );
+        });
     }
 
     #[gpui::test]
@@ -1520,6 +2123,60 @@ mod tests {
         cx.simulate_keystrokes("secondary-shift-w");
         cx.run_until_parked();
         assert_eq!(cx.cx.update(|app| app.windows().len()), 0);
+    }
+
+    #[gpui::test]
+    fn repository_picker_fallback_reuses_existing_normal_window(cx: &mut gpui::TestAppContext) {
+        let _visual_guard = lock_visual_test();
+        let backend: Arc<dyn GitBackend> = Arc::new(TestBackend);
+        let (store, events) = AppStore::new(Arc::clone(&backend));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| GitCometView::new(store, events, None, window, cx));
+
+        cx.update(|window, app| {
+            let _ = window.draw(app);
+            window.activate_window();
+        });
+
+        assert_eq!(cx.cx.update(|app| app.windows().len()), 1);
+        cx.cx.update(|app| {
+            show_open_repository_manual_entry_in_existing_or_new_window(app, Arc::clone(&backend));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(cx.cx.update(|app| app.windows().len()), 1);
+        cx.update(|_window, app| {
+            assert!(crate::view::test_support::open_repo_panel_visible(
+                view.read(app)
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn repository_picker_fallback_opens_new_normal_window_when_none_exist(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _visual_guard = lock_visual_test();
+        let backend: Arc<dyn GitBackend> = Arc::new(TestBackend);
+
+        assert_eq!(cx.update(|app| app.windows().len()), 0);
+        cx.update(|app| {
+            show_open_repository_manual_entry_in_existing_or_new_window(app, Arc::clone(&backend));
+        });
+        cx.run_until_parked();
+
+        let panel_visible = cx.update(|app| {
+            let entry = find_normal_gitcomet_window(app)
+                .expect("expected a normal GitComet window for manual repository entry");
+            entry
+                .view
+                .update(app, |view, _cx| {
+                    crate::view::test_support::open_repo_panel_visible(view)
+                })
+                .expect("expected to inspect the new GitComet window")
+        });
+        assert_eq!(cx.update(|app| app.windows().len()), 1);
+        assert!(panel_visible);
     }
 
     #[cfg(target_os = "macos")]
